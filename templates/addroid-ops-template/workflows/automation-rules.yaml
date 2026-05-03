@@ -1,0 +1,70 @@
+# AdDroid OSS — automation rules.
+#
+# 自然言語リクエストはこの構造化 DSL に変換してから保存・実行する。
+# LLM は DSL 生成まで、実行時の判定は deterministic rule engine が行う。
+
+rules:
+  - id: pause_zero_cv_campaigns
+    enabled: false
+    schedule: "0 * * * *"
+    scope:
+      level: campaign
+    window:
+      preset: today
+      timezone: account
+    metrics:
+      spend:
+        field: spend
+        unit: currency
+      cv:
+        field: actions
+        actionTypes: ["purchase"]
+        unit: count
+    when:
+      all:
+        - metric: spend
+          gte: 5000
+        - metric: cv
+          eq: 0
+    action:
+      type: set_status
+      status: PAUSED
+      targetLevel: campaign
+    safety:
+      mode: proposal
+
+  - id: raise_budget_low_cpa_campaigns
+    enabled: false
+    schedule: "0 9 * * *"
+    scope:
+      level: campaign
+    window:
+      preset: last_7d
+      timezone: account
+    metrics:
+      spend:
+        field: spend
+        unit: currency
+      cv:
+        field: actions
+        actionTypes: ["purchase"]
+        unit: count
+    computed:
+      cpa: "spend / cv"
+    when:
+      all:
+        - metric: cv
+          gte: 3
+        - metric: cpa
+          lte: 3000
+    action:
+      type: adjust_budget
+      operation: increase_percent
+      percent: 20
+      targetBudgetLevel: auto
+    safety:
+      mode: proposal
+      minConversions: 3
+      maxIncreasePercentPerDay: 20
+      maxDailyBudget: 50000
+      cooldownHours: 24

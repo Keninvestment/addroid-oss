@@ -203,9 +203,10 @@ async function runNonInteractiveSetup(
   lines.push("");
   lines.push("Next steps:");
   lines.push("  1. addroid doctor");
-  lines.push("  2. addroid auth meta");
-  lines.push("  3. addroid accounts select");
-  lines.push("  4. addroid up");
+  lines.push("  2. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
+  lines.push("  3. addroid auth meta");
+  lines.push("  4. addroid accounts select");
+  lines.push("  5. addroid up");
   lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
@@ -355,14 +356,21 @@ async function runInteractiveInit(
         out.push("                  後で `addroid auth meta` を実行してください。");
       }
     }
+    await maybeConfigureLLMProvider({
+      prompt,
+      confirm,
+      out,
+      assumeYes: opts.yes,
+    });
   }
 
   out.push("");
   out.push("Ready.");
   out.push("  1. addroid doctor");
-  out.push("  2. addroid auth meta");
-  out.push("  3. addroid accounts select");
-  out.push("  4. addroid up");
+  out.push("  2. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
+  out.push("  3. addroid auth meta");
+  out.push("  4. addroid accounts select");
+  out.push("  5. addroid up");
   out.push("");
   process.stdout.write(out.join("\n"));
   return 0;
@@ -408,6 +416,72 @@ async function maybeConfigureMetaOAuthSecrets(opts: {
   const result = await writeLocalSecrets(next, opts.env);
   opts.out.push(`  Meta OAuth    : ${result.path} ${result.wrote ? "(updated)" : "(unchanged)"}`);
   return true;
+}
+
+async function maybeConfigureLLMProvider(opts: {
+  prompt: PromptFn;
+  confirm: ConfirmFn;
+  out: string[];
+  assumeYes: boolean;
+}): Promise<void> {
+  if (opts.assumeYes) {
+    opts.out.push("  LLM Provider  : not configured (run `addroid auth llm` after setup)");
+    return;
+  }
+  const shouldConfigure = await opts.confirm("LLM Provider を初期設定しますか?", true);
+  if (!shouldConfigure) {
+    opts.out.push("  LLM Provider  : not configured");
+    return;
+  }
+  const choice = (
+    await opts.prompt(
+      "LLM Provider (openai-api-key / anthropic-api-key / codex-oauth / skip)",
+      "openai-api-key"
+    )
+  )
+    .trim()
+    .toLowerCase();
+
+  if (choice === "skip" || choice === "none") {
+    opts.out.push("  LLM Provider  : skipped");
+    return;
+  }
+  if (choice === "codex-oauth" || choice === "oauth" || choice === "codex") {
+    opts.out.push("  LLM Provider  : Codex OAuth selected");
+    opts.out.push(
+      "                  ADDROID_CODEX_* と ENCRYPTION_KEY を設定後、`addroid up` → http://127.0.0.1:3000/ai から OAuth 接続してください。"
+    );
+    return;
+  }
+
+  const provider =
+    choice === "anthropic" || choice === "anthropic-api-key"
+      ? "anthropic"
+      : choice === "openai" || choice === "openai-api-key"
+        ? "openai"
+        : null;
+  if (!provider) {
+    opts.out.push(`  LLM Provider  : skipped (unknown choice: ${choice})`);
+    return;
+  }
+  const defaultModel =
+    provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1";
+  const model = (await opts.prompt(`${provider} default model`, defaultModel)).trim() || defaultModel;
+  opts.out.push(`  LLM Provider  : configuring ${provider} API key`);
+  process.stdout.write(opts.out.join("\n") + "\n");
+  opts.out.length = 0;
+  const { runAuthCommand } = await import("./auth.js");
+  const code = await runAuthCommand(["llm", "--provider", provider, "--model", model]);
+  opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+  if (code === 0 && provider === "openai") {
+    opts.out.push("  Image Provider: OpenAI API key will also be used for GPT Image 2");
+  }
+  if (code === 0 && provider === "anthropic") {
+    opts.out.push("  Image Provider: GPT Image 2 requires OpenAI API key or Codex app-server");
+  }
+  if (code !== 0) {
+    opts.out.push(`                  後で \`addroid auth llm --provider ${provider}\` を実行してください。`);
+  }
 }
 
 interface ScaffoldResult {
@@ -535,6 +609,7 @@ async function ensureEnvFile(opts: EnvEnsureOptions): Promise<EnvEnsureResult> {
   if (opts.mockIntegrations) {
     updates.ADDROID_META_ADS_CLI_MOCK = "1";
     updates.ADDROID_GITHUB_OAUTH_MOCK = "1";
+    updates.ADDROID_LLM_MOCK = "1";
   }
   if (opts.env.ADDROID_META_CLI_BIN?.trim()) {
     updates.ADDROID_META_CLI_BIN = opts.env.ADDROID_META_CLI_BIN.trim();
@@ -1008,14 +1083,16 @@ function printScaffoldResult(result: ScaffoldResult): void {
   if (!process.env.DATABASE_URL) {
     lines.push("  1. addroid init --interactive    # .env / DB まで対話セットアップ");
     lines.push("  2. addroid doctor");
+    lines.push("  3. addroid auth llm --provider openai");
+    lines.push("  4. addroid auth meta");
+    lines.push("  5. addroid accounts select");
+    lines.push("  6. addroid up");
+  } else {
+    lines.push("  1. addroid doctor");
+    lines.push("  2. addroid auth llm --provider openai");
     lines.push("  3. addroid auth meta");
     lines.push("  4. addroid accounts select");
     lines.push("  5. addroid up");
-  } else {
-    lines.push("  1. addroid doctor");
-    lines.push("  2. addroid auth meta");
-    lines.push("  3. addroid accounts select");
-    lines.push("  4. addroid up");
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -1124,6 +1201,10 @@ function printInitHelp(): void {
       "  --db-push              npm run db:generate && npm run db:push を実行",
       "  --skip-db-push         Prisma schema 反映をスキップ",
       "  --mock-integrations    初回検証用に mock フラグを .env に追加",
+      "",
+      "Interactive setup:",
+      "  LLM Provider は openai-api-key / anthropic-api-key / codex-oauth から選択できます。",
+      "  API key は `addroid auth llm` 経由で ENCRYPTION_KEY により暗号化保存されます。",
       "",
     ].join("\n")
   );

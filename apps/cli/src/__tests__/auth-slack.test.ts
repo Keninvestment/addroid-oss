@@ -119,6 +119,58 @@ test("auth は未対応プロバイダで 2 を返す", async () => {
   assert.match(out.stdout, /addroid auth slack/);
 });
 
+test("auth llm は API key を暗号化して oauth_tokens に保存する", async () => {
+  const calls: unknown[] = [];
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert(args: unknown) {
+        calls.push(args);
+        return {};
+      },
+      async deleteMany() {
+        return { count: 0 };
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(
+          [
+            "llm",
+            "--provider",
+            "openai",
+            "--api-key",
+            "sk-test-openai-key-123456",
+            "--model",
+            "gpt-4.1",
+          ],
+          { prismaOverride }
+        )
+      )
+  );
+  assert.equal(code, 0);
+  assert.match(out.stdout, /api key\s+: encrypted/);
+  assert.equal(out.stdout.includes("sk-test-openai-key"), false);
+  assert.equal(calls.length, 1);
+  const arg = calls[0] as {
+    create: { provider: string; accessTokenCiphertext: string; metadata: Record<string, unknown> };
+  };
+  assert.equal(arg.create.provider, "openai");
+  assert.match(arg.create.accessTokenCiphertext, /^v1\.aes256gcm\./);
+  assert.equal(arg.create.accessTokenCiphertext.includes("sk-test-openai-key"), false);
+  assert.deepEqual(arg.create.metadata, {
+    authKind: "api_key",
+    defaultModel: "gpt-4.1",
+    apiBaseUrl: "https://api.openai.com/v1/chat/completions",
+  });
+});
+
 test("auth slack はトークン未指定で 2 を返す", async () => {
   await withEnv(
     {

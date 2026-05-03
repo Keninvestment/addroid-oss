@@ -46,8 +46,10 @@ export {
   MetaApiError,
   fetchAdAccounts,
   fetchBusinesses,
+  fetchInsights,
   fetchMeProfile,
   type FetchAccountsOptions,
+  type FetchInsightsOptions,
   type MetaMeProfile,
 } from "./api.js";
 export {

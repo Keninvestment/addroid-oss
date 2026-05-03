@@ -13,6 +13,10 @@ import {
   type CodexLLMProviderDeps,
   type CryptoEncryptDecrypt,
 } from "./codex.js";
+import {
+  ApiKeyLLMProvider,
+  type ApiKeyLLMProviderName,
+} from "./api-key.js";
 import { MockLLMProvider, type MockLLMProviderOptions } from "./mock.js";
 import { StubLLMProvider } from "./stub.js";
 import type { CodexOAuthClientConfig } from "./oauth.js";
@@ -28,13 +32,16 @@ export interface SelectLLMProviderOptions {
   chatCompletionsUrl?: string | null;
   /** Codex 既定 model。 */
   defaultModel?: string;
+  /** API key provider を明示採用する場合。 */
+  apiKeyProvider?: ApiKeyLLMProviderName | null;
+  apiKeyChatCompletionsUrl?: string | null;
   mock?: Omit<MockLLMProviderOptions, "tokenStore">;
   fetchImpl?: typeof fetch;
   /** stub に渡す provider 名 (UI に「未設定」と表示する対象)。既定 "codex". */
   stubProvider?: LLMProviderName;
 }
 
-export type LLMProviderChoice = "mock" | "codex" | "stub";
+export type LLMProviderChoice = "mock" | "codex" | "openai_api_key" | "anthropic_api_key" | "stub";
 
 export interface LLMProviderSelection {
   provider: LLMProvider;
@@ -54,6 +61,23 @@ export function selectLLMProvider(
       }),
       choice: "mock",
       reason: "ADDROID_LLM_MOCK=1",
+    };
+  }
+  if (
+    opts.apiKeyProvider &&
+    opts.crypto &&
+    opts.defaultModel
+  ) {
+    return {
+      provider: new ApiKeyLLMProvider({
+        provider: opts.apiKeyProvider,
+        tokenStore: opts.tokenStore,
+        crypto: opts.crypto,
+        defaultModel: opts.defaultModel,
+        chatCompletionsUrl: opts.apiKeyChatCompletionsUrl,
+      }),
+      choice: opts.apiKeyProvider === "anthropic" ? "anthropic_api_key" : "openai_api_key",
+      reason: `${opts.apiKeyProvider} API key credential + crypto boundary configured`,
     };
   }
   if (

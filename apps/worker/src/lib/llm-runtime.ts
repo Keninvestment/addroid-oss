@@ -22,9 +22,12 @@
 //     UI 表示・request.model 省略時のフォールバックに使う。
 
 import {
+  ApiKeyLLMProvider,
   InMemoryLLMProviderTokenStore,
   MockLLMProvider,
+  defaultApiKeyChatUrl,
   selectLLMProvider,
+  type ApiKeyLLMProviderName,
   type CodexOAuthClientConfig,
   type LLMProvider,
   type LLMProviderChoice,
@@ -33,7 +36,7 @@ import {
 } from "@addroid/llm-provider";
 import { getCryptoBoundary, resolveWebBinding } from "@addroid/config";
 import type { CryptoBoundary } from "@addroid/config";
-import type { PrismaClient } from "@addroid/db";
+import type { Prisma, PrismaClient } from "@addroid/db";
 
 /**
  * Prisma の `oauth_tokens` テーブルを裏に持つ `LLMProviderTokenStore`。
@@ -52,7 +55,10 @@ export function createPrismaLLMProviderTokenStore(
 ): LLMProviderTokenStore {
   return {
     async saveOAuthToken(record: LLMProviderTokenRecord): Promise<void> {
-      const metadata = { defaultModel: record.defaultModel };
+      const metadata: Record<string, unknown> = { defaultModel: record.defaultModel };
+      if (record.authKind) metadata.authKind = record.authKind;
+      if (record.apiBaseUrl) metadata.apiBaseUrl = record.apiBaseUrl;
+      const metadataJson = metadata as Prisma.InputJsonValue;
       await prisma.oAuthToken.upsert({
         where: {
           provider_accountIdentifier: {
@@ -66,7 +72,7 @@ export function createPrismaLLMProviderTokenStore(
           refreshTokenCiphertext: record.refreshTokenCiphertext ?? null,
           expiresAt: record.expiresAt ?? null,
           connectedAt: record.connectedAt,
-          metadata,
+          metadata: metadataJson,
         },
         create: {
           provider: record.provider,
@@ -76,7 +82,7 @@ export function createPrismaLLMProviderTokenStore(
           refreshTokenCiphertext: record.refreshTokenCiphertext ?? null,
           expiresAt: record.expiresAt ?? null,
           connectedAt: record.connectedAt,
-          metadata,
+          metadata: metadataJson,
         },
       });
     },
@@ -94,10 +100,13 @@ export function createPrismaLLMProviderTokenStore(
         provider: row.provider as LLMProviderTokenRecord["provider"],
         accountIdentifier: row.accountIdentifier,
         scopes: row.scopes,
+        authKind: extractAuthKind(row.metadata),
         accessTokenCiphertext: row.accessTokenCiphertext,
         connectedAt: row.connectedAt,
         defaultModel,
       };
+      const apiBaseUrl = extractApiBaseUrl(row.metadata);
+      if (apiBaseUrl) out.apiBaseUrl = apiBaseUrl;
       if (row.refreshTokenCiphertext !== null) {
         out.refreshTokenCiphertext = row.refreshTokenCiphertext;
       }
@@ -119,6 +128,18 @@ function extractDefaultModel(metadata: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function extractAuthKind(metadata: unknown): "oauth" | "api_key" | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const value = (metadata as Record<string, unknown>)["authKind"];
+  return value === "oauth" || value === "api_key" ? value : undefined;
+}
+
+function extractApiBaseUrl(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>)["apiBaseUrl"];
+  return typeof value === "string" && /^https:\/\//i.test(value) ? value : null;
+}
+
 export interface WorkerLLMProviderSelection {
   provider: LLMProvider;
   choice: LLMProviderChoice;
@@ -128,6 +149,12 @@ export interface WorkerLLMProviderSelection {
 export interface SelectLLMProviderForWorkerOptions {
   /** 渡されれば Prisma-backed token store を使う。未指定なら InMemory に倒れる。 */
   prisma?: PrismaClient;
+}
+
+export function normalizeLLMProviderName(value: string | undefined | null): ApiKeyLLMProviderName | "codex" | null {
+  const v = value?.trim().toLowerCase();
+  if (v === "openai" || v === "anthropic" || v === "codex") return v;
+  return null;
 }
 
 /**
@@ -221,6 +248,38 @@ export async function selectLLMProviderForWorker(
         : "ADDROID_LLM_MOCK=1 (worker auto-connected the mock provider)",
     };
   }
+  const crypto = tryGetCryptoBoundary(env);
+  const requested = normalizeLLMProviderName(env.ADDROID_LLM_PROVIDER);
+  const apiKeyProviders: ApiKeyLLMProviderName[] =
+    requested === "openai" || requested === "anthropic"
+      ? [requested]
+      : requested === "codex"
+        ? []
+      : ["openai", "anthropic"];
+  if (crypto) {
+    for (const providerName of apiKeyProviders) {
+      const rec = await tokenStore.loadOAuthToken(providerName);
+      if (!rec) continue;
+      const defaultModel = rec.defaultModel;
+      const apiBaseUrl =
+        rec.apiBaseUrl ||
+        env[`ADDROID_${providerName.toUpperCase()}_CHAT_COMPLETIONS_URL`]?.trim() ||
+        defaultApiKeyChatUrl(providerName);
+      return {
+        provider: new ApiKeyLLMProvider({
+          provider: providerName,
+          tokenStore,
+          crypto,
+          defaultModel,
+          chatCompletionsUrl: apiBaseUrl,
+        }),
+        choice: providerName === "anthropic" ? "anthropic_api_key" : "openai_api_key",
+        reason: `${providerName} API key credential found in encrypted token store${
+          opts.prisma ? " (token store: prisma)" : " (token store: in-memory)"
+        }`,
+      };
+    }
+  }
   // Codex/OpenAI/Anthropic を production で使う場合、Prisma-backed token store が
   // 必須 (web の OAuth callback で保存された ciphertext + metadata を読む)。
   // regression fix: factory には codexClient + crypto + chatCompletionsUrl +
@@ -231,7 +290,6 @@ export async function selectLLMProviderForWorker(
   // factory が StubLLMProvider に倒し、analyst runner が `status="failed"` の
   // ai_run を返す (snapshot は保存される — GitOps state は腐らない)。
   const codexClient = loadCodexLLMClientFromEnv(env);
-  const crypto = tryGetCryptoBoundary(env);
   const chatCompletionsUrl = env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || null;
   const defaultModel = env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || undefined;
   const selection = selectLLMProvider({
@@ -251,4 +309,3 @@ export async function selectLLMProviderForWorker(
     reason,
   };
 }
-

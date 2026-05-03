@@ -14,6 +14,8 @@ export interface LLMProviderTokenRecord {
   /** 表示用 identifier。OAuth account / org slug 等。機微ではない。 */
   accountIdentifier: string;
   scopes: string[];
+  /** OAuth token か API key か。旧行/既存 OAuth 行は未指定なら oauth と扱う。 */
+  authKind?: "oauth" | "api_key";
   /** "v1.aes256gcm.iv.tag.payload" 形式の暗号化済み access token。 */
   accessTokenCiphertext: string;
   /** Codex は refresh_token を返すため null 許容で持つ。 */
@@ -22,6 +24,8 @@ export interface LLMProviderTokenRecord {
   connectedAt: Date;
   /** Provider 既定 model (UI 表示 + completion デフォルト)。 */
   defaultModel: string;
+  /** API key provider の chat endpoint。非機微値。 */
+  apiBaseUrl?: string | null;
 }
 
 export interface LLMProviderTokenStore {

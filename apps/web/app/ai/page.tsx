@@ -15,7 +15,7 @@ import { StatusBadge } from "../../components/ui/StatusBadge";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
-import { InlineCode } from "../../components/ui/CodeBlock";
+import { CodeBlock, InlineCode } from "../../components/ui/CodeBlock";
 import { PageHeader } from "../../components/ui/PageHeader";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +29,8 @@ interface ProviderRow {
   connectedAt: Date;
   expiresAt: Date | null;
   defaultModel: string | null;
+  authKind: string | null;
+  apiBaseUrl: string | null;
 }
 
 interface AiRunRow {
@@ -49,6 +51,12 @@ interface AiRunRow {
 function readDefaultModel(metadata: unknown): string | null {
   if (!metadata || typeof metadata !== "object") return null;
   const value = (metadata as Record<string, unknown>)["defaultModel"];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readMetadataString(metadata: unknown, key: string): string | null {
+  if (!metadata || typeof metadata !== "object") return null;
+  const value = (metadata as Record<string, unknown>)[key];
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
@@ -127,6 +135,8 @@ export default async function AiPage() {
       connectedAt: row.connectedAt,
       expiresAt: row.expiresAt,
       defaultModel: readDefaultModel(row.metadata),
+      authKind: readMetadataString(row.metadata, "authKind"),
+      apiBaseUrl: readMetadataString(row.metadata, "apiBaseUrl"),
     }));
     runs = runRows;
   } catch {
@@ -144,8 +154,13 @@ export default async function AiPage() {
   );
   const encryptionKeySet = Boolean((env.ENCRYPTION_KEY ?? "").trim());
 
-  const activeChoice: "mock" | "codex" | "stub" = llmMockEnabled
+  const apiKeyConnected = providers.some(
+    (p) => (p.provider === "openai" || p.provider === "anthropic") && p.authKind === "api_key"
+  );
+  const activeChoice: "mock" | "codex" | "api_key" | "stub" = llmMockEnabled
     ? "mock"
+    : apiKeyConnected
+      ? "api_key"
     : codexClientConfigured && encryptionKeySet
       ? "codex"
       : "stub";
@@ -153,9 +168,9 @@ export default async function AiPage() {
   const codexConnected = providers.some((p) => p.provider === "codex");
   const providerState: StatusState = !dbReady
     ? "warn"
-    : activeChoice === "stub" && !codexConnected
+    : activeChoice === "stub" && !codexConnected && !apiKeyConnected
       ? "warn"
-      : codexConnected || activeChoice === "mock"
+      : codexConnected || apiKeyConnected || activeChoice === "mock"
         ? "ok"
         : "warn";
 
@@ -163,6 +178,8 @@ export default async function AiPage() {
     ? "Prisma スキーマが未反映です。npm run db:push を実行してください。"
     : activeChoice === "mock"
       ? "ADDROID_LLM_MOCK=1 が設定されています。mock LLM provider が有効です (開発用)。"
+      : activeChoice === "api_key"
+        ? "LLM API key が暗号化保存されています。worker は保存済み provider を使用します。"
       : activeChoice === "codex" && codexConnected
         ? `Codex OAuth 連携済み (${providers.filter((p) => p.provider === "codex").length} 件)。`
         : activeChoice === "codex"
@@ -178,6 +195,10 @@ export default async function AiPage() {
     {
       label: "Codex OAuth client",
       value: codexClientConfigured ? "設定済み" : "未設定",
+    },
+    {
+      label: "API key credential",
+      value: apiKeyConnected ? "暗号化保存済み" : "未登録",
     },
     {
       label: "ENCRYPTION_KEY",
@@ -198,6 +219,10 @@ export default async function AiPage() {
       header: "Default model",
       cell: (row) =>
         row.defaultModel ? <InlineCode>{row.defaultModel}</InlineCode> : <span>—</span>,
+    },
+    {
+      header: "Auth",
+      cell: (row) => <InlineCode>{row.authKind ?? (row.provider === "codex" ? "oauth" : "unknown")}</InlineCode>,
     },
     {
       header: "Scopes",
@@ -314,7 +339,7 @@ export default async function AiPage() {
                   description={
                     activeChoice === "mock"
                       ? "ADDROID_LLM_MOCK=1 のため mock provider が選択されています。実 OAuth 連携は不要ですが、本番では Codex を接続してください。"
-                      : "Codex を OAuth で接続するか、ADDROID_LLM_MOCK=1 を設定して mock provider を有効化してください。"
+                      : "OpenAI / Anthropic API key を CLI で暗号化保存するか、Codex OAuth を接続してください。"
                   }
                 />
               ) : (
@@ -325,6 +350,12 @@ export default async function AiPage() {
                   empty={null}
                 />
               )}
+              <CodeBlock>
+                {`npm run addroid -- auth llm --provider openai
+npm run addroid -- auth llm --provider anthropic
+# Codex OAuth を使う場合は ADDROID_CODEX_* 設定後に次の URL を開く
+http://127.0.0.1:3000/api/oauth/codex/begin`}
+              </CodeBlock>
             </div>
           </Panel>
         </div>

@@ -22,10 +22,9 @@
 //     `payload` に絶対に access_token / api_key / signed URL を含めない。
 
 /**
- * 既知の画像生成 Provider 名。`mock` は tests / dev 用。実 Provider adapter は
- * 後続タスクで openai / stability / replicate を順次追加する。
+ * 既知の画像生成 Provider 名。`mock` は tests / dev 用。
  */
-export type ImageProviderName = "openai" | "stability" | "replicate" | "mock";
+export type ImageProviderName = "openai" | "stability" | "replicate" | "codex" | "mock";
 
 /**
  * 1 バリアント分の生成条件。Image Prompt Agent (agents.ts) が生成する

@@ -3,14 +3,19 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import {
+  CodexAppServerImageProvider,
+  InMemoryLLMProviderTokenStore,
   ImageProviderError,
   ImageProviderInvalidRequestError,
   ImageProviderNotConfiguredError,
   MockImageProvider,
   MOCK_IMAGE_MODELS,
+  OpenAIImageProvider,
   selectImageProvider,
   StubImageProvider,
   validateImageGenerateRequest,
+  type CodexAppServerRpcClient,
+  type CodexAppServerRpcNotification,
   type ImageGenerateRequest,
 } from "../index.js";
 
@@ -375,6 +380,153 @@ test("selectImageProvider stub respects stubProvider / stubDefaultModel", async 
 });
 
 // ---------------------------------------------------------------------------
+// OpenAIImageProvider — encrypted API key credential
+// ---------------------------------------------------------------------------
+
+test("OpenAIImageProvider sends API key in Authorization header only and returns bytes", async () => {
+  const tokenStore = new InMemoryLLMProviderTokenStore();
+  const crypto = identityCrypto();
+  await tokenStore.saveOAuthToken({
+    provider: "openai",
+    accountIdentifier: "openai-api-key",
+    scopes: ["api_key"],
+    authKind: "api_key",
+    accessTokenCiphertext: "sk-test-openai-image-key",
+    connectedAt: new Date("2026-01-01T00:00:00.000Z"),
+    defaultModel: "gpt-4.1",
+  });
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const provider = new OpenAIImageProvider({
+    tokenStore,
+    crypto,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(
+        JSON.stringify({
+          data: [{ b64_json: Buffer.from("png-bytes").toString("base64") }],
+        }),
+        { status: 200, headers: { "x-request-id": "req_img_1" } }
+      );
+    },
+  });
+
+  const result = await provider.generateImage({
+    prompt: "広告画像を生成",
+    variationConditions: [{ width: 1024, height: 1024, variantKey: "square" }],
+  });
+
+  assert.equal(result.meta.provider, "openai");
+  assert.equal(result.meta.model, "gpt-image-2");
+  assert.equal(result.meta.requestId, "req_img_1");
+  assert.equal(result.assets[0]!.variantKey, "square");
+  assert.equal(Buffer.from(result.assets[0]!.bytes).toString("utf8"), "png-bytes");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://api.openai.com/v1/images/generations");
+  assert.equal((calls[0]!.init!.headers as Record<string, string>).Authorization, "Bearer sk-test-openai-image-key");
+  const body = JSON.parse(String(calls[0]!.init!.body));
+  assert.equal(body.model, "gpt-image-2");
+  assert.equal(body.size, "1024x1024");
+  assert.equal(body.output_format, "png");
+  assert.equal(body.quality, "medium");
+  assert.doesNotMatch(String(calls[0]!.init!.body), /sk-test-openai-image-key/);
+});
+
+test("OpenAIImageProvider redacts API key from provider errors", async () => {
+  const tokenStore = new InMemoryLLMProviderTokenStore();
+  const crypto = identityCrypto();
+  await tokenStore.saveOAuthToken({
+    provider: "openai",
+    accountIdentifier: "openai-api-key",
+    scopes: ["api_key"],
+    authKind: "api_key",
+    accessTokenCiphertext: "sk-test-openai-image-key",
+    connectedAt: new Date("2026-01-01T00:00:00.000Z"),
+    defaultModel: "gpt-4.1",
+  });
+  const provider = new OpenAIImageProvider({
+    tokenStore,
+    crypto,
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "bad key sk-test-openai-image-key",
+            code: "invalid_api_key",
+          },
+        }),
+        { status: 401 }
+      ),
+  });
+
+  await assert.rejects(
+    () =>
+      provider.generateImage({
+        prompt: "p",
+        variationConditions: [{ width: 1024, height: 1024 }],
+      }),
+    (err) => {
+      assert.ok(err instanceof ImageProviderError);
+      assert.doesNotMatch((err as Error).message, /sk-test-openai-image-key/);
+      assert.doesNotMatch(JSON.stringify((err as ImageProviderError).payload), /sk-test-openai-image-key/);
+      assert.match((err as Error).message, /sk-\[REDACTED\]/);
+      return true;
+    }
+  );
+});
+
+test("selectImageProvider returns OpenAI provider when encrypted credential is available", () => {
+  const sel = selectImageProvider({
+    env: {},
+    tokenStore: new InMemoryLLMProviderTokenStore(),
+    crypto: identityCrypto(),
+    openaiCredentialAvailable: true,
+  });
+  assert.equal(sel.choice, "openai_api_key");
+  assert.equal(sel.optional, false);
+  assert.equal(sel.provider.name, "openai");
+});
+
+// ---------------------------------------------------------------------------
+// CodexAppServerImageProvider — local app-server path
+// ---------------------------------------------------------------------------
+
+test("CodexAppServerImageProvider rejects non-loopback app-server URLs", async () => {
+  const provider = new CodexAppServerImageProvider({
+    externalServerUrl: "ws://example.com:1234",
+  });
+  await assert.rejects(
+    () =>
+      provider.generateImage({
+        prompt: "p",
+        variationConditions: [{ width: 1024, height: 1024 }],
+      }),
+    ImageProviderInvalidRequestError
+  );
+});
+
+test("CodexAppServerImageProvider reads generated savedPath bytes", async () => {
+  const rpc = new FakeCodexRpc("/tmp/generated.png");
+  const provider = new CodexAppServerImageProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:4321", child: null, rpc }),
+    readFileImpl: async (path) => {
+      assert.equal(String(path), "/tmp/generated.png");
+      return Buffer.from("codex-png");
+    },
+  });
+  const result = await provider.generateImage({
+    prompt: "p",
+    variationConditions: [{ width: 1024, height: 1024, variantKey: "v" }],
+  });
+  assert.equal(result.meta.provider, "codex");
+  assert.equal(result.meta.model, "local/codex-image");
+  assert.equal(result.meta.requestId, "thread-1");
+  assert.equal(result.assets[0]!.variantKey, "v");
+  assert.equal(result.assets[0]!.mimeType, "image/png");
+  assert.equal(Buffer.from(result.assets[0]!.bytes).toString("utf8"), "codex-png");
+  assert.deepEqual(rpc.methods, ["thread/start", "turn/start"]);
+});
+
+// ---------------------------------------------------------------------------
 // PNG sanity helpers (used in MockImageProvider tests)
 // ---------------------------------------------------------------------------
 
@@ -397,4 +549,63 @@ function assertValidPng(bytes: Uint8Array, expectedWidth: number, expectedHeight
   // Last 12 bytes: IEND chunk = 00 00 00 00 49 45 4e 44 ae 42 60 82
   const iendType = buf.toString("ascii", buf.length - 8, buf.length - 4);
   assert.equal(iendType, "IEND");
+}
+
+function identityCrypto() {
+  return {
+    encrypt(value: string): string {
+      return value;
+    },
+    decrypt(value: string): string {
+      return value;
+    },
+  };
+}
+
+class FakeCodexRpc implements CodexAppServerRpcClient {
+  readonly methods: string[] = [];
+  private handlers: Array<(msg: CodexAppServerRpcNotification) => void> = [];
+
+  constructor(private readonly savedPath: string) {}
+
+  async request<T>(method: string): Promise<T> {
+    this.methods.push(method);
+    if (method === "thread/start") {
+      return { thread: { id: "thread-1" } } as T;
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        for (const handler of this.handlers) {
+          handler({
+            method: "item/completed",
+            params: {
+              threadId: "thread-1",
+              item: { type: "imageGeneration", savedPath: this.savedPath },
+            },
+          });
+          handler({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { status: "completed" },
+            },
+          });
+        }
+      });
+      return {} as T;
+    }
+    return {} as T;
+  }
+
+  onNotification(handler: (msg: CodexAppServerRpcNotification) => void): () => void {
+    this.handlers.push(handler);
+    return () => {
+      const idx = this.handlers.indexOf(handler);
+      if (idx >= 0) this.handlers.splice(idx, 1);
+    };
+  }
+
+  close(): void {
+    this.handlers = [];
+  }
 }

@@ -191,6 +191,8 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
   PR は作成されません。
 - Codex / OpenAI トークンは OAuth (PKCE 既定) で取得し、`oauth_tokens` (provider="codex")
   に暗号化保存します。
+- OpenAI / Anthropic API key 認証を使う場合も、API key は `oauth_tokens.access_token_ciphertext`
+  に AES-256-GCM で暗号化保存します。`.env` に恒久保存する必要はありません。
 - Image Provider 未設定時は creative 生成を skip し、improvement_pr は **テキストのみで PR
   を作成**します (UI は `succeeded_text_only` の benign idle 表示)。
 - LLM 入力 / 出力 JSON は ai_runs に保存される前に redactor を通し、token-shape の値や

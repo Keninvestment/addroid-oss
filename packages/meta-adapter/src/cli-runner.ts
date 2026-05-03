@@ -431,6 +431,8 @@ export const META_CLI_SUPPORTED_OPERATIONS: readonly SupportedMetaCliOperation[]
   { resource: "ads", verb: "update", mutates: true, verifiedAt: "verified" },
   { resource: "ads", verb: "activate", mutates: true, verifiedAt: "verified" },
 
+  { resource: "insights", verb: "get", mutates: false, verifiedAt: "verified" },
+
   { resource: "creatives", verb: "list", mutates: false, verifiedAt: "verified" },
   { resource: "creatives", verb: "get", mutates: false, verifiedAt: "verified" },
   { resource: "creatives", verb: "create", mutates: true, verifiedAt: "verified" },
@@ -446,13 +448,16 @@ export interface MetaCliOperationCheckResult {
 
 /**
  * 公式 CLI 形 (`meta ads <resource> <verb>`) だけを許可し、`args[1]` を
- * resource、`args[2]` を verb として解釈する。
+ * resource、`args[2]` を verb として解釈する。`meta --output json ads ...`
+ * のような公式グローバルオプションも許可するため、実際には先頭の `ads`
+ * positional を探してから resource / verb を読む。
  */
 export function isSupportedMetaCliOperation(
   args: readonly string[],
   matrix: readonly SupportedMetaCliOperation[] = META_CLI_SUPPORTED_OPERATIONS
 ): MetaCliOperationCheckResult {
-  if (args[0] !== "ads") {
+  const adsIndex = args.findIndex((arg) => arg === "ads");
+  if (adsIndex < 0) {
     return {
       supported: false,
       resource: pickPositional(args[0]),
@@ -460,8 +465,8 @@ export function isSupportedMetaCliOperation(
       entry: null,
     };
   }
-  const resource = pickPositional(args[1]);
-  const verb = pickPositional(args[2]);
+  const resource = pickPositional(args[adsIndex + 1]);
+  const verb = pickPositional(args[adsIndex + 2]);
   if (!resource || !verb) {
     return { supported: false, resource, verb, entry: null };
   }

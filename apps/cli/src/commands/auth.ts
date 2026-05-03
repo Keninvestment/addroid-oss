@@ -49,6 +49,10 @@ import {
   type MetaAdAccount,
   type MetaOAuthConnection,
 } from "@addroid/meta-adapter";
+import {
+  defaultApiKeyChatUrl,
+  type ApiKeyLLMProviderName,
+} from "@addroid/llm-provider";
 import { buildPrismaMetaAdapterSelection } from "../../../worker/src/lib/meta-runtime.js";
 import {
   ensureCliWorkspace,
@@ -76,9 +80,20 @@ interface ParsedMetaArgs {
   timeoutMs: number;
 }
 
+interface ParsedLlmArgs {
+  kind: "llm";
+  provider: ApiKeyLLMProviderName;
+  apiKey?: string;
+  model?: string;
+  baseUrl?: string;
+  disconnect: boolean;
+  asJson: boolean;
+}
+
 type ParsedAction =
   | ParsedSlackArgs
   | ParsedMetaArgs
+  | ParsedLlmArgs
   | { kind: "help" }
   | { kind: "error"; code: number; stderr?: string; stdoutHelp?: boolean };
 
@@ -124,6 +139,9 @@ export async function runAuthCommand(
   }
   if (parsed.kind === "meta") {
     return await runAuthMeta(parsed);
+  }
+  if (parsed.kind === "llm") {
+    return await runAuthLlm(parsed, opts);
   }
   return await runAuthSlack(parsed, opts);
 }
@@ -188,11 +206,83 @@ function parseArgs(args: string[]): ParsedAction {
     return { kind: "meta", asJson, openBrowser, selectDefault, timeoutMs };
   }
 
+  if (provider === "llm") {
+    const env = process.env;
+    let llmProvider: ApiKeyLLMProviderName | null = null;
+    let apiKey: string | undefined;
+    let model: string | undefined;
+    let baseUrl: string | undefined;
+    let disconnect = false;
+    let asJson = false;
+
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i]!;
+      const take = () => {
+        const v = rest[i + 1];
+        if (!v) throw new Error(`${a} requires a value`);
+        i += 1;
+        return v;
+      };
+      try {
+        if (a === "--help" || a === "-h") return { kind: "help" };
+        if (a === "--json") asJson = true;
+        else if (a === "--disconnect") disconnect = true;
+        else if (a === "--provider") llmProvider = requireApiKeyProvider(take());
+        else if (a.startsWith("--provider=")) llmProvider = requireApiKeyProvider(a.slice("--provider=".length));
+        else if (a === "--api-key") apiKey = take();
+        else if (a.startsWith("--api-key=")) apiKey = a.slice("--api-key=".length);
+        else if (a === "--model") model = take();
+        else if (a.startsWith("--model=")) model = a.slice("--model=".length);
+        else if (a === "--base-url") baseUrl = take();
+        else if (a.startsWith("--base-url=")) baseUrl = a.slice("--base-url=".length);
+        else if (a.startsWith("--")) {
+          return {
+            kind: "error",
+            code: 2,
+            stderr: `[addroid auth llm] 未知のオプション: ${a}\n`,
+            stdoutHelp: true,
+          };
+        } else {
+          return {
+            kind: "error",
+            code: 2,
+            stderr: `[addroid auth llm] 余分な引数: ${a}\n`,
+            stdoutHelp: true,
+          };
+        }
+      } catch (err) {
+        return {
+          kind: "error",
+          code: 2,
+          stderr: `[addroid auth llm] ${(err as Error).message}\n`,
+          stdoutHelp: true,
+        };
+      }
+    }
+
+    llmProvider ??= parseApiKeyProvider(env.ADDROID_LLM_PROVIDER) ?? "openai";
+    if (!apiKey) {
+      apiKey =
+        llmProvider === "anthropic"
+          ? env.ANTHROPIC_API_KEY
+          : env.OPENAI_API_KEY;
+    }
+    return {
+      kind: "llm",
+      provider: llmProvider,
+      ...(apiKey ? { apiKey } : {}),
+      ...(model ? { model } : {}),
+      ...(baseUrl ? { baseUrl } : {}),
+      disconnect,
+      asJson,
+    };
+  }
+
   if (provider !== "slack") {
     return {
       kind: "error",
       code: 2,
-      stderr: `[addroid auth] 未対応のプロバイダ: ${provider}\n  対応プロバイダ: meta, slack\n`,
+      stderr: `[addroid auth] 未対応のプロバイダ: ${provider}\n  対応プロバイダ: meta, slack, llm\n`,
       stdoutHelp: true,
     };
   }
@@ -261,6 +351,217 @@ function optionMissing(commandOrOpt: string, maybeOpt?: string): ParsedAction {
     stderr: `[addroid ${command}] ${opt} に値がありません\n`,
     stdoutHelp: true,
   };
+}
+
+function parseApiKeyProvider(value: string | undefined): ApiKeyLLMProviderName | null {
+  const v = value?.trim().toLowerCase();
+  if (v === "openai" || v === "anthropic") return v;
+  return null;
+}
+
+function requireApiKeyProvider(value: string | undefined): ApiKeyLLMProviderName {
+  const parsed = parseApiKeyProvider(value);
+  if (!parsed) throw new Error("--provider は openai または anthropic を指定してください");
+  return parsed;
+}
+
+function defaultModelForApiKeyProvider(provider: ApiKeyLLMProviderName): string {
+  return provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1";
+}
+
+async function runAuthLlm(
+  parsed: ParsedLlmArgs,
+  opts: SlackAuthRunOptions
+): Promise<number> {
+  let crypto: ReturnType<typeof getCryptoBoundary>;
+  try {
+    crypto = getCryptoBoundary();
+  } catch (err) {
+    if (err instanceof CryptoNotConfiguredError) {
+      process.stderr.write(
+        `[addroid auth llm] ENCRYPTION_KEY が利用できません: ${err.message}\n`
+      );
+      return 2;
+    }
+    throw err;
+  }
+  if (!process.env.DATABASE_URL) {
+    process.stderr.write(
+      "[addroid auth llm] DATABASE_URL が設定されていません。先に `addroid init` と DB setup を完了してください。\n"
+    );
+    return 2;
+  }
+
+  const { prisma } = (opts.prismaOverride
+    ? { prisma: opts.prismaOverride as { oAuthToken: { upsert: Function; deleteMany: Function }; $disconnect: () => Promise<void> } }
+    : await import("@addroid/db")) as {
+    prisma: {
+      oAuthToken: {
+        upsert: (args: unknown) => Promise<unknown>;
+        deleteMany: (args: unknown) => Promise<{ count: number }>;
+      };
+      $disconnect: () => Promise<void>;
+    };
+  };
+
+  try {
+    if (parsed.disconnect) {
+      const result = await prisma.oAuthToken.deleteMany({
+        where: { provider: parsed.provider },
+      });
+      if (parsed.asJson) {
+        process.stdout.write(
+          `${JSON.stringify({ ok: true, provider: parsed.provider, removed: result.count }, null, 2)}\n`
+        );
+      } else {
+        process.stdout.write(
+          `[addroid auth llm]\n\n  provider      : ${parsed.provider}\n  disconnected  : ${result.count} credential(s) removed\n`
+        );
+      }
+      return 0;
+    }
+
+    const apiKey = parsed.apiKey ?? (await promptSecret(`${parsed.provider} API key`));
+    if (!apiKey.trim()) {
+      process.stderr.write("[addroid auth llm] API key が未入力です。\n");
+      return 2;
+    }
+    if (!looksLikeApiKey(parsed.provider, apiKey)) {
+      process.stderr.write(
+        `[addroid auth llm] ${parsed.provider} API key の形式が想定と異なります。入力値を確認してください。\n`
+      );
+      return 2;
+    }
+    const model = parsed.model?.trim() || defaultModelForApiKeyProvider(parsed.provider);
+    const baseUrl = parsed.baseUrl?.trim() || defaultApiKeyChatUrl(parsed.provider);
+    if (!/^https:\/\//i.test(baseUrl)) {
+      process.stderr.write("[addroid auth llm] --base-url は https URL で指定してください。\n");
+      return 2;
+    }
+    const now = opts.now ?? (() => new Date());
+    const connectedAt = now();
+    const accountIdentifier = `${parsed.provider}-api-key`;
+    await prisma.oAuthToken.upsert({
+      where: {
+        provider_accountIdentifier: {
+          provider: parsed.provider,
+          accountIdentifier,
+        },
+      },
+      update: {
+        scopes: [],
+        accessTokenCiphertext: crypto.encrypt(apiKey),
+        refreshTokenCiphertext: null,
+        expiresAt: null,
+        connectedAt,
+        metadata: {
+          authKind: "api_key",
+          defaultModel: model,
+          apiBaseUrl: baseUrl,
+        },
+      },
+      create: {
+        provider: parsed.provider,
+        accountIdentifier,
+        scopes: [],
+        accessTokenCiphertext: crypto.encrypt(apiKey),
+        refreshTokenCiphertext: null,
+        expiresAt: null,
+        connectedAt,
+        metadata: {
+          authKind: "api_key",
+          defaultModel: model,
+          apiBaseUrl: baseUrl,
+        },
+      },
+    });
+    if (parsed.asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: true,
+            provider: parsed.provider,
+            authKind: "api_key",
+            accountIdentifier,
+            defaultModel: model,
+            apiBaseUrl: baseUrl,
+            connectedAt: connectedAt.toISOString(),
+          },
+          null,
+          2
+        )}\n`
+      );
+    } else {
+      process.stdout.write(
+        [
+          "[addroid auth llm]",
+          "",
+          `  provider      : ${parsed.provider}`,
+          "  auth          : api_key",
+          `  model         : ${model}`,
+          `  endpoint      : ${baseUrl}`,
+          "  api key       : encrypted (oauth_tokens.accessTokenCiphertext)",
+          "",
+        ].join("\n")
+      );
+    }
+    return 0;
+  } finally {
+    if (!opts.prismaOverride) {
+      await prisma.$disconnect().catch(() => undefined);
+    }
+  }
+}
+
+function looksLikeApiKey(provider: ApiKeyLLMProviderName, apiKey: string): boolean {
+  const v = apiKey.trim();
+  if (provider === "openai") return /^sk-[A-Za-z0-9_\-]{8,}/.test(v);
+  return /^sk-ant-[A-Za-z0-9_\-]{8,}/.test(v);
+}
+
+function promptSecret(question: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY || typeof process.stdin.setRawMode !== "function") {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return rl.question(`? ${question}: `).then((answer) => {
+      rl.close();
+      return answer.trim();
+    });
+  }
+  return new Promise((resolve, reject) => {
+    let value = "";
+    const stdin = process.stdin;
+    const onData = (chunk: Buffer) => {
+      const s = chunk.toString("utf8");
+      for (const ch of s) {
+        if (ch === "\u0003") {
+          cleanup();
+          process.stdout.write("\n");
+          reject(new Error("interrupted"));
+          return;
+        }
+        if (ch === "\r" || ch === "\n") {
+          cleanup();
+          process.stdout.write("\n");
+          resolve(value.trim());
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        if (ch >= " ") value += ch;
+      }
+    };
+    const cleanup = () => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+    };
+    process.stdout.write(`? ${question}: `);
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
 }
 
 async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
@@ -805,6 +1106,8 @@ function printHelp() {
       "Usage:",
       "  addroid auth meta [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
       "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
+      "  addroid auth llm --provider <openai|anthropic> [--api-key <key>] [--model <model>] [--base-url <url>] [--json]",
+      "  addroid auth llm --provider <openai|anthropic> --disconnect [--json]",
       "",
       "Options:",
       "  --no-open          Meta OAuth URL をブラウザで自動オープンしない",
@@ -813,11 +1116,17 @@ function printHelp() {
       "  --xoxb <token>     Slack Bot User OAuth Token (xoxb-*)",
       "  --xapp <token>     Slack App-Level Token (xapp-*, Socket Mode 用)",
       "  --channel <id>     通知先チャンネル ID (Cxxxx / Gxxxx / Dxxxx)",
+      "  --provider <name>  LLM API key provider (openai / anthropic)",
+      "  --api-key <key>    LLM API key。未指定時は OPENAI_API_KEY / ANTHROPIC_API_KEY または非表示入力",
+      "  --model <model>    LLM 既定 model",
+      "  --base-url <url>   LLM endpoint override (https のみ)",
+      "  --disconnect       指定 LLM provider の保存済み credential を削除",
       "  --json             機械可読 JSON で結果を出力",
       "  --help, -h         このヘルプ",
       "",
       "Environment fallbacks (フラグ未指定時に参照):",
       "  SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_NOTIFICATION_CHANNEL_ID",
+      "  OPENAI_API_KEY, ANTHROPIC_API_KEY, ADDROID_LLM_PROVIDER",
       "",
       "Notes:",
       "  - Meta OAuth は localhost callback で完了し、長期トークンを暗号化して oauth_tokens に保存します。",
@@ -825,6 +1134,7 @@ function printHelp() {
       "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
       "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",
       "  - 平文トークンは ENCRYPTION_KEY (AES-256-GCM) で暗号化し oauth_tokens に保存します。",
+      "  - LLM API key も OAuth token と同じ暗号化境界で保存されます。.env への恒久保存は不要です。",
       "  - 既存の slack 行 (同 team_id) は上書きされます。切断は別コマンドで実装予定。",
       "",
     ].join("\n")

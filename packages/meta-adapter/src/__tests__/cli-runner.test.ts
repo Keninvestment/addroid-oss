@@ -838,6 +838,20 @@ test("isSupportedMetaCliOperation accepts entries from the default matrix", () =
   assert.equal(r2.supported, true);
   assert.equal(r2.entry?.resource, "campaigns");
   assert.equal(r2.entry?.mutates, true);
+
+  const r3 = isSupportedMetaCliOperation([
+    "--output",
+    "json",
+    "ads",
+    "insights",
+    "get",
+    "--fields",
+    "spend,clicks",
+  ]);
+  assert.equal(r3.supported, true);
+  assert.equal(r3.entry?.resource, "insights");
+  assert.equal(r3.entry?.verb, "get");
+  assert.equal(r3.entry?.mutates, false);
 });
 
 test("isSupportedMetaCliOperation rejects unverified resource/verb combinations", () => {

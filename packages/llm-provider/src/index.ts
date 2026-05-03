@@ -61,6 +61,14 @@ export {
   type CryptoEncryptDecrypt,
 } from "./codex.js";
 
+export {
+  ApiKeyLLMProvider,
+  defaultApiKeyChatUrl,
+  type ApiKeyCryptoBoundary,
+  type ApiKeyLLMProviderDeps,
+  type ApiKeyLLMProviderName,
+} from "./api-key.js";
+
 export { MockLLMProvider, type MockLLMProviderOptions } from "./mock.js";
 
 export { StubLLMProvider } from "./stub.js";
@@ -123,6 +131,19 @@ export {
   StubImageProvider,
   type StubImageProviderOptions,
 } from "./image-stub.js";
+
+export {
+  OpenAIImageProvider,
+  type OpenAIImageProviderOptions,
+} from "./image-openai.js";
+
+export {
+  CodexAppServerImageProvider,
+  type CodexAppServerHandle,
+  type CodexAppServerImageProviderOptions,
+  type CodexAppServerRpcClient,
+  type CodexAppServerRpcNotification,
+} from "./image-codex.js";
 
 export {
   selectImageProvider,

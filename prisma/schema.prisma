@@ -74,6 +74,8 @@ model Workspace {
   aiRuns           AiRun[]
   executionLogs    ExecutionLog[]
   auditLogs        AuditLog[]
+  automationRules  AutomationRule[]
+  automationRuns   AutomationRun[]
 
   @@map("workspaces")
 }
@@ -131,6 +133,10 @@ model AdAccount {
   hierarchyNodes       AdsHierarchyNode[]
   creatives            Creative[]
   performanceSnapshots PerformanceSnapshot[]
+  insightFetchRuns     InsightFetchRun[]
+  insightRows          InsightRow[]
+  automationRules      AutomationRule[]
+  automationActions    AutomationAction[]
 
   @@unique([workspaceId, key])
   @@unique([workspaceId, metaAccountId])
@@ -157,11 +163,12 @@ model AdsHierarchyNode {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  account   AdAccount             @relation(fields: [accountId], references: [id], onDelete: Cascade)
-  parent    AdsHierarchyNode?     @relation("AdsHierarchyTree", fields: [parentId], references: [id], onDelete: SetNull)
-  children  AdsHierarchyNode[]    @relation("AdsHierarchyTree")
-  snapshots PerformanceSnapshot[]
-  creatives Creative[]
+  account     AdAccount             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  parent      AdsHierarchyNode?     @relation("AdsHierarchyTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children    AdsHierarchyNode[]    @relation("AdsHierarchyTree")
+  snapshots   PerformanceSnapshot[]
+  creatives   Creative[]
+  insightRows InsightRow[]
 
   @@unique([accountId, nodeType, nodeKey])
   @@index([accountId, nodeType])
@@ -206,6 +213,64 @@ model PerformanceSnapshot {
 }
 
 // =====================================================================
+// 5b) insight_fetch_runs / insight_rows — 柔軟な Meta insights 取得結果。
+//     performance_snapshots は標準日次 KPI の軽量キャッシュとして維持し、
+//     ユーザーごとに異なる fields / action types / breakdowns / attribution
+//     windows は本テーブル群に raw + 正規化 JSON として保存する。
+// =====================================================================
+model InsightFetchRun {
+  id                 String   @id @default(uuid())
+  accountId          String
+  source             String // "meta_ads_cli" | "graph_api" | "mock" | "fixture"
+  status             String   @default("succeeded") // queued | running | succeeded | failed
+  level              String // "account" | "campaign" | "adset" | "ad"
+  dateStart          DateTime @db.Date
+  dateStop           DateTime @db.Date
+  timeIncrement      String?
+  fields             String[] @default([])
+  breakdowns         String[] @default([])
+  attributionWindows String[] @default([])
+  request            Json?
+  rawResponse        Json?
+  errorMessage       String?
+  createdAt          DateTime @default(now())
+
+  account AdAccount    @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  rows    InsightRow[]
+
+  @@index([accountId, level, dateStart, dateStop])
+  @@index([source, createdAt])
+  @@map("insight_fetch_runs")
+}
+
+model InsightRow {
+  id          String   @id @default(uuid())
+  runId       String
+  accountId   String
+  hierarchyId String?
+  level       String // "account" | "campaign" | "adset" | "ad"
+  nodeKey     String
+  displayName String?
+  dateStart   DateTime @db.Date
+  dateStop    DateTime @db.Date
+  currency    String?
+  metrics     Json // normalized scalar metrics, e.g. { spend, clicks, cpa }
+  actions     Json? // action_type keyed conversion metrics
+  dimensions  Json? // breakdown values such as age/gender/placement
+  raw         Json?
+  createdAt   DateTime @default(now())
+
+  run       InsightFetchRun   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  account   AdAccount         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  hierarchy AdsHierarchyNode? @relation(fields: [hierarchyId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, level, nodeKey])
+  @@index([accountId, dateStart, dateStop])
+  @@index([hierarchyId])
+  @@map("insight_rows")
+}
+
+// =====================================================================
 // 6) ai_runs — AI 生成 / 改善提案ジョブの実行記録 (the current implementation 拡張)。
 //    AI ワークフロー (daily_report / budget_guard / improvement_pr / adhoc) と
 //    8 agent (strategy/copy/image_prompt/creative_qa/analyst/media_buyer/
@@ -237,8 +302,8 @@ model AiRun {
   finishedAt    DateTime?
   createdAt     DateTime  @default(now())
 
-  workspace        Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  creatives        Creative[] @relation("CreativeImagePromptRun")
+  workspace         Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creatives         Creative[] @relation("CreativeImagePromptRun")
   creativeQaResults Creative[] @relation("CreativeQaRun")
 
   @@index([workspaceId, agent, createdAt])
@@ -252,16 +317,16 @@ model AiRun {
 // 7) github_pull_requests — ポーリングで観測した PR と merge 状態。
 // =====================================================================
 model GithubPullRequest {
-  id        String    @id @default(uuid())
-  repoId    String
-  number    Int
-  title     String
-  state     String // "open" | "closed" | "merged"
-  headSha   String
-  baseRef   String    @default("main")
-  htmlUrl   String?
-  mergedAt  DateTime?
-  polledAt  DateTime  @default(now())
+  id                String    @id @default(uuid())
+  repoId            String
+  number            Int
+  title             String
+  state             String // "open" | "closed" | "merged"
+  headSha           String
+  baseRef           String    @default("main")
+  htmlUrl           String?
+  mergedAt          DateTime?
+  polledAt          DateTime  @default(now())
   // Regression fix: PR プレビュー (Web UI /approvals/[prNumber] 用)
   // を実際の local 状態として永続化する列群。本文と変更ファイル/diff サマリは
   // 改善PR (improvement_pr) 作成時に publisher が書き込み、UI が描画する。
@@ -275,8 +340,8 @@ model GithubPullRequest {
   filesChangedCount Int? // 元の変更ファイル総数 (truncate 前の値)
   previewSource     String? // "improvement_pr" | "github_poll" | ...
   previewUpdatedAt  DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   repo            GithubRepo       @relation(fields: [repoId], references: [id], onDelete: Cascade)
   applyJobs       ApplyJob[]
@@ -511,6 +576,76 @@ model CronSchedule {
 
   @@unique([workspaceId, name])
   @@map("cron_schedules")
+}
+
+// automation_rules — 自然言語から構造化された広告運用ルール。
+// LLM は DSL の生成までを担当し、実行時は deterministic rule engine が dsl を
+// 検証・評価する。Meta mutation は automation_actions と execution_logs に分離して
+// 監査できるようにする。
+model AutomationRule {
+  id          String   @id @default(uuid())
+  workspaceId String
+  accountId   String?
+  key         String
+  displayName String
+  enabled     Boolean  @default(false)
+  schedule    String
+  sourceText  String?
+  dsl         Json
+  safetyMode  String   @default("proposal") // report_only | proposal | auto_apply
+  createdBy   String   @default("user")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account   AdAccount?      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  runs      AutomationRun[]
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId, enabled])
+  @@map("automation_rules")
+}
+
+model AutomationRun {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  ruleId       String
+  status       String    @default("running") // running | succeeded | failed | skipped
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  evaluation   Json?
+  errorMessage String?
+
+  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  rule      AutomationRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  actions   AutomationAction[]
+
+  @@index([workspaceId, startedAt])
+  @@index([ruleId, startedAt])
+  @@map("automation_runs")
+}
+
+model AutomationAction {
+  id             String    @id @default(uuid())
+  runId          String
+  accountId      String
+  hierarchyId    String?
+  level          String // "campaign" | "adset" | "ad" | "account"
+  targetKey      String
+  actionType     String // "set_status" | "adjust_budget"
+  payload        Json
+  status         String    @default("planned") // planned | approved | executed | blocked | failed
+  executionLogId String?
+  createdAt      DateTime  @default(now())
+  executedAt     DateTime?
+
+  run     AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  account AdAccount     @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status])
+  @@index([accountId, actionType, createdAt])
+  @@index([hierarchyId])
+  @@map("automation_actions")
 }
 
 // apply_jobs — merged PR から enqueue される execute_apply ジョブ記録。

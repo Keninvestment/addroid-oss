@@ -2,11 +2,9 @@
 //
 // 実行環境に応じて ImageProvider 実装を選択する。優先度:
 //   1. ENABLE_MOCK_IMAGE_PROVIDER=1 (or ADDROID_IMAGE_MOCK=1) → MockImageProvider
-//   2. それ以外                                                → StubImageProvider
-//
-// openai / stability / replicate の実 adapter は本タスク (implementation item) のスコープ外
-// であり、本 factory はそれらを「未実装」として stub に縮退させる。後続タスク
-// で adapter を追加した際にここに分岐を増やす。
+//   2. ADDROID_IMAGE_PROVIDER=codex / preferCodex=true        → Codex app-server
+//   3. encrypted OpenAI API key + crypto boundary             → OpenAI GPT Image
+//   4. それ以外                                                → StubImageProvider
 //
 // Credential boundary (the current implementation constraint: "Provider credentials must use
 // existing encrypted config/secrets patterns"):
@@ -26,10 +24,20 @@ import {
   MockImageProvider,
   type MockImageProviderOptions,
 } from "./image-mock.js";
+import {
+  CodexAppServerImageProvider,
+  type CodexAppServerImageProviderOptions,
+} from "./image-codex.js";
+import {
+  OpenAIImageProvider,
+  type OpenAIImageProviderOptions,
+} from "./image-openai.js";
 import { StubImageProvider } from "./image-stub.js";
 import type { ImageProvider, ImageProviderName } from "./image-provider.js";
+import type { ApiKeyCryptoBoundary } from "./api-key.js";
+import type { LLMProviderTokenStore } from "./token-store.js";
 
-export type ImageProviderChoice = "mock" | "stub";
+export type ImageProviderChoice = "mock" | "codex" | "openai_api_key" | "stub";
 
 export interface ImageProviderSelection {
   provider: ImageProvider;
@@ -47,9 +55,19 @@ export interface SelectImageProviderOptions {
   env?: NodeJS.ProcessEnv;
   /** Mock provider の上書き設定 (test seam)。 */
   mock?: MockImageProviderOptions;
+  /** OpenAI API key / OAuth token store。実 provider 選択時のみ使う。 */
+  tokenStore?: LLMProviderTokenStore;
+  /** `oauth_tokens.accessTokenCiphertext` を復号する境界。 */
+  crypto?: ApiKeyCryptoBoundary;
+  /** 保存済み OpenAI key があることを呼び出し側が確認済みなら true。 */
+  openaiCredentialAvailable?: boolean;
+  /** Codex OAuth / local mode などから Codex app-server を優先する場合 true。 */
+  preferCodex?: boolean;
+  openai?: Partial<Omit<OpenAIImageProviderOptions, "tokenStore" | "crypto">>;
+  codex?: CodexAppServerImageProviderOptions;
   /** Stub に表示させる provider 名。既定 "openai"。 */
   stubProvider?: ImageProviderName;
-  /** Stub に表示させる model 名。既定 "gpt-image-1"。 */
+  /** Stub に表示させる model 名。既定 "gpt-image-2"。 */
   stubDefaultModel?: string;
 }
 
@@ -57,22 +75,62 @@ export function selectImageProvider(
   opts: SelectImageProviderOptions = {}
 ): ImageProviderSelection {
   const env = opts.env ?? process.env;
-  if (env.ENABLE_MOCK_IMAGE_PROVIDER === "1" || env.ADDROID_IMAGE_MOCK === "1") {
+  const explicit = normalizeImageProvider(env.ADDROID_IMAGE_PROVIDER);
+  if (env.ENABLE_MOCK_IMAGE_PROVIDER === "1" || env.ADDROID_IMAGE_MOCK === "1" || explicit === "mock") {
     return {
       provider: new MockImageProvider(opts.mock ?? {}),
       choice: "mock",
-      reason: "ENABLE_MOCK_IMAGE_PROVIDER=1 (or ADDROID_IMAGE_MOCK=1)",
+      reason: explicit === "mock" ? "ADDROID_IMAGE_PROVIDER=mock" : "ENABLE_MOCK_IMAGE_PROVIDER=1 (or ADDROID_IMAGE_MOCK=1)",
+      optional: false,
+    };
+  }
+  if (explicit === "openai" || opts.openaiCredentialAvailable) {
+    if (opts.tokenStore && opts.crypto && opts.openaiCredentialAvailable !== false) {
+      return {
+        provider: new OpenAIImageProvider({
+          tokenStore: opts.tokenStore,
+          crypto: opts.crypto,
+          ...(opts.openai ?? {}),
+        }),
+        choice: "openai_api_key",
+        reason: explicit === "openai"
+          ? "ADDROID_IMAGE_PROVIDER=openai + encrypted OpenAI API key credential"
+          : "encrypted OpenAI API key credential found; using GPT Image provider",
+        optional: false,
+      };
+    }
+    return {
+      provider: new StubImageProvider({
+        name: "openai",
+        defaultModel: opts.stubDefaultModel ?? "gpt-image-2",
+      }),
+      choice: "stub",
+      reason: "OpenAI image provider requested but encrypted token store / crypto boundary is not configured",
+      optional: true,
+    };
+  }
+  if (explicit === "codex" || opts.preferCodex) {
+    return {
+      provider: new CodexAppServerImageProvider(opts.codex ?? {}),
+      choice: "codex",
+      reason: explicit === "codex" ? "ADDROID_IMAGE_PROVIDER=codex" : "Codex LLM/OAuth selected; using Codex app-server image provider",
       optional: false,
     };
   }
   return {
     provider: new StubImageProvider({
       ...(opts.stubProvider ? { name: opts.stubProvider } : {}),
-      ...(opts.stubDefaultModel ? { defaultModel: opts.stubDefaultModel } : {}),
+      defaultModel: opts.stubDefaultModel ?? "gpt-image-2",
     }),
     choice: "stub",
     reason:
-      "no image provider configured (optional) — image generation falls back to prompt-only. Set ENABLE_MOCK_IMAGE_PROVIDER=1 for the mock adapter; real openai / stability / replicate adapters are wired through the encrypted oauth_tokens + CryptoBoundary path (see packages/llm-provider/src/factory.ts) and arrive in a follow-up task.",
+      "no image provider configured (optional) — image generation falls back to prompt-only. Set ADDROID_IMAGE_MOCK=1 for the mock adapter, ADDROID_IMAGE_PROVIDER=codex for Codex app-server, or register an OpenAI API key with `addroid auth llm --provider openai`.",
     optional: true,
   };
+}
+
+function normalizeImageProvider(value: string | undefined): "openai" | "codex" | "mock" | null {
+  const v = value?.trim().toLowerCase();
+  if (v === "openai" || v === "codex" || v === "mock") return v;
+  return null;
 }

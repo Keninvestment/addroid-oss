@@ -28,6 +28,7 @@ test("buildOpsTemplate emits the required paths", () => {
     ".github/workflows/addroid-validate.yml",
     "README.md",
     "ads/accounts/primary/brand.yaml",
+    "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
   ]);

@@ -50,7 +50,7 @@ Node.js 22.11 以上を使ってください。
 | `npm install` | JavaScript / TypeScript 依存 | Web UI、worker、CLI、Prisma など | npm が repo 内の `node_modules` に入れる |
 | `addroid init` | uv | Python と Meta Ads CLI の導入補助 | 実行前に確認してから導入 |
 | `addroid init` | Python 3.12+ | Meta Ads CLI の実行環境 | uv-managed Python 3.13 を導入 |
-| `addroid init` | Meta Ads CLI | Meta 広告への Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| `addroid init` | Meta Ads CLI | Meta 広告への insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
 | `addroid init` | PostgreSQL 16+ | AdDroid DB、queue、監査ログ | Homebrew / apt / dnf 等を実行前に確認 |
 | Meta 側で作成 | Meta Developer App | App ID / App Secret と OAuth 認証 | ユーザーが Meta for Developers で作成 |
 
@@ -62,7 +62,7 @@ system 変更は既定で no です。
 |---|---|---|
 | uv | Python / Meta Ads CLI の導入 | 無ければ公式 installer を実行前に確認 |
 | Python 3.12+ | Meta Ads CLI の実行 | uv-managed Python 3.13 を導入 |
-| Meta Ads CLI | Meta Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| Meta Ads CLI | Meta insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
 | PostgreSQL 16+ | DB / pg-boss queue | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
 
 PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必要になる場合があります。
@@ -105,7 +105,10 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 - GitHub OAuth クライアント — ops repo bootstrap と PR ポーリングに必要
 - Meta OAuth クライアント — Apply / Activate 実行に必要 (sandbox / mock 経路で開発可能)
-- Codex / OpenAI OAuth クライアント — AI workflow 実行に必要 (StubLLMProvider で fail-closed)
+- LLM Provider — AI workflow 実行に必要。初回セットアップでは OpenAI / Anthropic API key
+  または Codex OAuth を選択できます (未設定時は StubLLMProvider で fail-closed)
+- Image Provider — クリエイティブ画像生成に必要。OpenAI API key は GPT Image 2 に再利用でき、
+  Codex OAuth は localhost の Codex app-server 経路で生成できます
 - Slack Bot / App-level token — 通知と `/adops` slash command に必要 (任意)
 
 ---
@@ -178,6 +181,10 @@ npm run addroid -- up
 - PostgreSQL の `addroid` DB / role (ローカル既定ではランダム password を生成)
 - Prisma schema
 - uv-managed Python 3.13 と Meta Ads CLI
+- LLM Provider: OpenAI / Anthropic API key は `addroid auth llm` 経由で暗号化保存、
+  Codex OAuth は `addroid up` 後に `/ai` から接続
+- Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex OAuth の場合は
+  localhost の `codex app-server` 経由で画像生成
 
 CI や手元の自動検証では次を使えます。
 
@@ -203,6 +210,20 @@ Meta Ads CLI の導入を試行します。
 ```bash
 npm run addroid -- init --install-deps
 ```
+
+日次レポートは Meta Ads CLI の `ads insights get` を優先して使います。
+`ADDROID_META_CLI_BIN` が未設定の開発環境では mock insights に戻ります。CLI で取得できない
+柔軟な breakdown / attribution window が必要な場合は、Meta OAuth 認証済みの状態で
+`ADDROID_META_GRAPH_INSIGHTS_FALLBACK=1` を設定すると Graph API の read-only fallback を使えます。
+
+自然言語の自動運用リクエストは、直接 Meta を変更せず、まず
+`workflows/automation-rules.yaml` と同形の DSL に変換してから評価します。例:
+「本日消化 5000 円以上で 0CV のキャンペーンを停止」「過去 7 日間 CPA 3000 円以下の
+キャンペーン予算を 20% 上げる」。停止対象は campaign / adset / ad、予算変更対象は
+campaign / adset です。`ad` は直接予算を持たないため、親 adset または campaign に解決します。
+「今すぐ」「一度だけ」が明示されていれば単発実行、「毎日」「1時間おき」などがあれば
+定期ルールとして扱います。どちらか判断できない予算変更・停止・再開リクエストでは、
+実行前に「今すぐ一度だけ」「定期ルール」「両方」の確認質問を返します。
 
 `addroid` を `npm install -g @addroid/cli` で導入済みの場合、CLI 操作は
 `npm run addroid --` を `addroid` に置き換えられます。worker のみ別プロセスに分離して水平スケールしたい
@@ -256,7 +277,7 @@ addroid/
 | コマンド | 説明 |
 |---|---|
 | `npm install` | ワークスペース全体の依存解決 |
-| `npm run addroid -- init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI) |
+| `npm run addroid -- init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI / LLM Provider) |
 | `npm run addroid -- doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
 | `npm run addroid -- up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
 | `npm run addroid -- down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |
@@ -314,6 +335,12 @@ addroid/
 - **任意統合のフェイルクローズ**: LLM Provider 未設定時は `StubLLMProvider` が fail-closed し、
   GitOps 状態を破壊しません。Slack / Image Provider 未設定時は通知 / 画像生成のみが
   skip され、Apply / Activate / レポート取得は通常通り動きます。
+- **LLM API key は暗号化保存**: `addroid auth llm --provider openai|anthropic` で登録した
+  API key は `ENCRYPTION_KEY` により `oauth_tokens.access_token_ciphertext` に保存され、
+  `.env` への恒久保存は不要です。
+- **画像生成キーも平文保存しない**: GPT Image 2 は登録済み OpenAI API key の暗号化済み
+  credential を再利用します。Codex app-server 経路は localhost のみ許可し、外部 URL を
+  ブラウザに露出しません。
 
 詳細とリリース前チェックリストは [`docs/SECURITY.md`](docs/SECURITY.md) を、
 リリース手順 (バージョニング / CHANGELOG / `npm publish` / git tag / ロールバック) は

@@ -217,7 +217,7 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the 
   assert.equal(result.owner, "octo-test-user");
   assert.equal(result.name, "addroid-ops");
   assert.equal(result.defaultBranch, "main");
-  assert.equal(result.filesCommitted, 6);
+  assert.equal(result.filesCommitted, 7);
   assert.equal(result.branchProtectionApplied, true);
   const api = getLastApi();
   assert.ok(api);
@@ -230,6 +230,7 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the 
     ".github/workflows/addroid-validate.yml",
     "README.md",
     "ads/accounts/primary/brand.yaml",
+    "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
   ].sort());

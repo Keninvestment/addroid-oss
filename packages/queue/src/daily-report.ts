@@ -83,7 +83,7 @@ export interface DailyReportInsightsResponse {
   /** 前日 (= metricDate - 1d) の階層別 insights。空でも null でもよい。 */
   prior: DailyReportInsightsRow[];
   /** 取得元の identifier (UI/audit 用)。"meta_ads_cli" / "mock" 等。 */
-  source: "meta_ads_cli" | "mock" | "fixture" | "unavailable";
+  source: "meta_ads_cli" | "graph_api" | "mock" | "fixture" | "unavailable";
   /** sanitized 1 行説明 (ログに残る)。 */
   detail?: string;
 }

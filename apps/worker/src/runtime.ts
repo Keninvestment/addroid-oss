@@ -39,7 +39,6 @@ import {
 } from "@addroid/config";
 import {
   DEFAULT_CREATIVE_QA_POLICY,
-  selectImageProvider,
 } from "@addroid/llm-provider";
 import { getGithubAdapter, injectGithubAdapter } from "@addroid/github-adapter";
 import {
@@ -67,6 +66,7 @@ import {
   createAnalystRunner,
   createPrismaDailyReportSnapshotStore,
 } from "./lib/daily-report-runtime.js";
+import { resolveMetaCliInsightsProvider } from "./lib/meta-cli-insights-runtime.js";
 import {
   buildBudgetGuardSpendContext,
   createBudgetGuardAuditRunner,
@@ -82,6 +82,7 @@ import {
 } from "./lib/improvement-pr-runtime.js";
 import { createPrismaPerformanceSnapshotRetentionStore } from "./lib/retention-runtime.js";
 import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
+import { selectImageProviderForWorker } from "./lib/image-runtime.js";
 import { startSlackSocketRuntime } from "./lib/slack-socket-runtime.js";
 import type { SlackSocketReceiverHandle } from "@addroid/queue";
 
@@ -205,13 +206,40 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   // 構築して runImprovementPrOnce に注入する。Provider 未設定 / 失敗時は
   // generateAndQaCreative が prompt-only fallback を返し、orchestrator が
   // creatives 行を storage 列 null で書き続ける (UI design plan principle 21/27)。
-  const imageProviderSelection = selectImageProvider({ env: process.env });
+  const imageProviderSelection = await selectImageProviderForWorker(process.env, {
+    prisma,
+    preferCodex: llmSelection.choice === "codex",
+  });
   log.info(
     `[worker] image provider: ${imageProviderSelection.choice} (${imageProviderSelection.reason})`
   );
   const creativeStorage = new LocalDiskStorage({ env: process.env });
+
+  const metaAdapterSelection = await buildPrismaMetaAdapterSelection({
+    prisma,
+    env: process.env,
+  });
+  log.info(
+    `[worker] meta adapter: ${metaAdapterSelection.choice} (${metaAdapterSelection.reason})`
+  );
+
   const dailyReportStore = createPrismaDailyReportSnapshotStore(prisma);
-  const dailyReportInsights = new MockDailyReportInsightsProvider();
+  const metaCliInsightsSelection = await resolveMetaCliInsightsProvider({
+    env: process.env,
+    metaAdapter: metaAdapterSelection.adapter,
+    resolveAdAccountId: async (accountKey) => {
+      const row = await prisma.adAccount.findUnique({
+        where: { workspaceId_key: { workspaceId: workspace.id, key: accountKey } },
+        select: { metaAccountId: true },
+      });
+      return row?.metaAccountId ?? (accountKey.startsWith("act_") ? accountKey : null);
+    },
+  });
+  log.info(
+    `[worker] daily_report insights provider: ${metaCliInsightsSelection.mode} (${metaCliInsightsSelection.reason})`
+  );
+  const dailyReportInsights =
+    metaCliInsightsSelection.provider ?? new MockDailyReportInsightsProvider();
   const dailyReportAnalyst = createAnalystRunner({
     provider: llmSelection.provider,
     workspaceId: workspace.id,
@@ -965,13 +993,6 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   const adsLoader = createLocalDirAdsLoaderFromEnv(process.env, {
     expectedRepoId: wsRow?.opsRepoId ?? null,
   });
-  const metaAdapterSelection = await buildPrismaMetaAdapterSelection({
-    prisma,
-    env: process.env,
-  });
-  log.info(
-    `[worker] meta adapter: ${metaAdapterSelection.choice} (${metaAdapterSelection.reason})`
-  );
   const applyExecutorSelection = await resolveApplyExecutor({
     env: process.env,
     metaAdapter: metaAdapterSelection.adapter,

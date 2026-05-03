@@ -16,6 +16,20 @@ export interface FetchAccountsOptions {
   limit?: number;
 }
 
+export interface FetchInsightsOptions {
+  accessToken: string;
+  adAccountId: string;
+  fields: string[];
+  level?: "account" | "campaign" | "adset" | "ad";
+  timeRange?: { since: string; until: string };
+  datePreset?: string;
+  timeIncrement?: string;
+  breakdowns?: string[];
+  actionAttributionWindows?: string[];
+  limit?: number;
+  fetchImpl?: typeof fetch;
+}
+
 const ME_FIELDS = "id,name";
 const BUSINESS_FIELDS = "id,name";
 const ADACCOUNT_FIELDS =
@@ -160,4 +174,37 @@ export async function fetchAdAccounts(opts: FetchAccountsOptions): Promise<MetaA
     });
   }
   return out;
+}
+
+export async function fetchInsights(opts: FetchInsightsOptions): Promise<unknown[]> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const limit = opts.limit ?? 100;
+  const fields = opts.fields.filter((f) => f.trim().length > 0);
+  if (fields.length === 0) {
+    throw new MetaApiError("fetchInsights: fields is required");
+  }
+  const params: Record<string, string> = {
+    fields: fields.join(","),
+    limit: String(limit),
+  };
+  if (opts.level) params.level = opts.level;
+  if (opts.timeRange) params.time_range = JSON.stringify(opts.timeRange);
+  if (opts.datePreset) params.date_preset = opts.datePreset;
+  if (opts.timeIncrement) params.time_increment = opts.timeIncrement;
+  if (opts.breakdowns?.length) params.breakdowns = opts.breakdowns.join(",");
+  if (opts.actionAttributionWindows?.length) {
+    params.action_attribution_windows = opts.actionAttributionWindows.join(",");
+  }
+  type Page = { data?: unknown[] };
+  const accountPath = opts.adAccountId.startsWith("act_")
+    ? opts.adAccountId
+    : `act_${opts.adAccountId}`;
+  const page = await fetchGraph<Page>(
+    fetchImpl,
+    `${accountPath}/insights`,
+    params,
+    opts.accessToken,
+    "fetchInsights"
+  );
+  return Array.isArray(page.data) ? page.data : [];
 }

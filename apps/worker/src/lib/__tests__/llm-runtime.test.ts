@@ -328,6 +328,50 @@ test("selectLLMProviderForWorker: ADDROID_LLM_MOCK=1 + prisma 注入 → Mock + 
   );
 });
 
+test("selectLLMProviderForWorker: encrypted OpenAI API key row があれば API key provider を採用する", async () => {
+  const { client } = makeFakePrisma([
+    {
+      provider: "openai",
+      accountIdentifier: "openai-api-key",
+      scopes: [],
+      accessTokenCiphertext: "v1.aes256gcm.x",
+      refreshTokenCiphertext: null,
+      expiresAt: null,
+      connectedAt: new Date("2026-05-04T00:00:00Z"),
+      metadata: {
+        authKind: "api_key",
+        defaultModel: "gpt-4.1",
+        apiBaseUrl: "https://api.openai.com/v1/chat/completions",
+      },
+    },
+  ]);
+  const sel = await selectLLMProviderForWorker(fullCodexEnv(), { prisma: client });
+  assert.equal(sel.choice, "openai_api_key");
+  assert.equal(sel.provider.name, "openai");
+  assert.equal(sel.provider.authKind, "api_key");
+});
+
+test("selectLLMProviderForWorker: ADDROID_LLM_PROVIDER=codex は API key 行より Codex OAuth 設定を優先する", async () => {
+  const { client } = makeFakePrisma([
+    {
+      provider: "openai",
+      accountIdentifier: "openai-api-key",
+      scopes: [],
+      accessTokenCiphertext: "v1.aes256gcm.x",
+      refreshTokenCiphertext: null,
+      expiresAt: null,
+      connectedAt: new Date("2026-05-04T00:00:00Z"),
+      metadata: { authKind: "api_key", defaultModel: "gpt-4.1" },
+    },
+  ]);
+  const sel = await selectLLMProviderForWorker(
+    fullCodexEnv({ ADDROID_LLM_PROVIDER: "codex" }),
+    { prisma: client }
+  );
+  assert.equal(sel.choice, "codex");
+  assert.ok(sel.provider instanceof CodexLLMProvider);
+});
+
 // ---------------------------------------------------------------------
 // loadCodexLLMClientFromEnv — env-driven OAuth client config
 // ---------------------------------------------------------------------
