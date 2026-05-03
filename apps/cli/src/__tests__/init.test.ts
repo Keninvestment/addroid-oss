@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { getCryptoBoundary, readLocalSecrets } from "@addroid/config";
 import { runInit } from "../commands/init.js";
 
 interface Captured {
@@ -292,6 +293,62 @@ test("init --interactive は prompt の回答で .env / config を作る", async
   });
 });
 
+test("init --interactive は Meta OAuth App ID / App Secret を暗号化して secrets.local.yaml に保存する", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const env = {
+      ...process.env,
+      ADDROID_HOME: home,
+    } as NodeJS.ProcessEnv;
+    delete env.DATABASE_URL;
+    delete env.ENCRYPTION_KEY;
+    const answers = [
+      "Agency Ops",
+      "postgresql://addroid:secret@localhost:5432/addroid",
+      "100000000000001",
+      "plain-meta-secret",
+    ];
+
+    const { code, out } = await capture(() =>
+      runInit(
+        [
+          "--interactive",
+          "--skip-deps",
+          "--skip-db-create",
+          "--skip-db-push",
+          "--env-file",
+          envFile,
+        ],
+        {
+          env,
+          isTTY: true,
+          prompt: async () => answers.shift() ?? "",
+          confirm: async (question) => question.includes("Meta OAuth App ID"),
+          randomBytes: () => Buffer.alloc(32, 8),
+        }
+      )
+    );
+
+    assert.equal(code, 0, out.stdout + out.stderr);
+    const secrets = await readLocalSecrets(env);
+    const appIdCiphertext = secrets?.meta?.oauth?.appIdCiphertext;
+    const appSecretCiphertext = secrets?.meta?.oauth?.appSecretCiphertext;
+    assert.ok(appIdCiphertext);
+    assert.ok(appSecretCiphertext);
+    assert.notEqual(appIdCiphertext, "100000000000001");
+    assert.notEqual(appSecretCiphertext, "plain-meta-secret");
+    assert.equal(getCryptoBoundary(env).decrypt(appIdCiphertext), "100000000000001");
+    assert.equal(getCryptoBoundary(env).decrypt(appSecretCiphertext), "plain-meta-secret");
+    const raw = fs.readFileSync(path.join(home, "secrets.local.yaml"), "utf8");
+    assert.doesNotMatch(raw, /100000000000001/);
+    assert.doesNotMatch(raw, /plain-meta-secret/);
+    assert.doesNotMatch(raw, /appId:/);
+    assert.doesNotMatch(raw, /appSecret:/);
+    assert.match(raw, /appIdCiphertext:/);
+    assert.match(raw, /appSecretCiphertext:/);
+  });
+});
+
 test("init --non-interactive --db-push は Prisma setup を実行できる", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
@@ -337,7 +394,7 @@ test("init --non-interactive --db-push は Prisma setup を実行できる", asy
   });
 });
 
-test("init --non-interactive --yes は不足 Meta Ads CLI を uv tool install し .env に bin を保存する", async () => {
+test("init --non-interactive --yes は --install-deps なしでは依存インストールを実行しない", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
     const calls: string[] = [];
@@ -392,9 +449,119 @@ test("init --non-interactive --yes は不足 Meta Ads CLI を uv tool install �
     );
 
     assert.equal(code, 0, out.stdout + out.stderr);
-    assert.ok(calls.some((c) => c.includes("uv tool install meta-ads --python 3.13")));
+    assert.ok(!calls.some((c) => c.includes("uv tool install meta-ads --python 3.13")));
     const envRaw = fs.readFileSync(envFile, "utf8");
-    assert.match(envRaw, /ADDROID_META_CLI_BIN=.*\/\.local\/bin\/meta/);
+    assert.doesNotMatch(envRaw, /ADDROID_META_CLI_BIN=/);
+    assert.doesNotMatch(out.stdout, /Meta Ads CLI\s+: ok - Meta Ads CLI installed/);
+  });
+});
+
+test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ads CLI をセットアップする", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const calls: string[] = [];
+    const env = {
+      ...process.env,
+      ADDROID_HOME: home,
+      HOME: home,
+      PATH: "/nonexistent-empty-path-9999",
+    } as NodeJS.ProcessEnv;
+    delete env.DATABASE_URL;
+    delete env.ENCRYPTION_KEY;
+    delete env.ADDROID_META_ADS_CLI_MOCK;
+    delete env.ADDROID_META_CLI_BIN;
+
+    const { code, out } = await capture(() =>
+      runInit(
+        [
+          "--non-interactive",
+          "--install-deps",
+          "--env-file",
+          envFile,
+          "--skip-db-create",
+          "--skip-db-push",
+        ],
+        {
+          env,
+          isTTY: false,
+          randomBytes: () => Buffer.alloc(32, 5),
+          runCommand: (cmd, args) => {
+            const line = [cmd, ...args].join(" ");
+            calls.push(line);
+            if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (line.includes("uv python install 3.13")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (line.includes("uv tool install meta-ads --python 3.13")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (line.includes("command -v meta")) {
+              return { status: 0, stdout: path.join(home, ".local/bin/meta"), stderr: "" };
+            }
+            return { status: 1, stdout: "", stderr: "not found" };
+          },
+        }
+      )
+    );
+
+    assert.equal(code, 0, out.stdout + out.stderr);
+    assert.ok(calls.some((c) => c.includes("uv tool install meta-ads --python 3.13")));
+    assert.match(out.stdout, /Dependency setup:/);
     assert.match(out.stdout, /Meta Ads CLI\s+: ok - Meta Ads CLI installed/);
+    assert.match(fs.readFileSync(envFile, "utf8"), /ADDROID_META_CLI_BIN=.*\/\.local\/bin\/meta/);
+  });
+});
+
+test("init --non-interactive --yes は既定 DATABASE_URL にランダム password を入れ DB role に設定する", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    let psqlInput = "";
+    const env = {
+      ...process.env,
+      ADDROID_HOME: home,
+      HOME: home,
+    } as NodeJS.ProcessEnv;
+    delete env.DATABASE_URL;
+    delete env.ENCRYPTION_KEY;
+    delete env.ADDROID_META_ADS_CLI_MOCK;
+    delete env.ADDROID_META_CLI_BIN;
+
+    const { code, out } = await capture(() =>
+      runInit(
+        [
+          "--non-interactive",
+          "--yes",
+          "--env-file",
+          envFile,
+          "--skip-deps",
+          "--skip-db-push",
+        ],
+        {
+          env,
+          isTTY: false,
+          randomBytes: (size) => Buffer.alloc(size, 6),
+          runCommand: (cmd, args, opts) => {
+            if ([cmd, ...args].join(" ").includes("command -v meta")) {
+              return { status: 1, stdout: "", stderr: "" };
+            }
+            if (cmd === "psql") {
+              psqlInput = opts?.input ?? "";
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 1, stdout: "", stderr: "not found" };
+          },
+        }
+      )
+    );
+
+    assert.equal(code, 0, out.stdout + out.stderr);
+    const envRaw = fs.readFileSync(envFile, "utf8");
+    assert.match(envRaw, /DATABASE_URL=postgresql:\/\/addroid:[A-Za-z0-9_-]+@localhost:5432\/addroid/);
+    assert.match(psqlInput, /CREATE ROLE addroid LOGIN PASSWORD '[A-Za-z0-9_-]+'/);
+    assert.match(psqlInput, /ALTER ROLE addroid WITH LOGIN PASSWORD '[A-Za-z0-9_-]+'/);
+    assert.match(psqlInput, /ALTER SCHEMA public OWNER TO addroid/);
+    assert.doesNotMatch(psqlInput, /CREATE ROLE addroid LOGIN;/);
   });
 });

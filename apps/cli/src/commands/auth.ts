@@ -290,7 +290,7 @@ async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
     if (adapterSelection.choice === "stub") {
       process.stderr.write(
         `[addroid auth meta] Meta OAuth が未設定です: ${adapterSelection.reason}\n` +
-          "  ~/.addroid/secrets.local.yaml に meta.oauth.appId / meta.oauth.appSecret を設定してください。\n"
+          "  `addroid init` で Meta OAuth App ID / App Secret を設定してください (どちらも暗号化保存されます)。\n"
       );
       return 2;
     }

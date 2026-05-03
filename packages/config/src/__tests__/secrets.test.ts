@@ -71,15 +71,15 @@ test("getLocalSecret resolves dotted keys and returns null for missing branches"
   }
 });
 
-test("LocalSecretsSchema accepts meta.oauth.{appId,appSecret,permissions}", async () => {
+test("LocalSecretsSchema accepts meta.oauth.{appIdCiphertext,appSecretCiphertext,permissions}", async () => {
   const { env, dir } = await tempHome();
   try {
     await writeLocalSecrets(
       {
         meta: {
           oauth: {
-            appId: "100000000000001",
-            appSecret: "shh-meta",
+            appIdCiphertext: "v1.aes256gcm.fake.iv.tag.app-id",
+            appSecretCiphertext: "v1.aes256gcm.fake.iv.tag.payload",
             permissions: ["ads_management", "ads_read", "business_management"],
           },
         },
@@ -87,15 +87,21 @@ test("LocalSecretsSchema accepts meta.oauth.{appId,appSecret,permissions}", asyn
       env
     );
     const round = await readLocalSecrets(env);
-    assert.equal(round?.meta?.oauth?.appId, "100000000000001");
-    assert.equal(round?.meta?.oauth?.appSecret, "shh-meta");
+    assert.equal(round?.meta?.oauth?.appIdCiphertext, "v1.aes256gcm.fake.iv.tag.app-id");
+    assert.equal(round?.meta?.oauth?.appSecretCiphertext, "v1.aes256gcm.fake.iv.tag.payload");
     assert.deepEqual(round?.meta?.oauth?.permissions, [
       "ads_management",
       "ads_read",
       "business_management",
     ]);
-    assert.equal(await getLocalSecret("meta.oauth.appId", env), "100000000000001");
-    assert.equal(await getLocalSecret("meta.oauth.appSecret", env), "shh-meta");
+    assert.equal(
+      await getLocalSecret("meta.oauth.appIdCiphertext", env),
+      "v1.aes256gcm.fake.iv.tag.app-id"
+    );
+    assert.equal(
+      await getLocalSecret("meta.oauth.appSecretCiphertext", env),
+      "v1.aes256gcm.fake.iv.tag.payload"
+    );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -108,6 +114,21 @@ test("readLocalSecrets surfaces SecretsParseError on bad shape", async () => {
     await fs.writeFile(
       path.join(dir, "secrets.local.yaml"),
       "github:\n  oauth:\n    clientId: 12345\n", // number, schema demands string
+      { encoding: "utf8", mode: 0o600 }
+    );
+    await assert.rejects(() => readLocalSecrets(env), SecretsParseError);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("LocalSecretsSchema rejects plaintext meta.oauth.appId / appSecret", async () => {
+  const { env, dir } = await tempHome();
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "secrets.local.yaml"),
+      "meta:\n  oauth:\n    appId: '100000000000001'\n    appSecret: 'plaintext-secret'\n",
       { encoding: "utf8", mode: 0o600 }
     );
     await assert.rejects(() => readLocalSecrets(env), SecretsParseError);

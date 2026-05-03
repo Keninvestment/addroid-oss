@@ -235,8 +235,13 @@ brew install python@3.13
 ```
 
 ### 5.3 `meta-ads-cli: error`
-本番では Meta Ads CLI を導入してください。`addroid init` は `uv` があれば
-次のコマンドを自動実行し、entry point の `meta` を `.env` の
+本番では Meta Ads CLI を導入してください。通常は次で初回セットアップの流れに戻せます。
+
+```bash
+npm run addroid -- init --install-deps
+```
+
+`addroid init` は `uv` があれば次のコマンドを自動実行し、entry point の `meta` を `.env` の
 `ADDROID_META_CLI_BIN` に保存します。
 
 ```bash
@@ -342,10 +347,11 @@ deterministic に実行されます。Apply / Activate も mock 経路で完結�
 
 ### 8.3 Meta execution mode が `unconfigured` のままになる
 - `oauth_tokens` テーブルに provider="meta" のレコードがあるか確認
-- `ENCRYPTION_KEY` が変わっていないか確認 (変更後はトークンを復号できない)
+- `ENCRYPTION_KEY` が変わっていないか確認 (変更後は OAuth client / token を復号できない)
 - `apps/web/lib/meta-runtime.ts` の `selectMetaAdapter` が `StubMetaAdapter` を
-  返している場合は `~/.addroid/secrets.local.yaml` の `meta.oauth.appId` /
-  `meta.oauth.appSecret` が不足している
+  返している場合は `~/.addroid/secrets.local.yaml` の `meta.oauth.appIdCiphertext` /
+  `meta.oauth.appSecretCiphertext` が不足している、または `ENCRYPTION_KEY` が変わっていて
+  Meta OAuth App ID / App Secret を復号できない
 - `addroid accounts list` で登録済み Ad Account と default を確認し、未設定なら
   `addroid accounts refresh --select-default` または `addroid accounts select` を実行する
 

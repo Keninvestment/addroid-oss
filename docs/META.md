@@ -40,17 +40,21 @@ insights をすべて in-memory で deterministic に再現します。`graph.fa
 
 ### 2.2 OAuth client secret
 
-Meta OAuth App ID / App Secret は `~/.addroid/secrets.local.yaml` に保存します。
-`addroid init` の対話型 wizard で入力するか、手動で次の形にしてください。
+Meta OAuth App ID / App Secret は `addroid init` の対話型 wizard で入力します。
+どちらも `ENCRYPTION_KEY` で暗号化され、`~/.addroid/secrets.local.yaml` には
+暗号文 (`appIdCiphertext` / `appSecretCiphertext`) だけを保存します。
+
+保存後の形は次の通りです。ciphertext は手で編集せず、再設定したい場合は
+`addroid init` を再実行してください。
 
 ```yaml
 meta:
   oauth:
-    appId: "..."
-    appSecret: "..."
+    appIdCiphertext: "v1.aes256gcm...."
+    appSecretCiphertext: "v1.aes256gcm...."
 ```
 
-OAuth で取得した long-lived token は `ENCRYPTION_KEY` で暗号化して `oauth_tokens`
+OAuth で取得した long-lived token も `ENCRYPTION_KEY` で暗号化して `oauth_tokens`
 に保存します。Meta Ads CLI 実行時は公式 CLI 互換の `ACCESS_TOKEN` /
 `AD_ACCOUNT_ID` だけを短命な子プロセス環境に注入します。
 

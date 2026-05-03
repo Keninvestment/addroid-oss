@@ -192,8 +192,8 @@ export default async function AccountsPage({
               title="Meta と未連携です。"
               description={
                 adapterChoice === "stub"
-                  ? `Meta OAuth が未設定です: ${adapterReason}。secrets.local.yaml に meta.oauth.{appId,appSecret} を設定してください。`
-                  : "下のボタンから Meta OAuth を開始してください。Meta App ID は ~/.addroid/secrets.local.yaml を参照します。"
+                  ? `Meta OAuth が未設定です: ${adapterReason}。addroid init で Meta App ID / App Secret を設定してください。どちらも暗号化されて保存されます。`
+                  : "下のボタンから Meta OAuth を開始してください。OAuth client は ~/.addroid/secrets.local.yaml の暗号化済み設定を参照します。"
               }
               action={
                 adapterChoice !== "stub" ? (

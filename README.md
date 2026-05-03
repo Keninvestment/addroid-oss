@@ -6,8 +6,10 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
 自動実行します。
 
 > **Status:** Initial OSS release candidate. `npm install` / `addroid init` /
-> `addroid up` の 3 コマンドでローカル起動が完結します。Slack / Meta / LLM Provider /
-> Image Provider はすべて任意統合で、未設定でも core ヘルスチェックを通過します。
+> `addroid up` の 3 コマンドでローカル起動が完結します。`addroid init` は uv /
+> Python / Meta Ads CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
+> Slack / Meta OAuth / LLM Provider / Image Provider は任意統合で、未設定でも core
+> ヘルスチェックを通過します。
 
 ---
 
@@ -35,9 +37,50 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
 
 ## 必要条件
 
-- Node.js 22.11 以上 (`.nvmrc` 同梱、Slack Socket Mode 検証で標準 `globalThis.WebSocket` を使うため)
-- PostgreSQL 16 以上 (ローカル `localhost:5432` を想定)
-- Python 3.12+ + [uv](https://docs.astral.sh/uv/) — Meta Ads CLI 実行に必要
+最初に手で用意する必要があるのは **Node.js / npm** です。Git でこのリポジトリを
+clone する場合は Git も必要です。`.nvmrc` に固定しているため、`nvm use` で
+Node.js 22.11 以上を使ってください。
+
+初心者向けに分けると、セットアップで必要になるものは次の 3 種類です。
+
+| 区分 | 必要なもの | 何に使うか | 誰が入れるか |
+|---|---|---|---|
+| 先に用意 | Node.js / npm | `npm install` と AdDroid CLI の実行 | ユーザー |
+| 先に用意 | Git | リポジトリ clone と GitOps / PR 管理 | ユーザー |
+| `npm install` | JavaScript / TypeScript 依存 | Web UI、worker、CLI、Prisma など | npm が repo 内の `node_modules` に入れる |
+| `addroid init` | uv | Python と Meta Ads CLI の導入補助 | 実行前に確認してから導入 |
+| `addroid init` | Python 3.12+ | Meta Ads CLI の実行環境 | uv-managed Python 3.13 を導入 |
+| `addroid init` | Meta Ads CLI | Meta 広告への Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| `addroid init` | PostgreSQL 16+ | AdDroid DB、queue、監査ログ | Homebrew / apt / dnf 等を実行前に確認 |
+| Meta 側で作成 | Meta Developer App | App ID / App Secret と OAuth 認証 | ユーザーが Meta for Developers で作成 |
+
+`addroid init` は初回セットアップ中に次の依存を診断します。不足している場合は、
+実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う可能性がある
+system 変更は既定で no です。
+
+| 依存 | 用途 | `addroid init` の動作 |
+|---|---|---|
+| uv | Python / Meta Ads CLI の導入 | 無ければ公式 installer を実行前に確認 |
+| Python 3.12+ | Meta Ads CLI の実行 | uv-managed Python 3.13 を導入 |
+| Meta Ads CLI | Meta Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| PostgreSQL 16+ | DB / pg-boss queue | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
+
+PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必要になる場合があります。
+セットアップに失敗した場合でも、表示されたコマンドを実行してから `npm run addroid -- init`
+を再実行すれば途中から続行できます。
+
+`npm install` だけでは Meta Ads CLI や PostgreSQL は入りません。OS やユーザー環境を
+変更するものは `addroid init` の中で確認してから実行します。
+
+`addroid init` が作成する主なローカルファイル:
+
+- `.env`: `DATABASE_URL`、`ENCRYPTION_KEY`、Meta Ads CLI のパス
+- `~/.addroid/config.yaml`: AdDroid のローカル設定
+- `~/.addroid/secrets.local.yaml`: Meta OAuth App ID / App Secret などの暗号化済み secret
+- `~/.addroid/storage` / `~/.addroid/logs` / `~/.addroid/run`: 実行時データ、ログ、pid file
+
+これらの secret 系ファイルは git 追跡対象外です。Meta OAuth App ID / App Secret は
+`ENCRYPTION_KEY` で暗号化され、平文では保存しません。
 
 ### サポート対象プラットフォーム
 
@@ -67,26 +110,99 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 ---
 
+## Meta App ID / App Secret の取得
+
+Meta へ実際に接続して Apply / Activate するには、Meta for Developers で OAuth 用の
+App を作成し、App ID / App Secret を取得します。画面名は Meta 側で変わることが
+ありますが、流れは次の通りです。
+
+公式リンク:
+
+- [Meta for Developers](https://developers.facebook.com/)
+- [Apps dashboard](https://developers.facebook.com/apps/)
+- [Create app](https://developers.facebook.com/apps/create/)
+- [Meta: Create an app](https://developers.facebook.com/docs/development/create-an-app/)
+- [Meta: Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)
+- [Meta Marketing API](https://developers.facebook.com/docs/marketing-api/)
+
+手順:
+
+1. [Meta for Developers](https://developers.facebook.com/) にログインし、必要なら開発者登録を完了します。
+2. [Apps dashboard](https://developers.facebook.com/apps/) で **Create app** を押します。
+3. 用途は Business / business integration / manage business assets に近いものを選びます。Business Portfolio への紐付けを求められた場合は、広告アカウントを管理している Business を選びます。
+4. App 作成後、App Dashboard の **Settings > Basic** で **App ID** を確認します。同じ画面の **App Secret** は `Show` などで表示してコピーします。
+5. Product で **Facebook Login for Business** を追加し、必要に応じて **Marketing API** も有効化します。
+6. Facebook Login for Business の OAuth 設定で **Valid OAuth Redirect URIs** に次を登録します。
+
+```text
+http://127.0.0.1:3000/api/oauth/meta/callback
+```
+
+`ADDROID_WEB_PORT` を変える場合は、ポート番号も同じ値にしてください。
+
+7. Permission / scope は、まず `ads_read`, `ads_management`, `business_management` を使います。App が Development mode の間は、基本的に App admin / developer / tester と、その人がアクセスできる Business / Ad Account で試してください。
+8. `npm run addroid -- init` の対話中に Meta OAuth App ID / App Secret を聞かれたら、ここで取得した値を入力します。どちらも暗号化されて `~/.addroid/secrets.local.yaml` に保存されます。
+9. 初回セットアップ後、Meta アカウント連携は次で行います。
+
+```bash
+npm run addroid -- auth meta
+```
+
+App Secret はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
+などには貼らず、`addroid init` の入力欄にだけ貼ってください。
+
+---
+
 ## 3-command クイックスタート
 
 ```bash
-# 1. JavaScript 依存をインストール
+# 1. 依存をインストール
 npm install
 
-# 2. 対話型セットアップ (.env / ENCRYPTION_KEY / DB / ~/.addroid を作成)
+# 2. 初回セットアップ
+#    uv / Python / Meta Ads CLI / PostgreSQL の不足分は確認しながら入れられます。
 npm run addroid -- init
 
 # 3. web (127.0.0.1:3000) と worker (pg-boss) を起動
 npm run addroid -- up
 ```
 
-`addroid init` は TTY では対話型 wizard として動作し、依存診断、`.env` 作成、
-`ENCRYPTION_KEY` 生成、ローカル PostgreSQL の DB/role 作成、Prisma schema 反映を
-確認付きで進めます。CI や手元の自動検証では
-`npm run addroid -- init --non-interactive --yes --skip-db-push` を使えます。
+`addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
+コマンドを見せた上で個別に確認します。
 
-`addroid doctor` は任意の診断コマンドです。起動前に状態を確認したい場合は
-`npm run addroid -- doctor` を実行してください。
+初回セットアップで作成・設定されるもの:
+
+- `.env`: password 付き `DATABASE_URL` / `ENCRYPTION_KEY` / Meta Ads CLI のパス
+- `~/.addroid/config.yaml`: ローカル設定
+- `~/.addroid/secrets.local.yaml`: OAuth secret 置き場の stub
+- PostgreSQL の `addroid` DB / role (ローカル既定ではランダム password を生成)
+- Prisma schema
+- uv-managed Python 3.13 と Meta Ads CLI
+
+CI や手元の自動検証では次を使えます。
+
+```bash
+npm run addroid -- init --non-interactive --yes --skip-deps --skip-db-push
+```
+
+外部 API に接続せずに起動確認だけしたい場合は mock フラグも同時に作成できます。
+
+```bash
+npm run addroid -- init --non-interactive --yes --skip-deps --mock-integrations --skip-db-push
+```
+
+起動前に状態を確認したい場合は `doctor` を実行します。
+
+```bash
+npm run addroid -- doctor
+```
+
+`doctor` で `meta-ads-cli` が error になった場合は、通常は再度 `init` を実行すれば
+Meta Ads CLI の導入を試行します。
+
+```bash
+npm run addroid -- init --install-deps
+```
 
 `addroid` を `npm install -g @addroid/cli` で導入済みの場合、CLI 操作は
 `npm run addroid --` を `addroid` に置き換えられます。worker のみ別プロセスに分離して水平スケールしたい
@@ -94,7 +210,7 @@ npm run addroid -- up
 場合のみ `npm run dev` / `npm run dev:worker` を直接呼び出せます。その場合は root の
 `.env.local` を shell に export してから起動してください。
 
-PostgreSQL の準備手順、`.env` と `.env.local` の挙動差、`addroid doctor` が点検する 7 項目の
+PostgreSQL の手動準備手順、`.env` と `.env.local` の挙動差、`addroid doctor` が点検する項目の
 詳細は [`docs/SETUP.md`](docs/SETUP.md) を参照してください。
 
 ---
@@ -140,7 +256,7 @@ addroid/
 | コマンド | 説明 |
 |---|---|
 | `npm install` | ワークスペース全体の依存解決 |
-| `npm run addroid -- init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid`) |
+| `npm run addroid -- init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI) |
 | `npm run addroid -- doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
 | `npm run addroid -- up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
 | `npm run addroid -- down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |

@@ -20,6 +20,7 @@ import { randomBytes } from "node:crypto";
 
 import type { PrismaClient } from "@addroid/db";
 import type { MetaOAuthTokenRecord } from "@addroid/meta-adapter";
+import { getCryptoBoundary } from "@addroid/config";
 
 import {
   buildPrismaMetaAdapterSelection,
@@ -231,10 +232,19 @@ test("buildPrismaMetaAdapterSelection: OAuth 未設定 → Stub にフォール�
 test("buildPrismaMetaAdapterSelection: OAuth client + crypto 揃う → Real adapter (空 store でも load は null)", async () => {
   const { env, dir } = await tempHome();
   try {
+    const encryptionKey = randomBytes(32).toString("base64");
+    const appIdCiphertext = getCryptoBoundary({
+      ...env,
+      ENCRYPTION_KEY: encryptionKey,
+    } as NodeJS.ProcessEnv).encrypt("100000000000001");
+    const appSecretCiphertext = getCryptoBoundary({
+      ...env,
+      ENCRYPTION_KEY: encryptionKey,
+    } as NodeJS.ProcessEnv).encrypt("shh-meta");
     // secrets.local.yaml に Meta OAuth client を書き込む
     await fs.writeFile(
       path.join(dir, "secrets.local.yaml"),
-      "meta:\n  oauth:\n    appId: '100000000000001'\n    appSecret: 'shh-meta'\n    permissions:\n      - ads_management\n      - business_management\n",
+      `meta:\n  oauth:\n    appIdCiphertext: '${appIdCiphertext}'\n    appSecretCiphertext: '${appSecretCiphertext}'\n    permissions:\n      - ads_management\n      - business_management\n`,
       { encoding: "utf8", mode: 0o600 }
     );
     const { client } = makeFakePrisma();
@@ -242,7 +252,7 @@ test("buildPrismaMetaAdapterSelection: OAuth client + crypto 揃う → Real ada
       prisma: client,
       env: {
         ...env,
-        ENCRYPTION_KEY: randomBytes(32).toString("base64"),
+        ENCRYPTION_KEY: encryptionKey,
         // 127.0.0.1:3000 デフォルトを採用する binding 経路 (resolveWebBinding) は
         // 環境変数なしで通るため、ここでは追加設定不要。
       } as NodeJS.ProcessEnv,

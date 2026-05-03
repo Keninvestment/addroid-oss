@@ -3,11 +3,11 @@
 // `~/.addroid/secrets.local.yaml` はユーザーのローカル機微情報をまとめる任意ファイルで
 // `.gitignore` で追跡対象外。許容する値:
 //   - github.oauth.clientId / clientSecret  (GitHub OAuth クライアント)
-//   - meta.oauth.appId / appSecret           (Meta Login for Business OAuth クライアント)
+//   - meta.oauth.appIdCiphertext / appSecretCiphertext (Meta Login for Business OAuth クライアント)
 //   - meta.oauth.permissions (string[])      (override default scopes)
 //   - meta.accessToken                       (オプション: 開発時の手動トークン)
-// 値は YAML 上は平文だが、ファイルパーミッション 0600 を強制し、git 追跡対象外。
-// DB に書き込む値は `getCryptoBoundary` で暗号化する。
+// OAuth client secret / token 等の機微値は YAML 上でも ciphertext とし、
+// ファイルパーミッション 0600 を強制し、git 追跡対象外にする。
 
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
@@ -33,8 +33,10 @@ export const LocalSecretsSchema = z
       .object({
         oauth: z
           .object({
-            appId: z.string().min(1).optional(),
-            appSecret: z.string().min(1).optional(),
+            appIdCiphertext: z.string().min(1).optional(),
+            appSecretCiphertext: z.string().min(1).optional(),
+            appId: z.never().optional(),
+            appSecret: z.never().optional(),
             permissions: z.array(z.string().min(1)).optional(),
           })
           .partial()

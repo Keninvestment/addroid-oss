@@ -23,6 +23,7 @@ import {
   ConfigParseError,
   defaultAddroidConfig,
   ensureAddroidPaths,
+  getCryptoBoundary,
   readAddroidConfig,
   readLocalSecrets,
   writeAddroidConfig,
@@ -44,7 +45,10 @@ const SECRETS_STUB =
   "# 例: github_oauth_client_secret: \"...\"\n" +
   "# OAuth トークンや per-host の機微情報をここに置きます。値は ENCRYPTION_KEY で暗号化されます。\n";
 
-const DEFAULT_DATABASE_URL = "postgresql://addroid@localhost:5432/addroid";
+const DEFAULT_DATABASE_USER = "addroid";
+const DEFAULT_DATABASE_NAME = "addroid";
+const DEFAULT_DATABASE_HOST = "localhost";
+const DEFAULT_DATABASE_PORT = "5432";
 const META_ADS_CLI_PYTHON_VERSION = "3.13";
 
 type PromptFn = (question: string, defaultValue?: string) => Promise<string>;
@@ -119,7 +123,7 @@ export async function runInit(
     return runInteractiveInit(opts, overrides);
   }
 
-  if (opts.yes || opts.projectName || opts.databaseUrl || opts.mockIntegrations) {
+  if (shouldRunNonInteractiveSetup(opts)) {
     return runNonInteractiveSetup(opts, overrides);
   }
 
@@ -127,6 +131,18 @@ export async function runInit(
   if (!result) return 1;
   printScaffoldResult(result);
   return 0;
+}
+
+function shouldRunNonInteractiveSetup(opts: InitOptions): boolean {
+  return Boolean(
+    opts.yes ||
+      opts.installDeps ||
+      opts.dbPush ||
+      opts.projectName ||
+      opts.databaseUrl ||
+      opts.envFile ||
+      opts.mockIntegrations
+  );
 }
 
 async function runNonInteractiveSetup(
@@ -137,8 +153,8 @@ async function runNonInteractiveSetup(
   const runner = overrides.runCommand ?? defaultRunCommand;
   const lines: string[] = ["[addroid init]", "", "Running non-interactive setup."];
 
-  if (!opts.skipDeps && (opts.yes || opts.installDeps)) {
-    const dep = setupDependencies({ opts, env, runner });
+  if (!opts.skipDeps && opts.installDeps) {
+    const dep = await setupDependencies({ opts, env, runner });
     lines.push(...dep.lines);
     if (!dep.ok) {
       process.stdout.write(lines.join("\n") + "\n");
@@ -150,7 +166,7 @@ async function runNonInteractiveSetup(
     if (detected) env.ADDROID_META_CLI_BIN = detected;
   }
 
-  const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL ?? DEFAULT_DATABASE_URL;
+  const databaseUrl = resolveInitDatabaseUrl(opts, env, overrides);
   const key = env.ENCRYPTION_KEY ?? generateEncryptionKey(overrides);
   const envResult = await ensureEnvFile({
     env,
@@ -177,6 +193,11 @@ async function runNonInteractiveSetup(
       process.stdout.write(lines.join("\n") + "\n");
       return 1;
     }
+  }
+
+  if (opts.mockIntegrations) {
+    lines.push("");
+    lines.push("Mock integrations are enabled in .env. Remove mock flags before real Meta / GitHub connections.");
   }
 
   lines.push("");
@@ -220,9 +241,12 @@ async function runInteractiveInit(
       process.stdout.write(lines.join("\n") + "\n");
       lines.length = 0;
       const shouldInstall =
-        opts.installDeps || opts.yes || (await confirm("可能なものを自動インストールしますか?", true));
+        opts.installDeps || opts.yes || (await confirm("不足依存を一つずつ確認してセットアップしますか?", true));
       if (shouldInstall) {
-        const installResults = installMissingDependencies(failing, runner, env);
+        const installResults = await installMissingDependencies(failing, runner, env, {
+          assumeYes: opts.yes || opts.installDeps,
+          confirm,
+        });
         for (const r of installResults) {
           process.stdout.write(formatCommandOutcome(r.label, r.outcome).join("\n") + "\n");
           if (!r.outcome.ok) {
@@ -261,7 +285,7 @@ async function runInteractiveInit(
     ));
   const databaseUrl =
     opts.databaseUrl ??
-    (await prompt("DATABASE_URL", env.DATABASE_URL ?? DEFAULT_DATABASE_URL));
+    (await prompt("DATABASE_URL", resolveInitDatabaseUrl(opts, env, overrides)));
   const encryptionKey = env.ENCRYPTION_KEY ?? generateEncryptionKey(overrides);
   if (!env.ADDROID_META_CLI_BIN) {
     const detected = detectMetaCliBin(runner, env);
@@ -281,6 +305,9 @@ async function runInteractiveInit(
 
   const out: string[] = [];
   out.push(...formatEnvResult(envResult));
+  if (opts.mockIntegrations) {
+    out.push("  mock mode     : enabled (remove ADDROID_*_MOCK before real Meta / GitHub connections)");
+  }
   out.push(...formatScaffoldResult(scaffold));
 
   const shouldCreateDb =
@@ -349,7 +376,7 @@ async function maybeConfigureMetaOAuthSecrets(opts: {
   assumeYes: boolean;
 }): Promise<boolean> {
   const existing = await readLocalSecrets(opts.env).catch(() => null);
-  if (existing?.meta?.oauth?.appId && existing.meta.oauth.appSecret) {
+  if (existing?.meta?.oauth?.appIdCiphertext && existing.meta.oauth.appSecretCiphertext) {
     opts.out.push("  Meta OAuth    : client configured");
     return true;
   }
@@ -360,22 +387,21 @@ async function maybeConfigureMetaOAuthSecrets(opts: {
     opts.out.push("  Meta OAuth    : not configured");
     return false;
   }
-  const appId = (
-    await opts.prompt("Meta App ID", existing?.meta?.oauth?.appId ?? "")
-  ).trim();
+  const appId = (await opts.prompt("Meta App ID", "")).trim();
   const appSecret = (await opts.prompt("Meta App Secret", "")).trim();
   if (!appId || !appSecret) {
     opts.out.push("  Meta OAuth    : skipped (App ID / App Secret が未入力)");
     return false;
   }
+  const crypto = getCryptoBoundary(opts.env);
   const next = {
     ...(existing ?? {}),
     meta: {
       ...(existing?.meta ?? {}),
       oauth: {
         ...(existing?.meta?.oauth ?? {}),
-        appId,
-        appSecret,
+        appIdCiphertext: crypto.encrypt(appId),
+        appSecretCiphertext: crypto.encrypt(appSecret),
       },
     },
   };
@@ -579,6 +605,24 @@ function resolveDefaultEnvFile(): string {
   }
 }
 
+function resolveInitDatabaseUrl(
+  opts: InitOptions,
+  env: NodeJS.ProcessEnv,
+  overrides: InitCommandOverrides
+): string {
+  if (opts.databaseUrl) return opts.databaseUrl;
+  if (env.DATABASE_URL && !isPlaceholderEnvValue("DATABASE_URL", env.DATABASE_URL)) {
+    return env.DATABASE_URL;
+  }
+  return buildDefaultDatabaseUrl(generateDatabasePassword(overrides));
+}
+
+function buildDefaultDatabaseUrl(password: string): string {
+  const encodedUser = encodeURIComponent(DEFAULT_DATABASE_USER);
+  const encodedPassword = encodeURIComponent(password);
+  return `postgresql://${encodedUser}:${encodedPassword}@${DEFAULT_DATABASE_HOST}:${DEFAULT_DATABASE_PORT}/${DEFAULT_DATABASE_NAME}`;
+}
+
 function maybeCreateLocalDatabase(
   databaseUrl: string,
   runner: CommandRunner,
@@ -587,17 +631,30 @@ function maybeCreateLocalDatabase(
   if (!isDefaultLocalDatabase(databaseUrl)) {
     return { ok: true, detail: "custom DATABASE_URL のため DB 自動作成はスキップしました。" };
   }
+  const parsed = new URL(databaseUrl);
+  const password = decodeURIComponent(parsed.password);
+  if (!password) {
+    return {
+      ok: false,
+      detail: "local DATABASE_URL に password がありません。`addroid init` で生成した URL を使うか、password 付き URL を指定してください。",
+    };
+  }
   const sql = [
     "DO $$",
     "BEGIN",
     "  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'addroid') THEN",
-    "    CREATE ROLE addroid LOGIN;",
+    `    CREATE ROLE addroid LOGIN PASSWORD ${sqlLiteral(password)};`,
+    "  ELSE",
+    `    ALTER ROLE addroid WITH LOGIN PASSWORD ${sqlLiteral(password)};`,
     "  END IF;",
     "END",
     "$$;",
     "SELECT 'CREATE DATABASE addroid OWNER addroid'",
     "WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'addroid')\\gexec",
     "GRANT ALL PRIVILEGES ON DATABASE addroid TO addroid;",
+    "\\connect addroid",
+    "ALTER SCHEMA public OWNER TO addroid;",
+    "GRANT ALL ON SCHEMA public TO addroid;",
     "",
   ].join("\n");
   const r = runner("psql", ["-d", "postgres", "-v", "ON_ERROR_STOP=1"], {
@@ -612,6 +669,10 @@ function maybeCreateLocalDatabase(
     ok: false,
     detail: summarizeCommandFailure(r),
   };
+}
+
+function sqlLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function runPrismaSetup(
@@ -638,14 +699,21 @@ function runPrismaSetup(
   return { ok: true, detail: "Prisma client generated and schema pushed" };
 }
 
-function installMissingDependencies(
+async function installMissingDependencies(
   checks: CheckResult[],
   runner: CommandRunner,
-  env: NodeJS.ProcessEnv
-): Array<{ label: string; outcome: { ok: boolean; detail: string } }> {
+  env: NodeJS.ProcessEnv,
+  opts: { assumeYes?: boolean; confirm?: ConfirmFn } = {}
+): Promise<Array<{ label: string; outcome: { ok: boolean; detail: string } }>> {
   const out: Array<{ label: string; outcome: { ok: boolean; detail: string } }> = [];
   for (const check of checks) {
     if (check.name === "uv") {
+      const command = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+      const approval = await confirmInstallCommand(opts, "uv", command, false);
+      if (!approval.ok) {
+        out.push({ label: "uv", outcome: approval.outcome });
+        return out;
+      }
       const r = runner("sh", ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"], {
         env,
         timeoutMs: 180_000,
@@ -653,8 +721,15 @@ function installMissingDependencies(
       const outcome = commandOutcome(r, "uv installed");
       if (outcome.ok) prependUvBinToPath(env);
       out.push({ label: "uv", outcome });
+      if (!outcome.ok) return out;
     }
     if (check.name === "python3.12") {
+      const command = `uv python install ${META_ADS_CLI_PYTHON_VERSION}`;
+      const approval = await confirmInstallCommand(opts, "Python 3.12+", command, true);
+      if (!approval.ok) {
+        out.push({ label: "Python 3.12+", outcome: approval.outcome });
+        return out;
+      }
       const r = runner(
         "sh",
         [
@@ -670,8 +745,15 @@ function installMissingDependencies(
         label: "Python 3.12+",
         outcome: commandOutcome(r, `Python ${META_ADS_CLI_PYTHON_VERSION} installed`),
       });
+      if (!out[out.length - 1]!.outcome.ok) return out;
     }
     if (check.name === "meta-ads-cli") {
+      const command = `uv tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION}`;
+      const approval = await confirmInstallCommand(opts, "Meta Ads CLI", command, true);
+      if (!approval.ok) {
+        out.push({ label: "Meta Ads CLI", outcome: approval.outcome });
+        return out;
+      }
       const r = runner(
         "sh",
         [
@@ -685,22 +767,54 @@ function installMissingDependencies(
       );
       const outcome = commandOutcome(r, "Meta Ads CLI installed");
       if (outcome.ok && !env.ADDROID_META_CLI_BIN) {
-        env.ADDROID_META_CLI_BIN = expectedMetaCliBin(env);
+        prependUvBinToPath(env);
+        const detected = detectMetaCliBin(runner, env);
+        if (detected) {
+          env.ADDROID_META_CLI_BIN = detected;
+        } else {
+          outcome.ok = false;
+          outcome.detail = "Meta Ads CLI install command succeeded, but `meta` was not found on PATH.";
+        }
       }
       out.push({ label: "Meta Ads CLI", outcome });
+      if (!outcome.ok) return out;
     }
     if (check.name === "postgres-16") {
-      out.push({ label: "PostgreSQL 16+", outcome: installPostgres(runner, env) });
+      const command =
+        process.platform === "darwin"
+          ? "brew install postgresql@16 && brew services start postgresql@16"
+          : process.platform === "linux"
+            ? "sudo apt-get update && sudo apt-get install -y postgresql-16 postgresql-client-16 (or dnf equivalent)"
+            : "install PostgreSQL 16+ with your OS package manager";
+      const approval = await confirmInstallCommand(opts, "PostgreSQL 16+", command, false);
+      if (!approval.ok) {
+        out.push({ label: "PostgreSQL 16+", outcome: approval.outcome });
+        return out;
+      }
+      const outcome = installPostgres(runner, env);
+      out.push({ label: "PostgreSQL 16+", outcome });
+      if (!outcome.ok) return out;
     }
   }
   return out;
 }
 
-function setupDependencies(opts: {
+async function confirmInstallCommand(
+  opts: { assumeYes?: boolean; confirm?: ConfirmFn },
+  label: string,
+  command: string,
+  defaultYes: boolean
+): Promise<{ ok: true } | { ok: false; outcome: { ok: false; detail: string } }> {
+  if (opts.assumeYes || !opts.confirm) return { ok: true };
+  const approved = await opts.confirm(`${label} を次のコマンドでインストールしますか? ${command}`, defaultYes);
+  return approved ? { ok: true } : { ok: false, outcome: { ok: false, detail: "skipped by user" } };
+}
+
+async function setupDependencies(opts: {
   opts: InitOptions;
   env: NodeJS.ProcessEnv;
   runner: CommandRunner;
-}): { ok: boolean; lines: string[] } {
+}): Promise<{ ok: boolean; lines: string[] }> {
   const checks = [
     checkPlatform(),
     checkUv(),
@@ -714,7 +828,7 @@ function setupDependencies(opts: {
   if (failing.length === 0) {
     return { ok: true, lines };
   }
-  const installResults = installMissingDependencies(failing, opts.runner, opts.env);
+  const installResults = await installMissingDependencies(failing, opts.runner, opts.env);
   for (const r of installResults) {
     lines.push(...formatCommandOutcome(r.label, r.outcome));
     if (!r.outcome.ok) {
@@ -732,13 +846,6 @@ function detectMetaCliBin(runner: CommandRunner, env: NodeJS.ProcessEnv): string
   if (r.status !== 0) return null;
   const first = (r.stdout || "").trim().split(/\r?\n/)[0]?.trim();
   return first || null;
-}
-
-function expectedMetaCliBin(env: NodeJS.ProcessEnv): string {
-  const binDir =
-    env.UV_TOOL_BIN_DIR?.trim() ||
-    path.join(env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir(), ".local", "bin");
-  return path.join(binDir, "meta");
 }
 
 function prependUvBinToPath(env: NodeJS.ProcessEnv): void {
@@ -837,6 +944,11 @@ async function defaultConfirm(question: string, defaultYes = false): Promise<boo
 function generateEncryptionKey(overrides: InitCommandOverrides): string {
   const rb = overrides.randomBytes ?? randomBytes;
   return rb(32).toString("base64");
+}
+
+function generateDatabasePassword(overrides: InitCommandOverrides): string {
+  const rb = overrides.randomBytes ?? randomBytes;
+  return rb(18).toString("base64url");
 }
 
 function isDefaultLocalDatabase(databaseUrl: string): boolean {
@@ -1001,12 +1113,12 @@ function printInitHelp(): void {
       "",
       "Options:",
       "  --interactive          対話型ウィザードを強制",
-      "  --non-interactive      対話せず ~/.addroid scaffold のみ実行",
-      "  --yes, -y              既定値で不足 .env を作成し、確認を省略",
+      "  --non-interactive      対話せず実行。単独指定時は ~/.addroid scaffold のみ作成",
+      "  --yes, -y              既定値で .env・DB を初期化し、確認を省略",
       "  --project-name NAME    workspace 名を設定",
       "  --database-url URL     .env に保存する DATABASE_URL",
       "  --env-file PATH        書き込み先 env file (既定: repo root の .env)",
-      "  --install-deps         不足依存の自動インストールを試行",
+      "  --install-deps         uv / Python / Meta Ads CLI / PostgreSQL の不足分を明示的にインストール",
       "  --skip-deps            依存診断をスキップ",
       "  --skip-db-create       ローカル DB / role 作成をスキップ",
       "  --db-push              npm run db:generate && npm run db:push を実行",

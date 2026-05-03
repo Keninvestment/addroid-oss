@@ -213,7 +213,7 @@ export function checkMetaAdsCli(env: NodeJS.ProcessEnv = process.env): CheckResu
     name: "meta-ads-cli",
     state: "error",
     message: "Meta Ads CLI が見つかりません。",
-    hint: "Meta Ads CLI をインストールしてください。推奨: `uv tool install meta-ads --python 3.13`。テスト中は ADDROID_META_ADS_CLI_MOCK=1 を設定してください。",
+    hint: "`addroid init --install-deps` を実行してください。手動の場合は `uv tool install meta-ads --python 3.13`。テスト中は ADDROID_META_ADS_CLI_MOCK=1 を設定してください。",
   };
 }
 

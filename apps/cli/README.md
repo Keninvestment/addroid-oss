@@ -18,7 +18,8 @@ addroid doctor
 ```
 
 `npm install` 後の `postinstall` は次に実行すべき `addroid init` を表示するだけで、
-OS パッケージやユーザー設定を勝手に変更しません。
+OS パッケージやユーザー設定を勝手に変更しません。uv / Python / Meta Ads CLI /
+PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、確認後にセットアップします。
 
 実運用 (Web UI / Worker) を起動する場合はリポジトリをクローンしてセットアップしてください。詳細は OSS リポジトリの `docs/SETUP.md` を参照してください。
 
@@ -28,8 +29,8 @@ OS パッケージやユーザー設定を勝手に変更しません。
 
 | コマンド | 用途 |
 |---|---|
-| `addroid init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid`) と冪等 scaffold |
-| `addroid doctor` | 実行環境 (Node / PostgreSQL / DATABASE_URL / config / secrets / ENCRYPTION_KEY) を診断 |
+| `addroid init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI) と冪等 scaffold |
+| `addroid doctor` | 実行環境 (Node / uv / Python / Meta Ads CLI / PostgreSQL / DATABASE_URL / config / secrets / ENCRYPTION_KEY) を診断 |
 | `addroid up` | Web UI (127.0.0.1:3000) と Worker (pg-boss) を併走起動 (リポジトリ内でのみ意味があります) |
 | `addroid down` | `addroid up` で起動したプロセスを停止 |
 | `addroid status` | 直近の状態スナップショットを表示 |

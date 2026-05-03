@@ -20,7 +20,7 @@ export async function GET(request: Request) {
       return NextResponse.redirect(
         new URL(
           `/accounts?oauth=error&reason=${encodeURIComponent(
-            "Meta OAuth client is not configured. Set ADDROID_META_OAUTH_MOCK=1, or place meta.oauth.{appId,appSecret} in ~/.addroid/secrets.local.yaml and ensure ENCRYPTION_KEY is set."
+            "Meta OAuth client is not configured. Run addroid init to store encrypted meta.oauth.appIdCiphertext / appSecretCiphertext, and ensure ENCRYPTION_KEY is set."
           )}`,
           url
         ),

@@ -102,9 +102,18 @@ async function loadMetaOAuthClient(
   } catch {
     return null;
   }
-  const appId = secrets?.meta?.oauth?.appId;
-  const appSecret = secrets?.meta?.oauth?.appSecret;
-  if (!appId || !appSecret) return null;
+  const appIdCiphertext = secrets?.meta?.oauth?.appIdCiphertext;
+  const appSecretCiphertext = secrets?.meta?.oauth?.appSecretCiphertext;
+  if (!appIdCiphertext || !appSecretCiphertext) return null;
+  let appId: string;
+  let appSecret: string;
+  try {
+    const crypto = getCryptoBoundary(env);
+    appId = crypto.decrypt(appIdCiphertext);
+    appSecret = crypto.decrypt(appSecretCiphertext);
+  } catch {
+    return null;
+  }
   const binding = resolveWebBinding(env);
   const redirectUri =
     env.ADDROID_META_OAUTH_REDIRECT_URI?.trim() ||

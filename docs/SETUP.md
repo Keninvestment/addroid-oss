@@ -45,9 +45,14 @@ shell 経由で起動する web/worker プロセス) で動作します。サポ
 | Node.js | 22.11 以上 (Slack Socket Mode 検証で `globalThis.WebSocket` を使う) | `node --version` |
 | npm | 10 以上 (Node 22 同梱) | `npm --version` |
 | PostgreSQL | 16 以上 | `psql --version` |
-| Python | 3.12 以上 (`addroid init` は Meta CLI 互換の安定版 3.13 を導入) | `python3 --version` / `uv python find '>=3.12'` |
 | uv | 最新 | `uv --version` |
+| Python | 3.12 以上 (`addroid init` は Meta CLI 互換の安定版 3.13 を導入) | `python3 --version` / `uv python find '>=3.12'` |
 | Meta Ads CLI | `meta ads --help` が呼び出せること | `addroid init` で `uv tool install meta-ads --python 3.13` を試行 |
+
+Node.js / npm 以外は `addroid init` が初回セットアップ中に診断します。不足分が
+ある場合は実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う
+system 変更は既定で no です。セットアップに失敗した場合は表示されたコマンドを
+手動で実行し、再度 `npm run addroid -- init` を実行してください。
 
 `addroid doctor` は上記すべてを 1 コマンドで検証します (実装済み)。
 テスト環境で Meta Ads CLI を導入できない場合は `ADDROID_META_ADS_CLI_MOCK=1` を
@@ -159,14 +164,16 @@ npm install
 npm run addroid -- init
 ```
 
-`addroid init` は TTY では対話型 wizard として動作します。主な処理は次の通りです。
+`addroid init` は TTY では対話型 wizard として動作します。依存が不足している場合は
+実行するコマンドを見せた上で個別に確認します。
+主な処理は次の通りです。
 
 - `uv` / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ の診断と不足依存のインストール
-- `.env` の作成、`DATABASE_URL` と `ENCRYPTION_KEY` の保存
+- `.env` の作成、password 付き `DATABASE_URL` と `ENCRYPTION_KEY` の保存
 - `~/.addroid/config.yaml`、`secrets.local.yaml`、`storage` / `logs` / `run` の作成
-- ローカル PostgreSQL の `addroid` role/database 作成
+- ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
 - `npm run db:generate` と `npm run db:push` による Prisma schema 反映
-- 任意で Meta OAuth App ID / Secret を `secrets.local.yaml` に保存し、`addroid auth meta`
+- 任意で Meta OAuth App ID / Secret を暗号化して `secrets.local.yaml` に保存し、`addroid auth meta`
   でブラウザ認証後に Ad Account を選択
 
 既存の `.env` / `config.yaml` / `secrets.local.yaml` は破壊しません。既存値がある場合は保持し、
@@ -175,7 +182,14 @@ npm run addroid -- init
 CI や手順検証で対話を避ける場合は以下を使えます。
 
 ```bash
-npm run addroid -- init --non-interactive --yes --skip-db-push
+npm run addroid -- init --non-interactive --yes --skip-deps --skip-db-push
+```
+
+依存セットアップを明示的に実行したい場合は以下を使えます。`--install-deps` は
+依存確認後に通常の init も続行します。
+
+```bash
+npm run addroid -- init --install-deps
 ```
 
 手動で DB schema だけ反映したい場合は従来通り以下を実行できます。
