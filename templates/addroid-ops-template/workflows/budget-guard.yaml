@@ -1,0 +1,26 @@
+version: 1
+# AdDroid OSS — budget_guard policy (this implementation)。
+#
+# 5 種類のしきい値を評価する。各値を 0 (もしくは未指定) にするとそのルールは
+# 無効。ファイル全体が存在しない場合は worker 側で **fail-closed** に倒れ、
+# Meta は変更されず ai_runs も書かれず status="policy_missing" となる。
+alerts:
+  dailyBudgetAlertRatio: 0     # 当日 spend / dailyBudget >= 0.8 で alert (例: 0.8)
+  monthlyPaceRatio: 0          # MTD spend / 月予算 prorated >= 1.0 で alert
+  dayOverDayRatio: 0           # todaySpend / yesterdaySpend >= 1.5 で alert
+  noConversionsSpendMin: 0     # CV=0 かつ todaySpend >= N で alert (currency major unit)
+
+# autoPause を有効にすると、しきい値超過時に audit agent へ auto_pause 候補が
+# 渡る (= AI が Meta を直接停止することはない。auto_apply mode + safeCategories
+# 一致時のみ、PR を経ずに pre-approved な safe operation として実行される)。
+# 既定は disabled。実運用では明示的に値を入れて有効化する。
+autoPause:
+  enabled: false
+  minDailyBudgetRatio: 0
+  minDayOverDayRatio: 0
+  safeCategories: []
+
+# Optional per-account budgets (currency major unit)。
+# キーは ads/accounts/<key> と一致させる。未指定の account は budget=0 として
+# 扱われ、daily_budget_80 / monthly_pace ルールは静かに skip。
+accounts: {}

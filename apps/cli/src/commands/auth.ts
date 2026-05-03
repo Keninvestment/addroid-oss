@@ -1,0 +1,832 @@
+// `addroid auth <provider>` — provider 別の OAuth/トークン登録 CLI。
+//
+// Meta OAuth と Slack token 登録を CLI から実行する。
+//
+// `addroid auth slack`:
+//   入力: --xoxb / --xapp / --channel フラグ、または環境変数
+//         (SLACK_BOT_TOKEN / SLACK_APP_TOKEN / SLACK_NOTIFICATION_CHANNEL_ID)。
+//   流れ:
+//     1. トークン形式 (xoxb-* / xapp-* / Cxxxx) を検証 (DB / Slack 接続を起動する前に行う)。
+//     2. Slack `auth.test` で xoxb トークンの真正性を確認し team_id を取得。
+//     3. Slack `apps.connections.open` で xapp トークン (Socket Mode) の有効性を確認。
+//        本 CLI は WebSocket 接続を保持しない (worker プロセスが持続接続する責務)。
+//     4. Slack `chat.postMessage` で通知チャンネルに「AdDroid 接続テスト」メッセージを送信。
+//     5. `oauth_tokens` 行 (provider='slack', accountIdentifier=<team_id>) を upsert。
+//        - accessTokenCiphertext  ← xoxb (encrypted)
+//        - refreshTokenCiphertext ← xapp (encrypted) — UI 設計の規約に従い同一 envelope を再利用
+//        - metadata.* には team / channel / 直近テスト時刻のみ (機微値は **入れない**)
+//
+// 不変条件:
+//   - Slack 連携は完全に任意。`addroid auth slack` を実行しない限り Slack 通信は走らない。
+//   - 平文トークンはサブプロセスや shell 経由で扱わない (command injection 不要)。
+//   - --json 指定時は機械可読 JSON を出すが、出力にも平文トークンを **絶対に** 含めない。
+//   - DATABASE_URL / ENCRYPTION_KEY 未設定 / 形式エラーは Slack 通信前に exit 2 で返す。
+//   - Slack 通信失敗は exit 1 (CLI 自身の異常ではないため code 2 ではない)。
+
+import { spawnSync } from "node:child_process";
+import http from "node:http";
+import readline from "node:readline/promises";
+import {
+  buildSlackInstallationMetadata,
+  CryptoNotConfiguredError,
+  getCryptoBoundary,
+  resolveWebBinding,
+  postSlackMessage,
+  redactSecretTail,
+  SlackApiError,
+  SlackTokenValidationError,
+  validateSlackInputs,
+  verifyBotToken,
+  verifySocketModeConnection,
+  type SlackAuthInputs,
+  type SlackAuthTestResponse,
+  type SlackFetch,
+  type SocketModeChannelOpener,
+} from "@addroid/config";
+import {
+  MetaAdapterNotImplementedError,
+  MetaOAuthStateMismatchError,
+  type MetaAdAccount,
+  type MetaOAuthConnection,
+} from "@addroid/meta-adapter";
+import { buildPrismaMetaAdapterSelection } from "../../../worker/src/lib/meta-runtime.js";
+import {
+  ensureCliWorkspace,
+  formatAccountLine,
+  setDefaultAccount,
+  syncMetaAdAccounts,
+  type MetaAccountsPrisma,
+  type RegisteredAccount,
+} from "../lib/meta-accounts.js";
+
+const TEST_MESSAGE_TEXT =
+  "AdDroid 接続テスト — Socket Mode が確立しました。本メッセージは `addroid auth slack` から送信されています。";
+
+interface ParsedSlackArgs {
+  kind: "slack";
+  inputs: Partial<SlackAuthInputs>;
+  asJson: boolean;
+}
+
+interface ParsedMetaArgs {
+  kind: "meta";
+  asJson: boolean;
+  openBrowser: boolean;
+  selectDefault: boolean;
+  timeoutMs: number;
+}
+
+type ParsedAction =
+  | ParsedSlackArgs
+  | ParsedMetaArgs
+  | { kind: "help" }
+  | { kind: "error"; code: number; stderr?: string; stdoutHelp?: boolean };
+
+export interface SlackAuthRunOptions {
+  /**
+   * Slack Web API 用の fetch 注入。テストでモックする。未指定なら Node 22+ 内蔵の
+   * グローバル fetch を使う。
+   */
+  slackFetch?: SlackFetch;
+  /**
+   * Socket Mode WebSocket の開設に使うファクトリ (テスト用)。未指定なら
+   * グローバル `WebSocket` を使う実 WebSocket。
+   */
+  socketModeOpener?: SocketModeChannelOpener;
+  /**
+   * Socket Mode WebSocket 開設後、Slack の `hello` イベント受信を待つ最大時間 (ms)。
+   * 未指定なら `verifySocketModeConnection` の既定 (10s) を使う。
+   */
+  socketModeTimeoutMs?: number;
+  /**
+   * Prisma クライアントの注入 (テスト用)。未指定なら `@addroid/db` の singleton を使う。
+   */
+  prismaOverride?: unknown;
+  /**
+   * `now()` 注入 (テストで決定的にする用途)。
+   */
+  now?: () => Date;
+}
+
+export async function runAuthCommand(
+  args: string[],
+  opts: SlackAuthRunOptions = {}
+): Promise<number> {
+  const parsed = parseArgs(args);
+  if (parsed.kind === "error") {
+    if (parsed.stderr) process.stderr.write(parsed.stderr);
+    if (parsed.stdoutHelp) printHelp();
+    return parsed.code;
+  }
+  if (parsed.kind === "help") {
+    printHelp();
+    return 0;
+  }
+  if (parsed.kind === "meta") {
+    return await runAuthMeta(parsed);
+  }
+  return await runAuthSlack(parsed, opts);
+}
+
+function parseArgs(args: string[]): ParsedAction {
+  const [provider, ...rest] = args;
+  if (
+    provider === undefined ||
+    provider === "--help" ||
+    provider === "-h" ||
+    provider === "help"
+  ) {
+    return { kind: "help" };
+  }
+  if (provider === "meta") {
+    let asJson = false;
+    let openBrowser = true;
+    let selectDefault = true;
+    let timeoutMs = 180_000;
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i]!;
+      if (a === "--help" || a === "-h") {
+        return { kind: "help" };
+      }
+      if (a === "--json") {
+        asJson = true;
+      } else if (a === "--no-open") {
+        openBrowser = false;
+      } else if (a === "--no-select-default") {
+        selectDefault = false;
+      } else if (a === "--timeout-ms") {
+        const next = rest[i + 1];
+        if (!next) return optionMissing("auth meta", a);
+        timeoutMs = Number(next);
+        i += 1;
+      } else if (a.startsWith("--timeout-ms=")) {
+        timeoutMs = Number(a.slice("--timeout-ms=".length));
+      } else if (a.startsWith("--")) {
+        return {
+          kind: "error",
+          code: 2,
+          stderr: `[addroid auth meta] 未知のオプション: ${a}\n`,
+          stdoutHelp: true,
+        };
+      } else {
+        return {
+          kind: "error",
+          code: 2,
+          stderr: `[addroid auth meta] 余分な引数: ${a}\n`,
+          stdoutHelp: true,
+        };
+      }
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 10_000) {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: "[addroid auth meta] --timeout-ms は 10000 以上のミリ秒で指定してください\n",
+        stdoutHelp: true,
+      };
+    }
+    return { kind: "meta", asJson, openBrowser, selectDefault, timeoutMs };
+  }
+
+  if (provider !== "slack") {
+    return {
+      kind: "error",
+      code: 2,
+      stderr: `[addroid auth] 未対応のプロバイダ: ${provider}\n  対応プロバイダ: meta, slack\n`,
+      stdoutHelp: true,
+    };
+  }
+
+  // env defaults — フラグ未指定時のフォールバック。
+  const env = process.env;
+  const inputs: Partial<SlackAuthInputs> = {};
+  if (env.SLACK_BOT_TOKEN) inputs.botToken = env.SLACK_BOT_TOKEN;
+  if (env.SLACK_APP_TOKEN) inputs.appToken = env.SLACK_APP_TOKEN;
+  if (env.SLACK_NOTIFICATION_CHANNEL_ID)
+    inputs.notificationChannelId = env.SLACK_NOTIFICATION_CHANNEL_ID;
+
+  let asJson = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i]!;
+    if (a === "--help" || a === "-h") {
+      return { kind: "help" };
+    } else if (a === "--json") {
+      asJson = true;
+    } else if (a.startsWith("--xoxb=")) {
+      inputs.botToken = a.slice("--xoxb=".length);
+    } else if (a === "--xoxb") {
+      const next = rest[i + 1];
+      if (!next) return optionMissing(a);
+      inputs.botToken = next;
+      i += 1;
+    } else if (a.startsWith("--xapp=")) {
+      inputs.appToken = a.slice("--xapp=".length);
+    } else if (a === "--xapp") {
+      const next = rest[i + 1];
+      if (!next) return optionMissing(a);
+      inputs.appToken = next;
+      i += 1;
+    } else if (a.startsWith("--channel=")) {
+      inputs.notificationChannelId = a.slice("--channel=".length);
+    } else if (a === "--channel") {
+      const next = rest[i + 1];
+      if (!next) return optionMissing(a);
+      inputs.notificationChannelId = next;
+      i += 1;
+    } else if (a.startsWith("--")) {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: `[addroid auth slack] 未知のオプション: ${a}\n`,
+        stdoutHelp: true,
+      };
+    } else {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: `[addroid auth slack] 余分な引数: ${a}\n`,
+        stdoutHelp: true,
+      };
+    }
+  }
+  return { kind: "slack", inputs, asJson };
+}
+
+function optionMissing(commandOrOpt: string, maybeOpt?: string): ParsedAction {
+  const command = maybeOpt ? commandOrOpt : "auth slack";
+  const opt = maybeOpt ?? commandOrOpt;
+  return {
+    kind: "error",
+    code: 2,
+    stderr: `[addroid ${command}] ${opt} に値がありません\n`,
+    stdoutHelp: true,
+  };
+}
+
+async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
+  if (!process.env.DATABASE_URL) {
+    process.stderr.write(
+      "[addroid auth meta] DATABASE_URL が設定されていません。先に `addroid init` を実行してください。\n"
+    );
+    return 2;
+  }
+
+  const redirectUri = resolveCliRedirectUri();
+  if (!redirectUri) return 2;
+
+  const { prisma } = (await import("@addroid/db")) as {
+    prisma: MetaAccountsPrisma & { $disconnect: () => Promise<void> };
+  };
+  let callbackServer: http.Server | null = null;
+  try {
+    const workspace = await ensureCliWorkspace(prisma);
+    const adapterSelection = await buildPrismaMetaAdapterSelection({
+      prisma: prisma as never,
+      env: {
+        ...process.env,
+        ADDROID_META_OAUTH_REDIRECT_URI: redirectUri.toString(),
+      },
+    });
+    if (adapterSelection.choice === "stub") {
+      process.stderr.write(
+        `[addroid auth meta] Meta OAuth が未設定です: ${adapterSelection.reason}\n` +
+          "  ~/.addroid/secrets.local.yaml に meta.oauth.appId / meta.oauth.appSecret を設定してください。\n"
+      );
+      return 2;
+    }
+
+    const { authorizationUrl } = await adapterSelection.adapter.beginOAuth();
+    const callback = await waitForMetaCallback({
+      redirectUri,
+      timeoutMs: parsed.timeoutMs,
+      complete: async (code, state) => adapterSelection.adapter.completeOAuth({ code, state }),
+    });
+    callbackServer = callback.server;
+
+    if (!parsed.asJson) {
+      process.stdout.write("[addroid auth meta]\n\n");
+      process.stdout.write(`  OAuth URL     : ${authorizationUrl}\n`);
+      process.stdout.write(`  Callback      : ${redirectUri.toString()}\n`);
+      process.stdout.write("  ブラウザで Meta 認証を完了してください。\n\n");
+    }
+    if (parsed.openBrowser) openUrl(authorizationUrl);
+
+    const connection = await callback.connection;
+    const synced = await syncMetaAdAccounts(
+      prisma,
+      workspace.id,
+      connection.adAccounts as readonly MetaAdAccount[]
+    );
+    const defaultAccount =
+      parsed.selectDefault && synced.accounts.length > 0
+        ? await chooseAndSetMetaDefault(prisma, workspace.id, synced.accounts)
+        : null;
+
+    if (parsed.asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: true,
+            provider: "meta",
+            accountIdentifier: connection.accountIdentifier,
+            businesses: connection.businesses.length,
+            adAccounts: connection.adAccounts.length,
+            registered: synced.registered,
+            updated: synced.updated,
+            defaultAccount,
+          },
+          null,
+          2
+        )}\n`
+      );
+    } else {
+      process.stdout.write(`  connected     : ${connection.accountIdentifier}\n`);
+      process.stdout.write(`  businesses    : ${connection.businesses.length}\n`);
+      process.stdout.write(`  ad accounts   : ${connection.adAccounts.length}\n`);
+      process.stdout.write(`  registered    : ${synced.registered}\n`);
+      process.stdout.write(`  updated       : ${synced.updated}\n`);
+      process.stdout.write(
+        `  default       : ${defaultAccount?.metaAccountId ?? defaultAccount?.key ?? "unset"}\n`
+      );
+    }
+    return 0;
+  } catch (err) {
+    if (err instanceof MetaAdapterNotImplementedError) {
+      process.stderr.write(`[addroid auth meta] ${err.message}\n`);
+      return 2;
+    }
+    if (err instanceof MetaOAuthStateMismatchError) {
+      process.stderr.write("[addroid auth meta] OAuth state mismatch (possible CSRF).\n");
+      return 1;
+    }
+    process.stderr.write(`[addroid auth meta] ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    callbackServer?.close();
+    await prisma.$disconnect().catch(() => undefined);
+  }
+}
+
+function resolveCliRedirectUri(): URL | null {
+  const explicit = process.env.ADDROID_META_OAUTH_REDIRECT_URI;
+  const binding = resolveWebBinding(process.env);
+  let uri: URL;
+  try {
+    uri = new URL(
+      explicit ??
+        `http://${binding.hostname}:${binding.port}/api/oauth/meta/callback`
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[addroid auth meta] redirect URI が不正です: ${(err as Error).message}\n`
+    );
+    return null;
+  }
+  const hostname = uri.hostname.replace(/^\[(.*)\]$/, "$1");
+  const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  if (!localHosts.has(hostname)) {
+    process.stderr.write(
+      "[addroid auth meta] CLI OAuth callback は localhost の redirect URI のみ利用できます。\n" +
+        "  ADDROID_META_OAUTH_REDIRECT_URI を http://127.0.0.1:<port>/api/oauth/meta/callback に設定してください。\n"
+    );
+    return null;
+  }
+  if (uri.pathname !== "/api/oauth/meta/callback") {
+    process.stderr.write(
+      "[addroid auth meta] redirect URI の path は /api/oauth/meta/callback にしてください。\n"
+    );
+    return null;
+  }
+  return uri;
+}
+
+function waitForMetaCallback(opts: {
+  redirectUri: URL;
+  timeoutMs: number;
+  complete: (code: string, state: string) => Promise<MetaOAuthConnection>;
+}): { server: http.Server; connection: Promise<MetaOAuthConnection> } {
+  let settled = false;
+  let timeout: NodeJS.Timeout;
+  let resolveConnection: (v: MetaOAuthConnection) => void;
+  let rejectConnection: (err: unknown) => void;
+  const connection = new Promise<MetaOAuthConnection>((resolve, reject) => {
+    resolveConnection = resolve;
+    rejectConnection = reject;
+  });
+
+  const server = http.createServer(async (req, res) => {
+    const reqUrl = new URL(req.url ?? "/", opts.redirectUri.origin);
+    if (req.method !== "GET" || reqUrl.pathname !== opts.redirectUri.pathname) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Not Found");
+      return;
+    }
+    const code = reqUrl.searchParams.get("code");
+    const state = reqUrl.searchParams.get("state");
+    const error = reqUrl.searchParams.get("error_description") ?? reqUrl.searchParams.get("error");
+    if (!code || !state || error) {
+      const message = error ?? "Missing code or state in callback URL.";
+      res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Meta OAuth failed", message));
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        rejectConnection(new Error(message));
+      }
+      return;
+    }
+    try {
+      const result = await opts.complete(code, state);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Meta OAuth connected", "You can return to the terminal."));
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        resolveConnection(result);
+      }
+    } catch (err) {
+      res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Meta OAuth failed", (err as Error).message));
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        rejectConnection(err);
+      }
+    }
+  });
+
+  timeout = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    rejectConnection(new Error("Timed out waiting for Meta OAuth callback."));
+    server.close();
+  }, opts.timeoutMs);
+  timeout.unref?.();
+
+  const port = Number(opts.redirectUri.port || (opts.redirectUri.protocol === "https:" ? 443 : 80));
+  const host = opts.redirectUri.hostname.replace(/^\[(.*)\]$/, "$1");
+  server.listen(port, host);
+  server.on("error", (err) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    rejectConnection(
+      new Error(
+        `OAuth callback server failed on ${opts.redirectUri.origin}: ${(err as Error).message}`
+      )
+    );
+  });
+  return { server, connection };
+}
+
+function openUrl(url: string): void {
+  const platform = process.platform;
+  const cmd =
+    platform === "darwin"
+      ? "open"
+      : platform === "win32"
+        ? "cmd"
+        : "xdg-open";
+  const args = platform === "win32" ? ["/c", "start", "", url] : [url];
+  spawnSync(cmd, args, { stdio: "ignore" });
+}
+
+async function chooseAndSetMetaDefault(
+  prisma: MetaAccountsPrisma,
+  workspaceId: string,
+  accounts: RegisteredAccount[]
+): Promise<RegisteredAccount | null> {
+  if (accounts.length === 0) return null;
+  if (accounts.length === 1 || !process.stdin.isTTY || !process.stdout.isTTY) {
+    return setDefaultAccount(prisma, workspaceId, accounts[0]!.id, "user:cli");
+  }
+  process.stdout.write("\n");
+  accounts.forEach((a, i) => {
+    process.stdout.write(`  ${String(i + 1).padStart(2)}. ${formatAccountLine(a)}\n`);
+  });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question("? Default Meta Ad Account [1]: ");
+    const n = answer.trim() ? Number(answer.trim()) : 1;
+    if (!Number.isInteger(n) || n < 1 || n > accounts.length) {
+      throw new Error("Invalid selection.");
+    }
+    return setDefaultAccount(prisma, workspaceId, accounts[n - 1]!.id, "user:cli");
+  } finally {
+    rl.close();
+  }
+}
+
+function renderOAuthHtml(title: string, message: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
+    title
+  )}</title></head><body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></body></html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => {
+    switch (ch) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+}
+
+async function runAuthSlack(
+  parsed: ParsedSlackArgs,
+  opts: SlackAuthRunOptions
+): Promise<number> {
+  // 1) 形式バリデーション (DB / Slack 通信前)。
+  let normalized: SlackAuthInputs;
+  try {
+    normalized = validateSlackInputs(parsed.inputs);
+  } catch (err) {
+    if (err instanceof SlackTokenValidationError) {
+      process.stderr.write(`[addroid auth slack] ${err.message}\n`);
+      process.stderr.write(
+        "  --xoxb / --xapp / --channel か、SLACK_BOT_TOKEN / SLACK_APP_TOKEN / SLACK_NOTIFICATION_CHANNEL_ID 環境変数で渡してください。\n"
+      );
+      return 2;
+    }
+    throw err;
+  }
+
+  // 2) ENCRYPTION_KEY 検証 (Slack 通信前に fail-fast)。
+  let crypto: ReturnType<typeof getCryptoBoundary>;
+  try {
+    crypto = getCryptoBoundary();
+  } catch (err) {
+    if (err instanceof CryptoNotConfiguredError) {
+      process.stderr.write(
+        `[addroid auth slack] ENCRYPTION_KEY が利用できません: ${err.message}\n`
+      );
+      return 2;
+    }
+    throw err;
+  }
+
+  // 3) DATABASE_URL 検証 (Slack 通信前に fail-fast)。
+  if (!process.env.DATABASE_URL) {
+    process.stderr.write(
+      "[addroid auth slack] DATABASE_URL が設定されていません。`.env.local` を作成し再実行してください。\n"
+    );
+    return 2;
+  }
+
+  // 4) Slack auth.test → apps.connections.open → chat.postMessage の順で確認。
+  const fetchImpl = opts.slackFetch;
+  const now = opts.now ?? (() => new Date());
+
+  const lines: string[] = [];
+  lines.push("[addroid auth slack]");
+  lines.push("");
+
+  let authTest: SlackAuthTestResponse;
+  try {
+    authTest = await verifyBotToken(normalized.botToken, fetchImpl);
+  } catch (err) {
+    return reportSlackError("auth.test", err, parsed.asJson);
+  }
+  lines.push(`  team          : ${authTest.team} (${authTest.team_id})`);
+  lines.push(`  bot user      : ${authTest.user} (${authTest.user_id})`);
+  lines.push(`  xoxb token    : ${redactSecretTail(normalized.botToken)}`);
+
+  // Socket Mode は HTTP の apps.connections.open だけでは「URL が取れただけ」で、
+  // 実際にネットワーク経路 (TLS / WebSocket upgrade) が通り Slack 側が
+  // hello イベントを送れる状態かは未確認になる。the current implementation acceptance の
+  // 「Slack auth setup ... verifies Socket Mode connection」を満たすため、
+  // ここで実 WebSocket を一度開いて hello を受け取ったうえで閉じる。失敗時は
+  // fail-closed (oauth_tokens を書かずに exit 1)。
+  try {
+    await verifySocketModeConnection(normalized.appToken, {
+      fetchImpl,
+      openChannel: opts.socketModeOpener,
+      timeoutMs: opts.socketModeTimeoutMs,
+    });
+  } catch (err) {
+    return reportSlackError("apps.connections.open", err, parsed.asJson);
+  }
+  const socketOkAt = now();
+  lines.push(`  socket mode   : ok (websocket handshake + hello)`);
+  lines.push(`  xapp token    : ${redactSecretTail(normalized.appToken)}`);
+
+  // chat.postMessage は永続化前に必須。失敗時はトークンを upsert せずに exit する
+  // (fail-closed: contract D の「Slack auth setup ... verifies Socket Mode connection
+  // with a test message」要件)。
+  let testMessageOkAt: Date;
+  try {
+    await postSlackMessage(
+      normalized.botToken,
+      normalized.notificationChannelId,
+      TEST_MESSAGE_TEXT,
+      fetchImpl
+    );
+    testMessageOkAt = now();
+    lines.push(
+      `  test message  : sent to ${normalized.notificationChannelId}`
+    );
+  } catch (err) {
+    return reportSlackError("chat.postMessage", err, parsed.asJson);
+  }
+
+  // 5) 永続化。
+  const metadata = buildSlackInstallationMetadata({
+    authTest,
+    notificationChannelId: normalized.notificationChannelId,
+    socketModeOkAt: socketOkAt,
+    testMessageOkAt,
+  });
+
+  const accessTokenCiphertext = crypto.encrypt(normalized.botToken);
+  const refreshTokenCiphertext = crypto.encrypt(normalized.appToken);
+
+  // Prisma を遅延 import (DB 不要のヘルプ表示で読み込まないため、また activate.ts と同規約)。
+  const { prisma } = (opts.prismaOverride
+    ? { prisma: opts.prismaOverride as { oAuthToken: { upsert: Function }; $disconnect: () => Promise<void> } }
+    : await import("@addroid/db")) as {
+    prisma: {
+      oAuthToken: {
+        upsert: (args: unknown) => Promise<unknown>;
+      };
+      $disconnect: () => Promise<void>;
+    };
+  };
+
+  try {
+    await prisma.oAuthToken.upsert({
+      where: {
+        provider_accountIdentifier: {
+          provider: "slack",
+          accountIdentifier: authTest.team_id,
+        },
+      },
+      update: {
+        scopes: [],
+        accessTokenCiphertext,
+        refreshTokenCiphertext,
+        connectedAt: socketOkAt,
+        metadata,
+      },
+      create: {
+        provider: "slack",
+        accountIdentifier: authTest.team_id,
+        scopes: [],
+        accessTokenCiphertext,
+        refreshTokenCiphertext,
+        connectedAt: socketOkAt,
+        metadata,
+      },
+    });
+  } catch (err) {
+    process.stderr.write(
+      `[addroid auth slack] DB への保存に失敗しました: ${(err as Error).message}\n`
+    );
+    if (parsed.asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          { ok: false, stage: "persist", error: (err as Error).message },
+          null,
+          2
+        )}\n`
+      );
+    }
+    return 1;
+  } finally {
+    if (!opts.prismaOverride) {
+      await (prisma as { $disconnect: () => Promise<void> })
+        .$disconnect()
+        .catch(() => undefined);
+    }
+  }
+
+  lines.push(`  persisted     : oauth_tokens (provider=slack, team_id=${authTest.team_id})`);
+  lines.push("");
+  lines.push(
+    "  Slack 連携が有効になりました。/adops コマンドや通知は worker 側 (Socket Mode) で配信されます。"
+  );
+  lines.push("");
+
+  if (parsed.asJson) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: true,
+          provider: "slack",
+          teamId: authTest.team_id,
+          teamName: authTest.team,
+          botUserId: authTest.user_id,
+          botUser: authTest.user,
+          notificationChannelId: normalized.notificationChannelId,
+          socketModeOkAt: socketOkAt.toISOString(),
+          testMessageOkAt: testMessageOkAt.toISOString(),
+        },
+        null,
+        2
+      )}\n`
+    );
+  } else {
+    process.stdout.write(lines.join("\n"));
+  }
+  return 0;
+}
+
+function reportSlackError(
+  endpoint: string,
+  err: unknown,
+  asJson: boolean
+): number {
+  if (err instanceof SlackApiError) {
+    const slackErr = err.slackError ?? "(no error code)";
+    process.stderr.write(
+      `[addroid auth slack] Slack ${endpoint} に失敗しました: ${err.message}\n`
+    );
+    if (asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: false,
+            stage: endpoint,
+            slackError: err.slackError,
+            httpStatus: err.status,
+            message: err.message,
+          },
+          null,
+          2
+        )}\n`
+      );
+    }
+    if (slackErr === "invalid_auth" || slackErr === "not_authed") {
+      process.stderr.write(
+        "  トークンが無効か期限切れです。Slack App 管理画面から再生成してください。\n"
+      );
+    } else if (slackErr === "channel_not_found") {
+      process.stderr.write(
+        "  通知チャンネルが見つかりません。Bot がチャンネルに参加しているかを確認してください。\n"
+      );
+    } else if (slackErr === "not_in_channel") {
+      process.stderr.write(
+        "  Bot が対象チャンネルに参加していません。Slack 上で /invite @<bot> を実行してください。\n"
+      );
+    }
+    return 1;
+  }
+  process.stderr.write(
+    `[addroid auth slack] Slack ${endpoint} で予期しないエラー: ${(err as Error).message}\n`
+  );
+  if (asJson) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          stage: endpoint,
+          message: (err as Error).message,
+        },
+        null,
+        2
+      )}\n`
+    );
+  }
+  return 1;
+}
+
+function printHelp() {
+  process.stdout.write(
+    [
+      "addroid auth — provider 別の OAuth/トークン登録",
+      "",
+      "Usage:",
+      "  addroid auth meta [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
+      "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
+      "",
+      "Options:",
+      "  --no-open          Meta OAuth URL をブラウザで自動オープンしない",
+      "  --no-select-default Meta OAuth 後の Ad Account 既定選択をスキップ",
+      "  --timeout-ms <ms>  Meta OAuth callback 待機時間 (既定 180000)",
+      "  --xoxb <token>     Slack Bot User OAuth Token (xoxb-*)",
+      "  --xapp <token>     Slack App-Level Token (xapp-*, Socket Mode 用)",
+      "  --channel <id>     通知先チャンネル ID (Cxxxx / Gxxxx / Dxxxx)",
+      "  --json             機械可読 JSON で結果を出力",
+      "  --help, -h         このヘルプ",
+      "",
+      "Environment fallbacks (フラグ未指定時に参照):",
+      "  SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_NOTIFICATION_CHANNEL_ID",
+      "",
+      "Notes:",
+      "  - Meta OAuth は localhost callback で完了し、長期トークンを暗号化して oauth_tokens に保存します。",
+      "  - Meta OAuth 後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
+      "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
+      "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",
+      "  - 平文トークンは ENCRYPTION_KEY (AES-256-GCM) で暗号化し oauth_tokens に保存します。",
+      "  - 既存の slack 行 (同 team_id) は上書きされます。切断は別コマンドで実装予定。",
+      "",
+    ].join("\n")
+  );
+}

@@ -1,0 +1,544 @@
+// AdDroid OSS — Prisma schema (the current implementation initial schema).
+//
+// 本ファイルは AdDroid OSS が要求する 12 個の AdDroid テーブルと、the current implementation の
+// skeleton 段階で UI / worker / CLI が直接参照する少数の補助テーブルを定義します。
+//
+// 12 必須テーブル (contract acceptance):
+//   1.  workspaces
+//   2.  oauth_tokens
+//   3.  ad_accounts
+//   4.  ads_hierarchy
+//   5.  performance_snapshots
+//   6.  ai_runs
+//   7.  github_pull_requests
+//   8.  approval_records
+//   9.  cron_runs
+//   10. execution_logs
+//   11. audit_logs
+//   12. creatives
+//
+// 補助テーブル (skeleton 期間の UI/worker/CLI 表示・状態保持に必要、後続コントラクトで
+// 統合・整理予定):
+//   - github_repos          : ops repo レジストリ (PR/polling から参照)
+//   - github_polling_state  : ETag-aware ポーリングの進捗
+//   - cron_schedules        : pg-boss に登録済みプリセットの UI 表示用ミラー
+//   - apply_jobs            : merged PR から enqueue される execute_apply ジョブ記録
+//   - doctor_results        : `addroid doctor` 直近結果の UI 表示キャッシュ
+//
+// pg-boss は同 PostgreSQL DB に独自スキーマ (`pgboss`) を起動時に自動生成するため、
+// ここでは Prisma 側で再現する必要はありません。DB ユーザーが CREATE SCHEMA 権限を
+// 持つことが前提です。
+//
+// 反映方法:
+//   - 開発: `npm run db:push`           (差分を即時反映、マイグレーション履歴なし)
+//   - 本番想定: `npm run db:migrate`    (`prisma migrate dev` で履歴を生成)
+//
+// 参照: docs/ARCHITECTURE.md §3.1, prisma/README.md
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// 1) workspaces — ローカルワークスペース (config + ops repo メタ)。
+//    the current implementation はシングルテナント前提で 1 行のみ運用します。
+// =====================================================================
+model Workspace {
+  id                 String   @id @default(uuid())
+  slug               String   @unique
+  displayName        String
+  configPath         String
+  storageDir         String
+  databaseUrlRef     String? // 値そのものではなく、解決元 (例: ".env.local") を記録
+  opsRepoId          String?  @unique
+  defaultAdAccountId String?  @unique // the current implementation: 既定の Meta ad_account
+  // Regression fix: workspace 全体の execution mode。
+  //   "report_only" | "proposal" | "auto_apply"
+  // worker は cron 起動時にこの値を読み、daily_report / budget_guard /
+  // improvement_pr の各呼び出しに渡す。値の制約は @addroid/queue の
+  // ExecutionMode 型で型レベル保証する (DB は柔軟性のため string)。
+  executionMode      String   @default("proposal")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  opsRepo          GithubRepo?      @relation(fields: [opsRepoId], references: [id])
+  defaultAdAccount AdAccount?       @relation("WorkspaceDefaultAdAccount", fields: [defaultAdAccountId], references: [id], onDelete: SetNull)
+  adAccounts       AdAccount[]      @relation("WorkspaceAdAccounts")
+  cronSchedules    CronSchedule[]
+  approvalRecords  ApprovalRecord[]
+  aiRuns           AiRun[]
+  executionLogs    ExecutionLog[]
+  auditLogs        AuditLog[]
+
+  @@map("workspaces")
+}
+
+// =====================================================================
+// 2) oauth_tokens — GitHub / Meta 等のトークン (常に暗号化済み文字列)。
+//    暗号化は `packages/config` の boundary を介して行い、平文を保存しません。
+// =====================================================================
+model OAuthToken {
+  id                     String    @id @default(uuid())
+  provider               String // "github" | "meta" | "codex" | ...
+  accountIdentifier      String // 例: GitHub login。表示用のため非機微。
+  scopes                 String[]  @default([])
+  accessTokenCiphertext  String
+  refreshTokenCiphertext String?
+  expiresAt              DateTime?
+  connectedAt            DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  // provider 固有の非機微メタ (例: LLM provider の defaultModel)。
+  // Codex/OpenAI 等の OAuth 接続時に provider/model を併せて記録するための JSON 列。
+  // 機微なトークンや credential は **絶対に** ここに入れない (それは ciphertext 列の役割)。
+  metadata               Json?
+
+  @@unique([provider, accountIdentifier])
+  @@map("oauth_tokens")
+}
+
+// =====================================================================
+// 3) ad_accounts — Meta 広告アカウント。`ads/accounts/<key>/brand.yaml` と一致。
+// =====================================================================
+model AdAccount {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  key           String // ads/accounts/<key> パスと一致
+  displayName   String
+  metaAccountId String?
+  businessId    String?
+  businessName  String?
+  currency      String?
+  timezoneName  String?
+  accountStatus Int?
+  active        Boolean  @default(true)
+  // Regression fix: ad_account 単位の execution mode 上書き。
+  //   null         → workspace.executionMode を使う (既定)
+  //   "report_only" / "proposal" / "auto_apply" → workspace 値より優先
+  // /accounts UI からの per-account override 用途で持つ。worker は cron 内で
+  // workspace mode と一緒に読み出し、`modeOverride ?? workspaceMode` を解決して
+  // daily_report / budget_guard / improvement_pr の呼び出しに渡す。
+  modeOverride  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  workspace            Workspace             @relation("WorkspaceAdAccounts", fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspaceDefaultOf   Workspace?            @relation("WorkspaceDefaultAdAccount")
+  hierarchyNodes       AdsHierarchyNode[]
+  creatives            Creative[]
+  performanceSnapshots PerformanceSnapshot[]
+
+  @@unique([workspaceId, key])
+  @@unique([workspaceId, metaAccountId])
+  @@map("ad_accounts")
+}
+
+// =====================================================================
+// 4) ads_hierarchy — campaign / adset / ad のツリー構造。
+//    Ads YAML から派生したノードを正規化して保持し、PerformanceSnapshot や
+//    Creative と結合しやすい形にします。Meta 側 ID は反映済みのもののみ持ち、
+//    未同期ノードは null を許容します。
+// =====================================================================
+model AdsHierarchyNode {
+  id            String   @id @default(uuid())
+  accountId     String
+  parentId      String?
+  nodeType      String // "campaign" | "adset" | "ad"
+  nodeKey       String // YAML 上の安定キー (path セグメント)
+  displayName   String
+  status        String   @default("paused") // "paused" | "active" | "archived"
+  externalId    String? // Meta 側 ID (campaign_id / adset_id / ad_id)
+  spec          Json? // YAML 由来の正規化済みフィールド
+  lastCommitSha String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  account   AdAccount             @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  parent    AdsHierarchyNode?     @relation("AdsHierarchyTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children  AdsHierarchyNode[]    @relation("AdsHierarchyTree")
+  snapshots PerformanceSnapshot[]
+  creatives Creative[]
+
+  @@unique([accountId, nodeType, nodeKey])
+  @@index([accountId, nodeType])
+  @@map("ads_hierarchy")
+}
+
+// =====================================================================
+// 5) performance_snapshots — 日次メトリクスのスナップショット。
+//    Meta Ads CLI の取得結果や cron 集計の保存先で、同一 (account, node, date)
+//    に対し冪等に upsert される想定です。
+//
+//    Retention policy (Regression fix):
+//      - raw 列 (= 取得元レスポンスの JSON 保管庫) は metricDate から 90 日経過後
+//        に NULL 化される。再計算は 90 日以内のみ可能。
+//      - nodeType in ('adset', 'ad') の行は metricDate から 90 日経過後に削除。
+//      - nodeType in ('account', 'campaign') の行は metricDate から 365 日経過後
+//        に削除 (= "campaign-or-higher" の集計保持)。
+//    強制経路は `apps/worker` の `retention_sweep` cron preset
+//    (`@addroid/queue` の `runPerformanceSnapshotRetentionOnce`)。
+// =====================================================================
+model PerformanceSnapshot {
+  id          String   @id @default(uuid())
+  accountId   String
+  hierarchyId String?
+  nodeType    String // "account" | "campaign" | "adset" | "ad"
+  nodeKey     String
+  metricDate  DateTime @db.Date
+  impressions Int      @default(0)
+  clicks      Int      @default(0)
+  spendMicros BigInt   @default(0) // Meta は通貨マイクロ単位での扱いが安全
+  conversions Int      @default(0)
+  raw         Json? // 取得元レスポンスの保存 (再計算用)。retention: 90d (regression fix)。
+  source      String   @default("meta_ads_cli")
+  createdAt   DateTime @default(now())
+
+  account   AdAccount         @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  hierarchy AdsHierarchyNode? @relation(fields: [hierarchyId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, nodeType, nodeKey, metricDate])
+  @@index([accountId, metricDate])
+  @@map("performance_snapshots")
+}
+
+// =====================================================================
+// 6) ai_runs — AI 生成 / 改善提案ジョブの実行記録 (the current implementation 拡張)。
+//    AI ワークフロー (daily_report / budget_guard / improvement_pr / adhoc) と
+//    8 agent (strategy/copy/image_prompt/creative_qa/analyst/media_buyer/
+//    gitops/audit) のすべての実行が、provider / model / prompt / 入力 / 出力 /
+//    決定 / 信頼度 / トークン / コスト / 紐付け先 ID を伴って永続化される。
+//    平文の access token / api key は ここに保存しない (helper 側で sanitize)。
+// =====================================================================
+model AiRun {
+  id            String    @id @default(uuid())
+  workspaceId   String
+  agent         String // "strategy" | "copy" | "image_prompt" | "creative_qa" | "analyst" | "media_buyer" | "gitops" | "audit"
+  workflow      String // "daily_report" | "budget_guard" | "improvement_pr" | "adhoc"
+  provider      String // "codex" | "openai" | "anthropic" | "mock"
+  model         String // 例: "gpt-4.1" / "claude-opus-4-7"
+  status        String    @default("queued") // queued | running | succeeded | failed
+  prompt        Json? // sanitize 済み LLM messages payload
+  inputs        Json // sanitize 済み workflow 入力 (account, period 等)
+  outputs       Json? // sanitize 済み workflow / LLM 出力
+  decision      String? // workflow の決定ラベル (例: "propose_pr", "skip_no_proposal", "alert", "auto_pause")
+  confidence    Float? // 0.00 — 1.00。色だけで伝えないので数値で必ず保存
+  inputTokens   Int       @default(0)
+  outputTokens  Int       @default(0)
+  costUsd       Float     @default(0) // pricing.ts 由来。UI は 6 桁精度で扱う
+  requestId     String? // provider が返す request id (sanitize 済み)
+  linkedRefType String? // "performance_snapshot" | "github_pull_request" | "cron_run" | "audit_log" | "improvement_pr"
+  linkedRefId   String? // FK は付けず複数種 ref を許容。linkedRefType と必ずペアで保存
+  errorMessage  String?
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+
+  workspace        Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  creatives        Creative[] @relation("CreativeImagePromptRun")
+  creativeQaResults Creative[] @relation("CreativeQaRun")
+
+  @@index([workspaceId, agent, createdAt])
+  @@index([workspaceId, workflow, createdAt])
+  @@index([workspaceId, status, createdAt])
+  @@index([linkedRefType, linkedRefId])
+  @@map("ai_runs")
+}
+
+// =====================================================================
+// 7) github_pull_requests — ポーリングで観測した PR と merge 状態。
+// =====================================================================
+model GithubPullRequest {
+  id        String    @id @default(uuid())
+  repoId    String
+  number    Int
+  title     String
+  state     String // "open" | "closed" | "merged"
+  headSha   String
+  baseRef   String    @default("main")
+  htmlUrl   String?
+  mergedAt  DateTime?
+  polledAt  DateTime  @default(now())
+  // Regression fix: PR プレビュー (Web UI /approvals/[prNumber] 用)
+  // を実際の local 状態として永続化する列群。本文と変更ファイル/diff サマリは
+  // 改善PR (improvement_pr) 作成時に publisher が書き込み、UI が描画する。
+  // GitHub から直接ポーリングされた外部 PR は body/files が無いため null を許容
+  // (UI 側で「本文は未収集」の空状態を表示)。すべて sanitize 済みの値が入る。
+  body              String? // markdown PR body (sanitize 済み)
+  // [{ path, action: "create"|"update"|"delete", diffPreview: string,
+  //    diffTruncated: boolean, additions?: number, deletions?: number }]
+  // を最大 50 件まで保持。各 diff は 4 KiB 以内に切り詰める (DB 肥大化防止)。
+  filesChangedJson  Json?
+  filesChangedCount Int? // 元の変更ファイル総数 (truncate 前の値)
+  previewSource     String? // "improvement_pr" | "github_poll" | ...
+  previewUpdatedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  repo            GithubRepo       @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  applyJobs       ApplyJob[]
+  approvalRecords ApprovalRecord[]
+  creatives       Creative[]
+
+  @@unique([repoId, number])
+  @@map("github_pull_requests")
+}
+
+// =====================================================================
+// 8) approval_records — PR / Activate の承認・自動承認・却下の記録。
+//    GitOps の境界を audit_logs と二段で記録するため、PR ごとの最終決定が
+//    1:N で残ります (再開・差し戻しを表現)。
+//
+//    this implementation: Activate (Web/Slack/CLI) 操作も同じ 1 行記録に
+//    統一する。Activate は PR を持たないため、`pullRequestId` を nullable に
+//    し、polymorphic な `(targetType, targetId)` 列で対象を識別する。
+//      - PR merge       : targetType="github_pull_request", targetId=<pr id>
+//      - Activate       : targetType="ads_hierarchy",       targetId=<hierarchy id>
+//    `metadata.decisionSource` で起源 (`github_merge | web_merge | cli_merge |
+//    web_activate | slack_activate | cli_activate`) を表現し、UI / 監査ビュー
+//    が actor 帰属を可視化する (UI design plan §0.20)。
+// =====================================================================
+model ApprovalRecord {
+  id            String   @id @default(uuid())
+  workspaceId   String
+  pullRequestId String?
+  // polymorphic target boundary。`pullRequestId` が非 null なら
+  // (`targetType`, `targetId`) は ("github_pull_request", pullRequestId) と
+  // 一致する想定で書く (FK との二重表現)。Activate のときは pullRequestId
+  // を null にして targetType="ads_hierarchy" のみ持たせる。
+  targetType    String?
+  targetId      String?
+  approvedBy    String // "addroid" | "user:<github_login>" | "ai:<model>" | "user:web-ui" | "slack:<user_id>" | "user:cli"
+  decision      String // "approved" | "rejected" | "auto_blocked" | "auto_approved"
+  comment       String?
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  workspace   Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  pullRequest GithubPullRequest? @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+
+  @@index([pullRequestId, createdAt])
+  @@index([targetType, targetId, createdAt])
+  @@map("approval_records")
+}
+
+// =====================================================================
+// 9) cron_runs — cron 実行履歴 (pg-boss 1 ジョブ = 1 行)。
+// =====================================================================
+model CronRun {
+  id           String    @id @default(uuid())
+  scheduleId   String?
+  name         String
+  jobId        String?
+  state        String // "running" | "success" | "failed"
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  durationMs   Int?
+  errorMessage String?
+  output       Json?
+
+  schedule      CronSchedule?  @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  executionLogs ExecutionLog[]
+
+  @@index([startedAt])
+  @@map("cron_runs")
+}
+
+// =====================================================================
+// 10) execution_logs — 細粒度の実行ログ。cron / apply / ai_run / github_poll
+//     の中で発生した個別ステップを保存します。cron_runs より粒度が細かく、
+//     UI で行展開した際の詳細表示やエラーリポートに使います。
+// =====================================================================
+model ExecutionLog {
+  id          String   @id @default(uuid())
+  workspaceId String?
+  kind        String // "cron" | "apply" | "ai_run" | "github_poll" | "doctor"
+  refType     String? // "cron_run" | "apply_job" | "ai_run" | "pull_request" | ...
+  refId       String? // 関連エンティティ ID (FK 制約は付けず、複数種を許容)
+  cronRunId   String?
+  level       String   @default("info") // "info" | "warn" | "error"
+  message     String
+  payload     Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  cronRun   CronRun?   @relation(fields: [cronRunId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([kind, createdAt])
+  @@map("execution_logs")
+}
+
+// =====================================================================
+// 11) audit_logs — 監査ログ。広告配信 / 予算を変更し得る全操作を記録。
+// =====================================================================
+model AuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String?
+  actor       String // "addroid" | "user:<github_login>" | "ai:<model>"
+  action      String // "pr.created" | "apply.simulated" | "oauth.connected" | ...
+  target      String? // "github_pull_request:<id>" 等
+  ref         String? // 関連する SHA / PR 番号 / ファイルパス
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// =====================================================================
+// 12) creatives — クリエイティブ資産 (画像 / 動画 / テキスト)。
+//     AI 生成由来の場合は ai_runs を逆参照します。実体ファイルは
+//     LocalDisk storage (`~/.addroid/storage/...`) に保管され、本テーブルは
+//     パスとメタデータのみ保持します (機密データを直書きしない)。
+//
+//     this implementation: 1 行で「生成物 (storagePath / storageRef) +
+//     プロンプト + モデル / プロバイダ + 生成パラメータ + 関連 ai_run /
+//     creative_qa ai_run / improvement_pr / pull_request」を辿れるようにする。
+//     生成パラメータと QA 結果は creative-storage が書き出す metadata.json と
+//     1:1 対応するので、creatives テーブル単独でも監査・UI 描画が成立する。
+// =====================================================================
+model Creative {
+  id                String   @id @default(uuid())
+  accountId         String
+  hierarchyId       String? // ads_hierarchy.id (campaign / adset / ad)
+  aiRunId           String? // image_prompt agent の ai_run.id
+  // this implementation: creative_qa hop の ai_run.id。image_prompt と
+  // creative_qa の二段が同一 creative にぶら下がる。
+  creativeQaAiRunId String?
+  // PR が立った後にリンクされる。PR 作成前 / fallback / qa_failed 時は null。
+  pullRequestId     String?
+  key               String // ads/accounts/<account>/creatives/<key> 等の安定キー
+  displayName       String
+  mediaType         String // "image" | "video" | "carousel" | "text"
+  // the current implementation creative_status vocabulary:
+  //   queued | generating | qa_running | qa_passed | qa_warned | qa_failed |
+  //   attached_to_pr | merged | active_on_meta | superseded | fallback_text_only
+  status            String   @default("queued")
+  // 生成プロンプト本文 (Image Prompt Agent 出力)。spec JSON にも入っているが、
+  // /creatives 一覧の query / 並べ替え向けに先頭列でも保持する。
+  prompt            String?
+  provider          String? // image provider 名 ("openai" | "stability" | "replicate" | "mock")
+  model             String? // image model id (例: "gpt-image-1", "sd3-large")
+  // 生成パラメータのスナップショット (variation_conditions / variant_count / purpose)。
+  // creative-storage の metadata.json と同形。
+  parameters        Json?
+  storagePath       String? // LocalDisk 内の相対パス (実体配置先 — 内部用)
+  // 安定 storage ref `storage://creatives/<account_key>/<creative_id>/...`。
+  // UI / PR / 監査ログ / proxy lookup はすべてこれを使う (絶対 fs path は晒さない)。
+  storageRef        String?
+  externalId        String? // Meta 側 creative_id
+  spec              Json? // headline, primary_text, cta, etc. + image_prompt rationale + qa breakdown
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  account     AdAccount          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  hierarchy   AdsHierarchyNode?  @relation(fields: [hierarchyId], references: [id], onDelete: SetNull)
+  aiRun       AiRun?             @relation("CreativeImagePromptRun", fields: [aiRunId], references: [id], onDelete: SetNull)
+  creativeQa  AiRun?             @relation("CreativeQaRun", fields: [creativeQaAiRunId], references: [id], onDelete: SetNull)
+  pullRequest GithubPullRequest? @relation(fields: [pullRequestId], references: [id], onDelete: SetNull)
+
+  @@unique([accountId, key])
+  @@index([accountId, mediaType])
+  @@index([accountId, status])
+  @@index([pullRequestId])
+  @@index([creativeQaAiRunId])
+  @@map("creatives")
+}
+
+// =====================================================================
+// 補助テーブル (the current implementation skeleton 用 — 後続コントラクトで再編成予定)
+// =====================================================================
+
+// github_repos — ops リポジトリのレジストリ。
+model GithubRepo {
+  id                      String    @id @default(uuid())
+  owner                   String
+  name                    String
+  defaultBranch           String    @default("main")
+  bootstrappedAt          DateTime?
+  // bootstrap 時に branch protection が実際に GitHub 側へ適用できたか。
+  // false (Free プランの private repo 等で 403/422) の場合、merged PR 検知から
+  // execute_apply への enqueue は github-poll 側でブロックされる。
+  branchProtectionApplied Boolean   @default(false)
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  workspace    Workspace?
+  pullRequests GithubPullRequest[]
+  pollingState GithubPollingState?
+
+  @@unique([owner, name])
+  @@map("github_repos")
+}
+
+// github_polling_state — ETag-aware polling の進捗。
+model GithubPollingState {
+  id             String    @id @default(uuid())
+  repoId         String    @unique
+  resource       String // "pulls" など
+  etag           String?
+  lastModified   String?
+  lastStatusCode Int?
+  lastPolledAt   DateTime?
+  nextPollAt     DateTime?
+  updatedAt      DateTime  @updatedAt
+
+  repo GithubRepo @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@map("github_polling_state")
+}
+
+// cron_schedules — pg-boss に登録された cron プリセットの UI 表示用ミラー。
+model CronSchedule {
+  id           String    @id @default(uuid())
+  workspaceId  String
+  name         String // "github_poll" | "daily_report" | "budget_guard" | "improvement_pr"
+  cron         String
+  enabled      Boolean   @default(false)
+  lastRunState String? // ok / warn / error / idle
+  nextRunAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  runs      CronRun[]
+
+  @@unique([workspaceId, name])
+  @@map("cron_schedules")
+}
+
+// apply_jobs — merged PR から enqueue される execute_apply ジョブ記録。
+// 後続タスクで execution_logs と統合する可能性があります。
+model ApplyJob {
+  id            String    @id @default(uuid())
+  pullRequestId String
+  state         String // "queued" | "running" | "succeeded" | "failed" | "simulated"
+  enqueuedAt    DateTime  @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  jobId         String? // pg-boss job id
+  errorMessage  String?
+  result        Json?
+
+  pullRequest GithubPullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+
+  @@index([state])
+  @@map("apply_jobs")
+}
+
+// doctor_results — `addroid doctor` の最終実行結果 (UI 表示キャッシュ)。
+model DoctorResult {
+  id      String   @id @default(uuid())
+  ranAt   DateTime @default(now())
+  overall String // "ok" | "warn" | "error"
+  checks  Json // [{name, state, message, hint}]
+
+  @@index([ranAt])
+  @@map("doctor_results")
+}

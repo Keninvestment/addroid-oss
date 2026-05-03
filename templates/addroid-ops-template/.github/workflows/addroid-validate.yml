@@ -1,0 +1,154 @@
+name: addroid-validate
+on:
+  pull_request:
+    paths:
+      - "ads/**"
+      - "workflows/cron.yaml"
+      - ".addroid/project.yaml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # この ops repo は単体で git clone しただけで動作する必要があるため、ここでは
+      # AdDroid CLI 本体 (`@addroid/cli`) には依存しない最小限の構造検証だけを行う。
+      # 真の Zod 検証は AdDroid 側 worker が merged PR を ETag-aware ポーリングで
+      # 検知したあとサーバーサイドで再実行する。PR 時のこの workflow は早期フィードバック
+      # 用の placeholder で、必要なファイルの存在・YAML としての parse・最低限の
+      # 主要フィールドだけを確認する。
+      - name: Install YAML parser into CI-only scratch dir
+        run: |
+          set -euo pipefail
+          mkdir -p .addroid-ci-deps
+          cd .addroid-ci-deps
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --silent js-yaml@4.1.0
+      - name: Structural check (project.yaml, cron.yaml, brand.yaml)
+        env:
+          NODE_PATH: .addroid-ci-deps/node_modules
+        run: |
+          node - <<'NODE'
+          "use strict";
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const yaml = require("js-yaml");
+
+          const errors = [];
+          const root = process.cwd();
+
+          function readYaml(rel) {
+            const abs = path.join(root, rel);
+            if (!fs.existsSync(abs)) {
+              errors.push(`${rel} — required file is missing`);
+              return null;
+            }
+            try {
+              return yaml.load(fs.readFileSync(abs, "utf8"));
+            } catch (e) {
+              errors.push(`${rel} — YAML parse error: ${e.message}`);
+              return null;
+            }
+          }
+
+          // .addroid/project.yaml
+          const project = readYaml(".addroid/project.yaml");
+          if (project !== null) {
+            if (!project || typeof project !== "object") {
+              errors.push(".addroid/project.yaml — top-level must be a mapping");
+            } else {
+              if (typeof project.version !== "number") {
+                errors.push(".addroid/project.yaml :: version — must be a number");
+              }
+              const ws = project.workspace;
+              if (!ws || typeof ws !== "object") {
+                errors.push(".addroid/project.yaml :: workspace — must be a mapping");
+              } else if (typeof ws.slug !== "string" || ws.slug.length === 0) {
+                errors.push(".addroid/project.yaml :: workspace.slug — must be a non-empty string");
+              }
+            }
+          }
+
+          // workflows/cron.yaml
+          const cron = readYaml("workflows/cron.yaml");
+          if (cron !== null) {
+            if (!cron || typeof cron !== "object") {
+              errors.push("workflows/cron.yaml — top-level must be a mapping");
+            } else if (!Array.isArray(cron.schedules)) {
+              errors.push("workflows/cron.yaml :: schedules — must be a list");
+            } else {
+              cron.schedules.forEach((s, i) => {
+                const ptr = `workflows/cron.yaml :: schedules[${i}]`;
+                if (!s || typeof s !== "object") {
+                  errors.push(`${ptr} — must be a mapping`);
+                  return;
+                }
+                if (typeof s.name !== "string" || s.name.length === 0) {
+                  errors.push(`${ptr}.name — must be a non-empty string`);
+                }
+                if (typeof s.cron !== "string" || s.cron.length === 0) {
+                  errors.push(`${ptr}.cron — must be a non-empty string`);
+                }
+                if (typeof s.enabled !== "boolean") {
+                  errors.push(`${ptr}.enabled — must be a boolean`);
+                }
+              });
+            }
+          }
+
+          // ads/accounts/<key>/brand.yaml
+          const accountsDir = path.join(root, "ads", "accounts");
+          if (fs.existsSync(accountsDir)) {
+            for (const entry of fs.readdirSync(accountsDir, { withFileTypes: true })) {
+              if (!entry.isDirectory()) continue;
+              const rel = `ads/accounts/${entry.name}/brand.yaml`;
+              const brand = readYaml(rel);
+              if (brand === null) continue;
+              if (!brand || typeof brand !== "object") {
+                errors.push(`${rel} — top-level must be a mapping`);
+                continue;
+              }
+              if (typeof brand.version !== "number") {
+                errors.push(`${rel} :: version — must be a number`);
+              }
+              const acct = brand.account;
+              if (!acct || typeof acct !== "object") {
+                errors.push(`${rel} :: account — must be a mapping`);
+              } else {
+                if (typeof acct.key !== "string" || acct.key.length === 0) {
+                  errors.push(`${rel} :: account.key — must be a non-empty string`);
+                } else if (acct.key !== entry.name) {
+                  errors.push(
+                    `${rel} :: account.key — '${acct.key}' must match directory name '${entry.name}'`
+                  );
+                }
+              }
+              if (!Array.isArray(brand.campaigns)) {
+                errors.push(`${rel} :: campaigns — must be a list`);
+              }
+            }
+          }
+
+          if (errors.length > 0) {
+            console.log("[addroid-validate] structural check failed:");
+            for (const e of errors) console.log(`  - ${e}`);
+            console.log("");
+            console.log(
+              "Note: this PR-time workflow only runs minimal structural checks. " +
+                "Authoritative Zod validation runs server-side via the AdDroid worker on merged PRs."
+            );
+            process.exit(1);
+          }
+
+          console.log("[addroid-validate] structural check ok");
+          console.log(
+            "Note: full Zod validation (unsafe budget changes, mismatched account keys, " +
+              "initial active campaign creation, etc.) runs server-side via the AdDroid " +
+              "worker on merged PRs."
+          );
+          NODE

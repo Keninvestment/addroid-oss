@@ -1,0 +1,67 @@
+{
+  "name": "@addroid/cli",
+  "version": "0.1.0",
+  "description": "AdDroid OSS CLI — local-only operator console for GitOps-driven Meta ad operations.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/addroid-oss/addroid#readme",
+  "bugs": {
+    "url": "https://github.com/addroid-oss/addroid/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/addroid-oss/addroid.git",
+    "directory": "apps/cli"
+  },
+  "keywords": [
+    "addroid",
+    "meta-ads",
+    "gitops",
+    "cli",
+    "operator-console",
+    "self-hosted"
+  ],
+  "engines": {
+    "node": ">=22.11.0"
+  },
+  "main": "./dist/index.mjs",
+  "bin": {
+    "addroid": "bin/addroid.cjs",
+    "addroid-cli": "bin/addroid.cjs"
+  },
+  "files": [
+    "bin/addroid.cjs",
+    "dist/index.mjs",
+    "scripts/postinstall.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "node build.mjs",
+    "prepack": "node build.mjs",
+    "postinstall": "node scripts/postinstall.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --experimental-test-isolation=none \"src/__tests__/**/*.test.ts\"",
+    "package:smoke": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.18.0",
+    "pg-boss": "^10.1.5",
+    "yaml": "^2.5.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@addroid/config": "*",
+    "@addroid/db": "*",
+    "@addroid/llm-provider": "*",
+    "@addroid/meta-adapter": "*",
+    "@addroid/ops-template": "*",
+    "@addroid/queue": "*",
+    "@addroid/yaml-schemas": "*",
+    "@types/node": "^20.11.30",
+    "esbuild": "^0.27.7",
+    "tsx": "^4.16.5",
+    "typescript": "^5.5.4"
+  }
+}

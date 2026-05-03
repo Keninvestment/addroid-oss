@@ -1,0 +1,2317 @@
+// AdDroid OSS — improvement_pr cron handler (Implementation item).
+//
+// 1 ティック分の improvement_pr ワークフローを実装する:
+//
+//   1. 対象 ad_account を解決する。未登録なら no_account で抜ける。
+//   2. AI 8 agent を順に呼び出す:
+//        analyst → strategy → copy → image_prompt → creative_qa →
+//        media_buyer → gitops → audit
+//      各 agent の `aiRunInput` は呼び出し毎に `store.createAiRun` で永続化する。
+//      失敗 (provider error / JSON 不正 / 必須欠落) は throw せず、
+//      status="failed" の ai_runs を残してワークフローを `ai_failed` に倒す。
+//   3. media_buyer が "propose" を返さない、もしくは proposals が空なら
+//      `skipped_no_proposal` で抜ける (PR は作らない)。creative_qa が
+//      "approve" を返さなかった、または gitops が "skip" の場合も同様。
+//   4. media_buyer + gitops の出力を使って `ImprovementPrGithubPublisher` で
+//      PR を作成する。失敗時は `pr_failed` で抜ける (audit には残す)。
+//   5. audit agent の分類 (`safe | requires_approval | dangerous`) と
+//      decision (`auto_approved | approval_required | auto_blocked`) を
+//      `ImprovementPrAuditWriter` で audit_logs / approval_records に書き、
+//      summary を返す。
+//
+// 設計原則:
+//   - Prisma / pg-boss / GitHub adapter / LLM Provider を直接 import しない。
+//     すべて injected interface 経由。テストは in-memory fake で完結する。
+//   - AI 失敗時でも ai_runs は status="failed" で書き、cron_run を ai_failed
+//     に倒す (= GitOps state は腐らない)。
+//   - dangerous categories (budget_increase / new_campaign / targeting_change /
+//     monthly_budget_change / automation_rule_change) は audit agent が
+//     `auto_blocked` を返した時点で approval_records.decision="auto_blocked" と
+//     して記録され、PR は GitHub 側 branch protection と二段で承認境界を持つ。
+//   - 改善提案は必ず `publisher.createPullRequest` を経由してから succeeded を
+//     返す。`pipeline` + `publisher` + `audit` が揃わない呼び出しは throw する
+//     (= proposals が PR boundary を迂回して succeeded になる経路は存在しない)。
+
+import {
+  DEFAULT_CREATIVE_QA_POLICY,
+  generateAndQaCreative,
+  persistCreativeAssets,
+  type AiRunCreateInputData,
+  type CreativeQaPolicy,
+  type CreativeStorageAdapter,
+  type ImageProvider,
+  type ImagePromptVariant,
+  type ImageVariationCondition,
+  type PersistCreativeAssetsResult,
+  type PersistedCreativeAsset,
+} from "@addroid/llm-provider";
+import type { DailyReportAdAccountSnapshot } from "./daily-report.js";
+import {
+  combineApprovalClassifications,
+  combineApprovalDecisions,
+  evaluateApprovalPolicy,
+  unionDangerousCategories,
+  type ExecutionMode,
+} from "./execution-mode.js";
+
+export type ImprovementPrExecutionMode = ExecutionMode;
+
+export type ImprovementPrDecision =
+  | "propose"
+  | "skip_no_proposal"
+  | "skip_dangerous_only";
+
+export type ImprovementPrAuditDecision =
+  | "auto_approved"
+  | "approval_required"
+  | "auto_blocked";
+
+export type ImprovementPrAuditClassification =
+  | "safe"
+  | "requires_approval"
+  | "dangerous";
+
+export type ImprovementPrRiskTolerance =
+  | "conservative"
+  | "balanced"
+  | "aggressive";
+
+export type ImprovementPrRunStatus =
+  | "succeeded"
+  | "no_account"
+  | "ai_failed"
+  | "skipped_no_proposal"
+  | "auto_blocked"
+  | "pr_failed";
+
+export interface ImprovementPrProposal {
+  hierarchy: "account" | "campaign" | "adset" | "ad";
+  target: string;
+  category: string;
+  proposedChange: string;
+  rationale: string;
+}
+
+export interface ImprovementPrBudgetImpact {
+  deltaCurrency: number;
+  afterCurrency: number;
+  notes: string;
+}
+
+export interface ImprovementPrFileChange {
+  path: string;
+  action: "create" | "update" | "delete";
+  diff: string;
+}
+
+/**
+ * `ImprovementPrCreativeAttachment` — PR に添付する 1 creative 分のサマリ。
+ * orchestrator が image_prompt + creative_qa + creatives 永続化の結果から組み立て、
+ * (a) Ads YAML に追加する creative manifest ファイル
+ *     (`ads/accounts/<account_key>/creatives/<creative_id>.yaml`) と、
+ * (b) PR body の `## 生成クリエイティブ` セクション
+ * の双方を構築するために使う。
+ *
+ * implementation item 段階では画像バイナリは LocalDisk に書かれていない (image-Provider
+ * 実呼び出しは後続 hop / 別タスク)。`storageRef` / `provider` / `model` /
+ * `parameters` は将来 image-Provider hop が orchestrator に注入できるよう
+ * optional にしてあり、未設定なら PR body は「(プロンプトのみ)」と表示する。
+ */
+export interface ImprovementPrCreativeAttachment {
+  /** `creatives.id` (DB primary key)。manifest ファイル名にも使う。 */
+  creativeDbId: string;
+  /** `creatives.key` (account 内で安定なクリエイティブキー)。 */
+  creativeKey: string;
+  /** UI 表示用の sanitized 名前。 */
+  displayName: string;
+  /** バリアント連番 (0-based)。 */
+  variantIndex: number;
+  /** バリアントのプロンプト + style metadata。 */
+  prompt: ImprovementPrCreativePromptVariant;
+  /** image_prompt 全体の rationale (生成理由)。バリアント間で共通。 */
+  rationale: string;
+  /** creative_status vocabulary の値 (qa_passed | qa_warned | ...)。 */
+  status: ImprovementPrCreativeStatus;
+  /** creative_qa の評価結果 (per-check breakdown 含む)。 */
+  qa: {
+    aiRunId: string;
+    recommendation: ImprovementPrCreativeQaRecommendation;
+    issues: ImprovementPrCreativeQaIssue[];
+    rationale: string;
+  };
+  /** image_prompt agent の ai_run id。 */
+  imagePromptAiRunId: string;
+  /**
+   * 画像 Provider 名 (`openai` | `stability` | `replicate` | `mock`)。
+   * implementation item 時点では image-Provider hop が orchestrator に組み込まれていないため
+   * null。将来 hop が値を埋める。
+   */
+  provider?: string | null;
+  /** 画像モデル id (例: `gpt-image-1`, `sd3-large`)。同上。 */
+  model?: string | null;
+  /**
+   * `storage://creatives/<account_key>/<creative_id>/<asset_id>.<ext>` の
+   * 安定 storage ref (preview / 監査参照用)。バイナリ未生成なら null で、
+   * PR body は「(プロンプトのみ)」と明示する (UI design plan principle 23/24)。
+   */
+  storageRef?: string | null;
+  /**
+   * Storage Adapter 内の相対 key (`creatives/<account_key>/<creative_id>/<asset>.<ext>`)。
+   * `creatives.storagePath` 列に保存される (UI には出さない、内部用)。
+   */
+  storagePath?: string | null;
+  /** 生成パラメータのスナップショット (variation_conditions 等)。同上。 */
+  parameters?: Record<string, unknown> | null;
+}
+
+// ---------------------------------------------------------------------
+// Plan / dry-run validator (Regression fix)
+// ---------------------------------------------------------------------
+
+export type ImprovementPrPlanRiskLevel = "ok" | "warn" | "error";
+
+export interface ImprovementPrPlanCounts {
+  creates: number;
+  updates: number;
+  deletes: number;
+  errors: number;
+  warnings: number;
+}
+
+export interface ImprovementPrPlanFinding {
+  file: string;
+  message: string;
+  pointer?: string;
+}
+
+/**
+ * gitops が出した YAML 変更を、プロジェクトの正規 dry-run / plan 経路に通した
+ * 結果。LLM-authored の `dryRunSummary` ではなく、Zod 検証 +
+ * `buildExecutionPlan` による実 plan の出力を 1 つの構造体に丸めたもの。
+ */
+export interface ImprovementPrPlanValidationResult {
+  /** 検証が実際に走ったか。ops repo の local checkout が無い等の理由で skip された場合は false。 */
+  available: boolean;
+  /** validation / plan-level error が無かったか。available=false なら false。 */
+  ok: boolean;
+  risk: ImprovementPrPlanRiskLevel;
+  counts: ImprovementPrPlanCounts;
+  errors: ImprovementPrPlanFinding[];
+  warnings: ImprovementPrPlanFinding[];
+  /** 1 行 human-readable 要約 (PR body / audit summary 用、sanitize 済み)。 */
+  summary: string;
+  durationMs: number;
+}
+
+export interface ImprovementPrPlanValidator {
+  /**
+   * gitops 出力 (YAML 変更) を実際の plan/dry-run 経路に通して検証する。
+   *
+   * - 失敗時も throw せず、`ok=false` + errors を含む結果を返す。
+   * - ops repo の local checkout が利用できない場合は `available=false` を返す。
+   *   呼び出し側 (orchestrator) は available=false でも PR を発行し、
+   *   PR body と audit metadata に「skipped: ops repo 未配備」を残す。
+   */
+  validate(input: {
+    accountKey: string;
+    files: ImprovementPrFileChange[];
+  }): Promise<ImprovementPrPlanValidationResult>;
+}
+
+export interface ImprovementPrCreativePromptVariant {
+  prompt: string;
+  negativePrompt: string;
+  styleNotes: string;
+}
+
+/**
+ * `ImprovementPrCreativeRecord` — image_prompt エージェントが生成した 1 バリアント
+ * 分のクリエイティブ metadata。orchestrator は `image_prompt` と `creative_qa` の
+ * ai_runs を両方とも永続化した後、1 variant につき 1 行 `createCreative` を呼ぶ。
+ *
+ * - `aiRunId` は image_prompt の ai_run。`Creative.aiRunId` リレーションに使う。
+ * - `qa.aiRunId` は creative_qa の ai_run。creatives テーブルの
+ *   `creativeQaAiRunId` 列にもコピーされ、JOIN 一発で QA run に辿り着ける。
+ * - `status` は creative_status vocabulary の中から 1 値。orchestrator が
+ *   creative_qa.recommendation を見て決定する (approve→qa_passed,
+ *   request_changes→qa_warned, reject→qa_failed)。PR 添付後は
+ *   `linkCreativesToPullRequest` 経由で `attached_to_pr` に書き換わる。
+ * - 画像バイナリ (storagePath) は本構造体には含まれない。binary 生成は別 hop で、
+ *   QA を通った variant のみ後段の Storage Adapter が `storagePath` /
+ *   `storageRef` / `provider` / `model` / `parameters` を埋める。the current implementation
+ *   implementation item では prompt-only 段階の保存契約のみを扱い、それらの列は null で
+ *   作成される (Storage hop / future image-Provider hop が後で update する)。
+ *   prompt-only fallback の場合でもこの構造体で metadata は永続化される。
+ */
+export interface ImprovementPrCreativeRecord {
+  /** AdAccount.id (FK)。 */
+  accountId: string;
+  /**
+   * regression fix: 紐付く ads_hierarchy.id (campaign / adset / ad)。schema 上
+   * `Creative.hierarchyId String?` の "where applicable" を満たすため、本フィールドを
+   * 経由して orchestrator から runtime store まで値を流す (= acceptance:
+   * "creatives table links generated assets to ... campaign/ad where applicable").
+   * image_prompt agent が account-level に対して走り、特定 hierarchy node を
+   * targeting しない現状運用では null を渡す。後続 task で agent が node を
+   * 解決した場合は本フィールドに id を入れて persist される (= データ経路を
+   * 開けておく)。
+   */
+  hierarchyId?: string | null;
+  /** account 内で安定なクリエイティブキー (`@@unique([accountId, key])`)。 */
+  key: string;
+  /** UI 表示用の sanitized 名前。 */
+  displayName: string;
+  /** "image" | "video" | "carousel" | "text" — the current implementation では基本 "image"。 */
+  mediaType: string;
+  /** image_prompt ai_run の id。 */
+  aiRunId: string;
+  /** バリアント連番 (0-based)。 */
+  variantIndex: number;
+  /** バリアントのプロンプト + style metadata。 */
+  prompt: ImprovementPrCreativePromptVariant;
+  /** image_prompt 全体の rationale (バリアント間で共通)。 */
+  rationale: string;
+  /** 紐付く creative_qa ai_run の id + 評価結果。 */
+  qa: {
+    aiRunId: string;
+    recommendation: ImprovementPrCreativeQaRecommendation;
+    issues: ImprovementPrCreativeQaIssue[];
+    rationale: string;
+  };
+  /**
+   * creative_status vocabulary の値。orchestrator が `creative_qa.recommendation`
+   * から派生して渡す。PR 添付後は `linkCreativesToPullRequest` で
+   * `attached_to_pr` に更新される。
+   */
+  status: ImprovementPrCreativeStatus;
+  /**
+   * regression fix: image-Provider hop が走った場合に埋まる生成成果物 metadata。
+   * 未設定 / Provider 失敗 (= prompt-only fallback) では全項目 null で、
+   * `creatives` 行も prompt-only な audit metadata として独立して機能する。
+   * Storage Adapter 内の安定 ref (`storage://creatives/<account_key>/<creative_id>/<asset_id>.<ext>`)。
+   */
+  storageRef?: string | null;
+  /** Storage Adapter 内の相対 key (LocalDisk 内部用)。 */
+  storagePath?: string | null;
+  /** 画像 Provider 名 (`openai` | `stability` | `replicate` | `mock`)。 */
+  provider?: string | null;
+  /** 画像モデル id (例: `gpt-image-1`, `sd3-large`)。 */
+  model?: string | null;
+  /** 生成パラメータのスナップショット (variation_conditions / variant_count / purpose 等)。 */
+  parameters?: Record<string, unknown> | null;
+}
+
+/**
+ * `Creative.status` が取り得る値 (the current implementation creative_status vocabulary)。
+ *
+ * implementation item で実際に書き込み得るのは `qa_passed | qa_warned | qa_failed |
+ * attached_to_pr | fallback_text_only` のみ。`generating` / `qa_running` /
+ * `merged` / `active_on_meta` / `superseded` は image-Provider 実呼び出し /
+ * github_poll / activate hop が後続タスクで書き込む。
+ */
+export type ImprovementPrCreativeStatus =
+  | "queued"
+  | "generating"
+  | "qa_running"
+  | "qa_passed"
+  | "qa_warned"
+  | "qa_failed"
+  | "attached_to_pr"
+  | "merged"
+  | "active_on_meta"
+  | "superseded"
+  | "fallback_text_only";
+
+/**
+ * `linkCreativesToPullRequest` 入力。PR 発行成功直後に orchestrator から呼ばれ、
+ * 当該 improvement_pr run で生まれた creatives 行に `pullRequestId` をセットし、
+ * `status` を `attached_to_pr` に進める。creative_qa が `reject` した variant は
+ * `pullRequestId` を持たないため、`creativeIds` には含めない契約。
+ */
+export interface ImprovementPrCreativeLinkInput {
+  /** 当該 PR に添付する creatives.id の配列 (順序は image_prompt variant 順)。 */
+  creativeIds: string[];
+  /** github_pull_requests.id (FK)。 */
+  pullRequestId: string;
+  /** github_pull_requests.number (UI 表示 / metadata 用)。 */
+  pullRequestNumber: number;
+  /**
+   * 進める status。既定は `attached_to_pr`。後続 hop が `merged` /
+   * `active_on_meta` を上書きするときに同じ method を再利用できるよう、引数化。
+   */
+  status?: ImprovementPrCreativeStatus;
+}
+
+export interface ImprovementPrStore {
+  findAdAccount(input: {
+    workspaceId: string;
+    accountKey: string;
+  }): Promise<DailyReportAdAccountSnapshot | null>;
+  /**
+   * 8 agent の sanitized ai_runs 行を 1 行 insert する。
+   * 呼び出し側 (apps/worker) は `prisma.aiRun.create({ data })` を実行する。
+   */
+  createAiRun(data: AiRunCreateInputData): Promise<{ id: string }>;
+  /**
+   * image_prompt が出力した 1 バリアント分のクリエイティブ metadata を
+   * `creatives` テーブルに 1 行 insert する。`spec` は image_prompt の
+   * prompt/negativePrompt/styleNotes/rationale + creative_qa の
+   * aiRunId/recommendation/issues/rationale を 1 つの JSON にまとめて持つ。
+   * Storage Adapter が後段で `storagePath` / `storageRef` / `provider` /
+   * `model` / `parameters` を埋めるまで、本テーブル行は prompt-only な
+   * 「audit metadata」として独立して機能する。
+   */
+  createCreative(data: ImprovementPrCreativeRecord): Promise<{ id: string }>;
+  /**
+   * PR 発行成功直後に呼ばれ、当該 improvement_pr run で生まれた creatives 行に
+   * `pullRequestId` を埋め、`status` を `attached_to_pr` に進める (= acceptance
+   * criterion: creatives table links generated assets to ... PR)。
+   *
+   * 入力 `creativeIds` が空配列の場合は何もしない (no-op)。
+   * 既に `merged` / `active_on_meta` 等の進んだ status を持つ行に対しては
+   * 上書きしないことを実装側 (Prisma updateMany) で担保する。
+   */
+  linkCreativesToPullRequest(input: ImprovementPrCreativeLinkInput): Promise<void>;
+}
+
+// ---------------------------------------------------------------------
+// Step result — uniform shape across the 8 agents
+// ---------------------------------------------------------------------
+
+export interface ImprovementPrAgentRunResult<TOutput> {
+  /** Prisma-ready ai_runs row (sanitize 済み)。失敗時も必ず存在する。 */
+  aiRunInput: AiRunCreateInputData;
+  /** 成功時のみ非 null。 */
+  output: TOutput | null;
+  /** 失敗時の sanitized 1 行説明。成功時は null。 */
+  error: string | null;
+}
+
+// ---------------------------------------------------------------------
+// Media buyer agent output (shared with pipeline runner)
+// ---------------------------------------------------------------------
+
+export interface ImprovementPrMediaBuyerOutput {
+  proposals: ImprovementPrProposal[];
+  budgetImpact: ImprovementPrBudgetImpact;
+  dryRunSummary: string;
+  rationale: string;
+}
+
+// ---------------------------------------------------------------------
+// Pipeline runner (this implementation) — runs all 8 agents
+// ---------------------------------------------------------------------
+
+export interface ImprovementPrPipelineInput {
+  accountId: string;
+  /** UI 表示 / prompt 用の displayName。 */
+  accountDisplayName: string;
+  currency: string;
+  /** 紐付く performance_snapshots の id。 */
+  snapshotIds: string[];
+  /** 現在の日次予算 (account 合計, currency 単位)。 */
+  currentDailyBudget: number;
+  riskTolerance: ImprovementPrRiskTolerance;
+  mode: ImprovementPrExecutionMode;
+  /** ops repo (例: "myorg/ads-config"). 無ければ空文字。 */
+  repo: string;
+  /** PR base ref. 既定 "main"。 */
+  baseRef?: string;
+}
+
+export interface ImprovementPrAnalystOutput {
+  commentary: string;
+  deltas: Record<string, string>;
+  topImprovements: {
+    hierarchy: "account" | "campaign" | "adset" | "ad";
+    target: string;
+    rationale: string;
+    expectedImpact: string;
+  }[];
+}
+
+export interface ImprovementPrStrategyOutput {
+  recommendedApproach: string;
+  audienceFocus: string;
+  channelMix: string[];
+  riskNotes: string[];
+  rationale: string;
+}
+
+export interface ImprovementPrCopyVariant {
+  headline: string;
+  primaryText: string;
+  cta: string;
+}
+
+export interface ImprovementPrCopyOutput {
+  primary: ImprovementPrCopyVariant;
+  alternates: ImprovementPrCopyVariant[];
+  rationale: string;
+}
+
+export interface ImprovementPrImagePromptVariant {
+  prompt: string;
+  negativePrompt: string;
+  styleNotes: string;
+}
+
+export interface ImprovementPrImagePromptOutput {
+  variants: ImprovementPrImagePromptVariant[];
+  rationale: string;
+}
+
+export type ImprovementPrCreativeQaRecommendation =
+  | "approve"
+  | "request_changes"
+  | "reject";
+
+export interface ImprovementPrCreativeQaIssue {
+  severity: "info" | "warn" | "error";
+  category: string;
+  message: string;
+}
+
+export interface ImprovementPrCreativeQaOutput {
+  issues: ImprovementPrCreativeQaIssue[];
+  recommendation: ImprovementPrCreativeQaRecommendation;
+  rationale: string;
+}
+
+/**
+ * regression fix: `runCreativeQa` の optional 入力。Provider が既に bytes を
+ * 返している variant に対して、production wiring が dimensions / format /
+ * quality / forbidden_expression / brand_tone の決定論的検査を走らせるための
+ * メタデータ。`evaluateCreativeQaBatch` の `CreativeQaAssetInput` と互換な
+ * shape (= queue 層が `@addroid/llm-provider` の internal 型を直接 import せず
+ * とも同等の入力を組み立てられる)。
+ */
+export interface ImprovementPrCreativeQaAssetCheck {
+  variantKey: string;
+  width: number;
+  height: number;
+  byteSize: number;
+  /** "image/png" | "image/jpeg" 等。 */
+  mimeType: string;
+  /** Provider 報告の quality score (0..1)。任意。 */
+  providerQualityScore?: number | null;
+  /** OCR / Vision LLM 由来のテキスト (sanitize 済み)。任意。 */
+  detectedText?: string | null;
+}
+
+export interface ImprovementPrGitOpsOutput {
+  prTitle: string;
+  prBody: string;
+  branchName: string;
+  files: ImprovementPrFileChange[];
+}
+
+export interface ImprovementPrAuditOutput {
+  classification: ImprovementPrAuditClassification;
+  dangerousCategories: string[];
+  rationale: string;
+}
+
+/**
+ * `ImprovementPrPipelineRunner` — 8 agent をワークフロー側で順序実行する境界。
+ *
+ * 各 method は対応する agent を 1 回呼び出し、Prisma-ready `aiRunInput` と
+ * パース済みの output を返す。LLM Provider 失敗 / JSON 不正は throw せず
+ * `output=null + error="..."` で返す。orchestrator は per-step の永続化と
+ * 早期 short-circuit を担当する。
+ */
+export interface ImprovementPrPipelineRunner {
+  runAnalyst(input: {
+    accountId: string;
+    accountDisplayName: string;
+    currency: string;
+    snapshotIds: string[];
+    currentDailyBudget: number;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrAnalystOutput>>;
+  runStrategy(input: {
+    accountId: string;
+    accountDisplayName: string;
+    currency: string;
+    analystCommentary: string;
+    riskTolerance: ImprovementPrRiskTolerance;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrStrategyOutput>>;
+  runCopy(input: {
+    accountId: string;
+    accountDisplayName: string;
+    audienceFocus: string;
+    recommendedApproach: string;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrCopyOutput>>;
+  runImagePrompt(input: {
+    accountId: string;
+    audienceFocus: string;
+    primaryHeadline: string;
+    primaryText: string;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrImagePromptOutput>>;
+  runCreativeQa(input: {
+    copy: ImprovementPrCopyOutput;
+    imagePrompts: ImprovementPrImagePromptOutput;
+    /**
+     * regression fix: 既に Provider が bytes を返している場合に渡す per-asset
+     * メタデータ。production wiring (`apps/worker/src/lib/improvement-pr-runtime.ts`)
+     * は本配列を受け取った時、`evaluateCreativeQaBatch` を実行して dimensions /
+     * format / quality / forbidden_expression / brand_tone を決定論的に検査し、
+     * blocking failure があれば LLM 出力の `recommendation` を `reject` に
+     * 強制ダウングレードする (= "complete per-asset QA before any PR linkage" の
+     * acceptance を満たすための明示ゲート)。
+     *
+     * 配列が空 / 未指定の場合は LLM 単独の判定 (= プロンプトベース) のみで
+     * 進む。orchestrator が image_prompt → image-Provider → runCreativeQa の
+     * 順で呼ぶよう将来再構成された場合に load-bearing になる契約。
+     */
+    generatedAssets?: ImprovementPrCreativeQaAssetCheck[];
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrCreativeQaOutput>>;
+  runMediaBuyer(input: {
+    accountId: string;
+    currency: string;
+    snapshotIds: string[];
+    currentDailyBudget: number;
+    riskTolerance: ImprovementPrRiskTolerance;
+    analystSummary: string;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrMediaBuyerOutput> & {
+    decision: ImprovementPrDecision | null;
+  }>;
+  runGitOps(input: {
+    accountId: string;
+    proposals: ImprovementPrProposal[];
+    repo: string;
+    baseRef: string;
+    branchHint: string;
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrGitOpsOutput> & {
+    decision: "propose" | "skip" | null;
+  }>;
+  runAudit(input: {
+    accountId: string;
+    proposals: ImprovementPrProposal[];
+    files: ImprovementPrFileChange[];
+    mode: ImprovementPrExecutionMode;
+    safeCategories: string[];
+  }): Promise<ImprovementPrAgentRunResult<ImprovementPrAuditOutput> & {
+    decision: ImprovementPrAuditDecision | null;
+  }>;
+}
+
+// ---------------------------------------------------------------------
+// GitHub publisher — gitops 出力を ops repo に PR として反映する境界
+// ---------------------------------------------------------------------
+
+export interface ImprovementPrPullRequestRequest {
+  branchName: string;
+  prTitle: string;
+  prBody: string;
+  files: ImprovementPrFileChange[];
+  baseRef: string;
+}
+
+export interface ImprovementPrPullRequestRecord {
+  /** github_pull_requests.id */
+  pullRequestId: string;
+  /** github_pull_requests.number */
+  prNumber: number;
+  /** PR HTML URL (sanitize 済みで UI に出る). */
+  htmlUrl: string;
+  /** branch HEAD sha */
+  headSha: string;
+}
+
+export interface ImprovementPrGithubPublisher {
+  /**
+   * gitops 出力を ops repo に PR として書き込む。
+   *
+   * - 成功時: `{ pullRequestId, prNumber, htmlUrl, headSha }` を返す。
+   * - 失敗時: throw する。orchestrator は status="pr_failed" に倒し、audit に
+   *   失敗を記録する。github_pull_requests 行が部分的に作られていても
+   *   GitOps state は腐らない (audit_logs に痕跡が残る)。
+   */
+  createPullRequest(
+    req: ImprovementPrPullRequestRequest
+  ): Promise<ImprovementPrPullRequestRecord>;
+}
+
+// ---------------------------------------------------------------------
+// Audit writer — workflow 単位の audit_logs / approval_records 書き込み境界
+// ---------------------------------------------------------------------
+
+export type ImprovementPrAuditAction =
+  | "improvement_pr.opened"
+  | "improvement_pr.skipped"
+  | "improvement_pr.failed";
+
+export interface ImprovementPrAuditInput {
+  workspaceId: string;
+  accountKey: string;
+  accountId: string;
+  cronRunId: string | null;
+  action: ImprovementPrAuditAction;
+  /** PR が立った場合のみ非 null。 */
+  pullRequest: ImprovementPrPullRequestRecord | null;
+  /** 紐付く ai_runs.id 一覧 (永続化された全段)。 */
+  aiRunIds: string[];
+  /** audit agent の決定。失敗時は null。 */
+  auditDecision: ImprovementPrAuditDecision | null;
+  classification: ImprovementPrAuditClassification | null;
+  dangerousCategories: string[];
+  /** 実体としては budget impact / dry-run summary / proposalCount / snapshotIds 等を含む。 */
+  metadata: Record<string, unknown>;
+  summary: string;
+}
+
+export interface ImprovementPrAuditWriter {
+  recordImprovementPrAudit(input: ImprovementPrAuditInput): Promise<void>;
+}
+
+// ---------------------------------------------------------------------
+// Summary
+// ---------------------------------------------------------------------
+
+export interface ImprovementPrSummary {
+  status: ImprovementPrRunStatus;
+  workspaceId: string;
+  accountKey: string;
+  accountId: string | null;
+  mode: ImprovementPrExecutionMode;
+  /** 旧 API: media_buyer の ai_run.id。後方互換のため残す。 */
+  aiRunId: string | null;
+  /** 全 step の ai_runs.id 一覧 (順序: analyst → ... → audit). */
+  aiRunIds: string[];
+  /**
+   * 当該 run で永続化された creatives.id 一覧 (image_prompt の variant 順)。
+   * creative_qa が出力を返さなかった、または image_prompt が失敗した場合は空配列。
+   */
+  creativeIds: string[];
+  /** media_buyer の決定。 */
+  decision: ImprovementPrDecision | null;
+  proposalCount: number;
+  /** 表示通貨。account が解決できない場合は null。 */
+  currency: string | null;
+  /** PR 作成成功時のみ非 null。 */
+  pullRequest: ImprovementPrPullRequestRecord | null;
+  /** audit agent の最終分類。失敗時は null。 */
+  classification: ImprovementPrAuditClassification | null;
+  /** audit agent の最終決定。失敗時は null。 */
+  auditDecision: ImprovementPrAuditDecision | null;
+  dangerousCategories: string[];
+  errorMessage?: string;
+}
+
+export interface RunImprovementPrOptions {
+  workspaceId: string;
+  mode: ImprovementPrExecutionMode;
+  accountKey: string;
+  /** 紐付く performance_snapshots の id (analyst が直近で生成したもの)。 */
+  snapshotIds?: string[];
+  /** 現在の日次予算 (account 合計, currency 単位)。0 が既定。 */
+  currentDailyBudget?: number;
+  riskTolerance?: ImprovementPrRiskTolerance;
+  /** ops repo "owner/name". 未設定だと PR 経路は無効化される。 */
+  repo?: string;
+  /** PR base ref. 既定 "main"。 */
+  baseRef?: string;
+  /** auto_apply モードで許される safe operation カテゴリ。 */
+  safeCategories?: string[];
+  store: ImprovementPrStore;
+  /** 8 agent を流す pipeline runner。 */
+  pipeline: ImprovementPrPipelineRunner;
+  /** PR 発行ハンドラ。 */
+  publisher: ImprovementPrGithubPublisher;
+  /**
+   * gitops 出力 (YAML 変更) を実 plan / dry-run 経路に通すバリデータ。
+   * ops repo を持たない環境では available=false を返す実装でよい (PR は発行され、
+   * PR body と audit metadata に skipped が残る)。
+   */
+  planValidator: ImprovementPrPlanValidator;
+  /** audit_logs 書き込みハンドラ。 */
+  audit: ImprovementPrAuditWriter;
+  /** 紐付く cron_run id (audit_logs.metadata に含めるための識別子)。 */
+  cronRunId?: string | null;
+  /**
+   * regression fix: image-Provider hop。注入されている場合のみ image_prompt
+   * variants を `generateAndQaCreative` に流して実バイナリ + 決定論的 QA を実行し、
+   * 通った asset を `persistCreativeAssets` で LocalDisk Storage に書き出す。
+   * 未注入 / `enabled=false` / Provider 失敗時は prompt-only fallback に縮退し、
+   * UI design plan principle 27 のとおり benign idle として扱う (PR 自体は成立する)。
+   */
+  imageProvider?: ImageProvider | null;
+  /**
+   * regression fix: 生成 asset の永続化先 (LocalDisk Storage Adapter)。
+   * `imageProvider` が注入されている場合のみ参照される。注入されていなければ
+   * prompt-only fallback (= `creatives.storagePath` / `storageRef` / `provider` /
+   * `model` / `parameters` は null のまま) になる。
+   */
+  creativeStorage?: CreativeStorageAdapter | null;
+  /**
+   * `generateAndQaCreative` に渡す Creative QA policy。
+   *
+   * regression fix: 未指定の場合は **空 policy ではなく `DEFAULT_CREATIVE_QA_POLICY`**
+   * (dimensions / format / quality / forbiddenExpression / brandTone すべてに
+   * 最低限の制約を持つ非空 policy) を適用する。これにより acceptance
+   * "Creative QA checks dimensions, format, quality, forbidden expressions,
+   * and brand-tone constraints before PR attachment" を、production の
+   * runtime が policy を明示しない場合でも保証する。
+   *
+   * workspace_settings.creativeQaPolicy が後続タスクで読み込まれた場合は、
+   * 呼び出し側で `DEFAULT_CREATIVE_QA_POLICY` 上に merge してここに渡す想定。
+   */
+  creativeQaPolicy?: CreativeQaPolicy;
+  /** test seam: 現在時刻。 */
+  now?: () => Date;
+}
+
+/**
+ * `runImprovementPrOnce` — improvement_pr cron handler の純粋なオーケストレータ。
+ * pg-boss handler は本関数を 1 回呼び、戻り値を `cron_runs.output` に書く。
+ *
+ * 8 段パイプラインを実行し、GitHub PR と audit_logs を作る。proposals が
+ * 存在する経路はすべて `publisher.createPullRequest` を経由してからのみ
+ * `succeeded` を返す (= PR 境界を迂回する経路は存在しない)。
+ */
+export async function runImprovementPrOnce(
+  opts: RunImprovementPrOptions
+): Promise<ImprovementPrSummary> {
+  const account = await opts.store.findAdAccount({
+    workspaceId: opts.workspaceId,
+    accountKey: opts.accountKey,
+  });
+  if (!account) {
+    return {
+      status: "no_account",
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: null,
+      mode: opts.mode,
+      aiRunId: null,
+      aiRunIds: [],
+      creativeIds: [],
+      decision: null,
+      proposalCount: 0,
+      currency: null,
+      pullRequest: null,
+      classification: null,
+      auditDecision: null,
+      dangerousCategories: [],
+      errorMessage: `ad_account '${opts.accountKey}' not found in workspace`,
+    };
+  }
+
+  return await runPipelineMode(opts, account);
+}
+
+// ---------------------------------------------------------------------
+// Pipeline mode (this implementation)
+// ---------------------------------------------------------------------
+
+async function runPipelineMode(
+  opts: RunImprovementPrOptions,
+  account: DailyReportAdAccountSnapshot
+): Promise<ImprovementPrSummary> {
+  const pipeline = opts.pipeline;
+  const publisher = opts.publisher;
+  const auditWriter = opts.audit;
+
+  const accountIdForAi = account.metaAccountId ?? account.key;
+  const baseRef = opts.baseRef ?? "main";
+  const cronRunId = opts.cronRunId ?? null;
+  const aiRunIds: string[] = [];
+  const creativeIds: string[] = [];
+  const creativeAttachments: ImprovementPrCreativeAttachment[] = [];
+  const safeCategories = opts.safeCategories ?? [];
+
+  // ── 1) analyst ────────────────────────────────────────────────────────
+  const analyst = await pipeline.runAnalyst({
+    accountId: accountIdForAi,
+    accountDisplayName: account.displayName,
+    currency: account.currency,
+    snapshotIds: opts.snapshotIds ?? [],
+    currentDailyBudget: opts.currentDailyBudget ?? 0,
+  });
+  const analystRow = await opts.store.createAiRun(analyst.aiRunInput);
+  aiRunIds.push(analystRow.id);
+  if (!analyst.output) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      stage: "analyst",
+      error: analyst.error ?? "analyst agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 2) strategy ───────────────────────────────────────────────────────
+  const strategy = await pipeline.runStrategy({
+    accountId: accountIdForAi,
+    accountDisplayName: account.displayName,
+    currency: account.currency,
+    analystCommentary: analyst.output.commentary,
+    riskTolerance: opts.riskTolerance ?? "balanced",
+  });
+  const strategyRow = await opts.store.createAiRun(strategy.aiRunInput);
+  aiRunIds.push(strategyRow.id);
+  if (!strategy.output) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      stage: "strategy",
+      error: strategy.error ?? "strategy agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 3) copy ───────────────────────────────────────────────────────────
+  const copy = await pipeline.runCopy({
+    accountId: accountIdForAi,
+    accountDisplayName: account.displayName,
+    audienceFocus: strategy.output.audienceFocus,
+    recommendedApproach: strategy.output.recommendedApproach,
+  });
+  const copyRow = await opts.store.createAiRun(copy.aiRunInput);
+  aiRunIds.push(copyRow.id);
+  if (!copy.output) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      stage: "copy",
+      error: copy.error ?? "copy agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 4) image_prompt ───────────────────────────────────────────────────
+  const imagePrompt = await pipeline.runImagePrompt({
+    accountId: accountIdForAi,
+    audienceFocus: strategy.output.audienceFocus,
+    primaryHeadline: copy.output.primary.headline,
+    primaryText: copy.output.primary.primaryText,
+  });
+  const imageRow = await opts.store.createAiRun(imagePrompt.aiRunInput);
+  aiRunIds.push(imageRow.id);
+  if (!imagePrompt.output) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      stage: "image_prompt",
+      error: imagePrompt.error ?? "image_prompt agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 5) creative_qa ────────────────────────────────────────────────────
+  const creativeQa = await pipeline.runCreativeQa({
+    copy: copy.output,
+    imagePrompts: imagePrompt.output,
+  });
+  const qaRow = await opts.store.createAiRun(creativeQa.aiRunInput);
+  aiRunIds.push(qaRow.id);
+  if (!creativeQa.output) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      stage: "creative_qa",
+      error: creativeQa.error ?? "creative_qa agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 5b) creatives ─────────────────────────────────────────────────────
+  // Acceptance: "Image Prompt Agent stores prompts and rationale in ai_runs
+  // and creative metadata" + "creatives table links generated assets to
+  // account, ai_run, ..." を満たすため、image_prompt が出した variant ごとに
+  // `creatives` 行を 1 つ書く。creative_qa の recommendation/issues/rationale
+  // も同じ行の `spec` に同梱して、creatives テーブルだけ参照すれば QA 結果と
+  // image_prompt rationale が辿れるようにする (UI / audit / forensic 経路)。
+  // QA が approve しなかった場合でも metadata は残し、PR 添付だけが skip される
+  // (= rejected variants も creative library 上で audit 可能)。
+  // implementation item: status を creative_qa.recommendation から派生して書き込む。
+  // approve  → qa_passed (添付候補。後段で attached_to_pr に進む)
+  // request_changes → qa_warned (非ブロッキング issues あり。添付候補)
+  // reject   → qa_failed (PR 添付なし。audit 用に行は残す)
+  const llmCreativeQaStatus: ImprovementPrCreativeStatus =
+    creativeQa.output.recommendation === "approve"
+      ? "qa_passed"
+      : creativeQa.output.recommendation === "request_changes"
+        ? "qa_warned"
+        : "qa_failed";
+
+  // regression fix: image-Provider hop。注入されている (= `enabled=true`) かつ
+  // creative_qa が reject してない場合のみ実バイナリを生成し、決定論的 QA →
+  // LocalDisk Storage Adapter への永続化まで一気に通す。Provider 未設定 /
+  // 失敗時は prompt-only fallback に縮退し、creatives 行は storage 列を null
+  // のまま書く (UI design plan principle 27)。reject 時は元々 PR 添付しないので
+  // バイナリ生成しても破棄されるだけなので skip する (= unnecessary cost を避ける)。
+  const imageGen = await runImageGenerationHop({
+    imageProvider: opts.imageProvider ?? null,
+    creativeStorage: opts.creativeStorage ?? null,
+    accountKey: account.key,
+    variants: imagePrompt.output.variants,
+    rationale: imagePrompt.output.rationale,
+    // regression fix: production が policy を明示しないケースでも、空 policy
+    // で全 check が `skipped` に倒れて素通りすることを禁止する。
+    // `DEFAULT_CREATIVE_QA_POLICY` は dimensions/format/quality/forbiddenExpression
+    // /brandTone すべてに最低限のガードを持つ。
+    qaPolicy: opts.creativeQaPolicy ?? DEFAULT_CREATIVE_QA_POLICY,
+    imagePromptAiRunId: imageRow.id,
+    creativeQaAiRunId: qaRow.id,
+    skipBinary: creativeQa.output.recommendation === "reject",
+  });
+
+  for (let i = 0; i < imagePrompt.output.variants.length; i++) {
+    const variant = imagePrompt.output.variants[i]!;
+    const creativeKey = `image_${imageRow.id}_v${i}`;
+    const displayName = `Image variant ${i + 1}`;
+    const promptVariant: ImprovementPrCreativePromptVariant = {
+      prompt: variant.prompt,
+      negativePrompt: variant.negativePrompt,
+      styleNotes: variant.styleNotes,
+    };
+    // image-Provider hop が成功したケースでは、決定論的 QA の per-asset overall
+    // を creative.status に反映させる (qa_passed / qa_warned / qa_failed)。
+    // Provider が注入されたが失敗した場合 (`providerError !== null`) は明示的に
+    // `fallback_text_only` に倒し、benign idle 状態をテーブル側でも一目で
+    // 読み取れるようにする (UI design plan principle 27)。Provider が注入されて
+    // いない (= optional 任意設定の現行運用) 場合は LLM creative_qa.recommendation
+    // 由来の status を維持し、prompt-only な creative を audit metadata として
+    // 残し続ける契約 (= 既存の implementation item acceptance を後退させない)。
+    const variantOutcome = imageGen.perVariant[i] ?? null;
+    let creativeStatus: ImprovementPrCreativeStatus;
+    if (imageGen.providerError !== null) {
+      creativeStatus = "fallback_text_only";
+    } else if (!imageGen.fallback && variantOutcome?.status) {
+      creativeStatus = variantOutcome.status;
+    } else {
+      creativeStatus = llmCreativeQaStatus;
+    }
+    // regression fix: `Creative.storageRef` には **base ref**
+    // (`storage://creatives/<account_key>/<creative_id>`) を焼く。Web UI / proxy が
+    // `readCreativeMetadataByRef(row.storageRef)` で `<base>/metadata.json` を引く
+    // 契約に揃える。per-asset ref をそのまま入れると `<asset>.png/metadata.json`
+    // という存在しない path に解決され、proxy が 410 を返す回路に落ちる。
+    // per-asset の実体パスは引き続き `storagePath` (`creatives/.../<asset>.<ext>`)
+    // が保持し、attachments / PR YAML 側は variantOutcome.storageRef (per-asset)
+    // を使い続ける (こちらは reviewer / proxy の deep-link 用途で per-asset の方が
+    // 直に使える)。
+    const created = await opts.store.createCreative({
+      accountId: account.id,
+      // regression fix: image_prompt agent は account-level に走り特定 hierarchy
+      // node を targeting しないため null を渡す。schema は `String?` で許容しており、
+      // フィールドを経由するだけでも acceptance ("links generated assets to ...
+      // campaign/ad where applicable") のデータ経路は完成する (後続 task で agent が
+      // node を解決すればここに id が入る)。
+      hierarchyId: null,
+      key: creativeKey,
+      displayName,
+      mediaType: "image",
+      aiRunId: imageRow.id,
+      variantIndex: i,
+      prompt: promptVariant,
+      rationale: imagePrompt.output.rationale,
+      qa: {
+        aiRunId: qaRow.id,
+        recommendation: creativeQa.output.recommendation,
+        issues: creativeQa.output.issues,
+        rationale: creativeQa.output.rationale,
+      },
+      status: creativeStatus,
+      storageRef: variantOutcome?.storagePath
+        ? imageGen.baseStorageRef
+        : null,
+      storagePath: variantOutcome?.storagePath ?? null,
+      provider: imageGen.providerName,
+      model: imageGen.model,
+      parameters: imageGen.parameters,
+    });
+    creativeIds.push(created.id);
+    // implementation item: PR 添付に必要な per-creative metadata を 1 箇所に集める。
+    // attachments は creative_qa が approve したケースでのみ後段の PR body /
+    // YAML manifest に流れる (qa_warned / qa_failed は短絡パスで PR を作らない)。
+    creativeAttachments.push({
+      creativeDbId: created.id,
+      creativeKey,
+      displayName,
+      variantIndex: i,
+      prompt: promptVariant,
+      rationale: imagePrompt.output.rationale,
+      status: creativeStatus,
+      qa: {
+        aiRunId: qaRow.id,
+        recommendation: creativeQa.output.recommendation,
+        issues: creativeQa.output.issues,
+        rationale: creativeQa.output.rationale,
+      },
+      imagePromptAiRunId: imageRow.id,
+      storageRef: variantOutcome?.storageRef ?? null,
+      storagePath: variantOutcome?.storagePath ?? null,
+      provider: imageGen.providerName,
+      model: imageGen.model,
+      parameters: imageGen.parameters,
+    });
+  }
+
+  // regression fix: deterministic per-asset QA が `qa_failed` (= blocking) を
+  // 返した variant は、LLM creative_qa が "approve" であっても **PR linkage /
+  // PR diff / PR body / audit metadata から外す**。これにより:
+  //   - linkCreativesToPullRequest が PR linkage を qa_passed/qa_warned に
+  //     限定する Prisma store 側の per-row gate と矛盾しない (= store が throw
+  //     しない契約 = "complete per-asset QA before any PR linkage").
+  //   - PR diff の Ads YAML manifest と PR body の "## 生成クリエイティブ"
+  //     セクションが、Meta に届く可能性のある creative だけを参照する
+  //     (= "no PR metadata for blocked assets")。
+  //   - qa_failed creatives 自体は creatives テーブルに残るので Web UI / audit /
+  //     forensic からは依然として辿れる (UI design plan principle 25)。
+  //   - LLM creative_qa が "reject" / "request_changes" を返した場合は下の短絡で
+  //     PR 自体が立たないため、partition は "approve かつ deterministic blocking"
+  //     のケースだけを実質的に切り出す。
+  const attachableCreativeAttachments = creativeAttachments.filter(
+    (a) => a.status !== "qa_failed"
+  );
+  const attachableCreativeIds = attachableCreativeAttachments.map(
+    (a) => a.creativeDbId
+  );
+  const blockedCreativeIds = creativeAttachments
+    .filter((a) => a.status === "qa_failed")
+    .map((a) => a.creativeDbId);
+  // PR linkage は status='attached_to_pr' に進めるため fallback_text_only を
+  // 含めない。
+  //
+  // regression fix: さらに、qa_passed / qa_warned であっても **生成 asset の
+  // 完全な metadata (storageRef + storagePath + provider + model) を持たない
+  // 行は linkage 対象から外す**。理由:
+  //   - acceptance: "creatives table links generated assets to ... storage ref,
+  //     and PR" — pullRequestId を持つ行は実 asset が背後に存在することが前提。
+  //   - prompt-only fallback (Provider 未注入 / 失敗) で生成された qa_passed 行は
+  //     audit metadata としては creatives テーブルに残るが、PR 添付経路は通さない
+  //     (Ads YAML manifest にも storage ref を載せられないため意味を持たない)。
+  //   - 同じ条件は runtime store (`linkCreativesToPullRequest`) の per-row gate
+  //     でも DB 側で再検査される (二重防御 + production fail-loud)。
+  const linkableCreativeIds = attachableCreativeAttachments
+    .filter(
+      (a) =>
+        (a.status === "qa_passed" || a.status === "qa_warned") &&
+        a.storageRef !== null &&
+        a.storagePath !== null &&
+        a.provider !== null &&
+        a.model !== null
+    )
+    .map((a) => a.creativeDbId);
+
+  if (creativeQa.output.recommendation !== "approve") {
+    // QA が approve しない場合は提案 skip。failure ではなく skipped として扱う。
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.skipped",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: null,
+      classification: null,
+      dangerousCategories: [],
+      metadata: {
+        skippedAt: "creative_qa",
+        recommendation: creativeQa.output.recommendation,
+        issues: creativeQa.output.issues,
+        creativeIds,
+      },
+      summary: `creative_qa recommended ${creativeQa.output.recommendation}; PR not opened`,
+    });
+    return buildSummary({
+      status: "skipped_no_proposal",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: null,
+      proposalCount: 0,
+      pullRequest: null,
+      audit: null,
+      errorMessage: `creative_qa recommended ${creativeQa.output.recommendation}`,
+    });
+  }
+
+  // ── 6) media_buyer ────────────────────────────────────────────────────
+  const mediaBuyer = await pipeline.runMediaBuyer({
+    accountId: accountIdForAi,
+    currency: account.currency,
+    snapshotIds: opts.snapshotIds ?? [],
+    currentDailyBudget: opts.currentDailyBudget ?? 0,
+    riskTolerance: opts.riskTolerance ?? "balanced",
+    analystSummary: analyst.output.commentary,
+  });
+  const mediaBuyerRow = await opts.store.createAiRun(mediaBuyer.aiRunInput);
+  aiRunIds.push(mediaBuyerRow.id);
+  if (!mediaBuyer.output || !mediaBuyer.decision) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      stage: "media_buyer",
+      error: mediaBuyer.error ?? "media_buyer agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+  if (
+    mediaBuyer.decision !== "propose" ||
+    mediaBuyer.output.proposals.length === 0
+  ) {
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.skipped",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: null,
+      classification: null,
+      dangerousCategories: [],
+      metadata: {
+        skippedAt: "media_buyer",
+        decision: mediaBuyer.decision,
+        proposalCount: mediaBuyer.output.proposals.length,
+        creativeIds,
+      },
+      summary: `media_buyer decision=${mediaBuyer.decision}; PR not opened`,
+    });
+    return buildSummary({
+      status: "skipped_no_proposal",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: mediaBuyer.decision,
+      proposalCount: mediaBuyer.output.proposals.length,
+      pullRequest: null,
+      audit: null,
+    });
+  }
+
+  // ── 7) gitops ─────────────────────────────────────────────────────────
+  const gitops = await pipeline.runGitOps({
+    accountId: accountIdForAi,
+    proposals: mediaBuyer.output.proposals,
+    repo: opts.repo ?? "",
+    baseRef,
+    branchHint: `improvement-${opts.accountKey}`,
+  });
+  const gitopsRow = await opts.store.createAiRun(gitops.aiRunInput);
+  aiRunIds.push(gitopsRow.id);
+  if (!gitops.output || !gitops.decision) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      stage: "gitops",
+      error: gitops.error ?? "gitops agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+  // implementation item: gitops 出力に「生成クリエイティブの reference manifest」ファイルを
+  // 1 creative につき 1 ファイル追加する。manifest は
+  // `ads/accounts/<account_key>/creatives/<creative_id>.yaml` に書かれ、
+  // brand.yaml の Zod schema からは独立しているため Ads YAML 検証や
+  // buildExecutionPlan を壊さない (loadAndValidateOpsRepo は brand.yaml のみを
+  // 読む)。これにより:
+  //   - Ads YAML の中に creative reference (storage ref / provider / model /
+  //     prompt rationale / QA breakdown) が形として残り、merge 後も diff から
+  //     生成系列を辿れる。
+  //   - audit / plan validator / publisher が同じ files を見るので、
+  //     human reviewer の手元 PR diff と pipeline 側の検証対象が一致する。
+  // gitops.output.files を直接 mutate せず、enhancedFiles を以降のすべての段で
+  // 使う (gitops.output.files は ai_runs に既に永続化されているため、後追いの
+  // metadata ファイルは orchestrator 経由でのみ載せる)。
+  // regression fix: PR diff には deterministic QA 通過分のみを載せる
+  // (qa_failed は creatives テーブル上には残るが、Ads YAML manifest には載せない)。
+  const creativeAttachmentFiles = buildCreativeAttachmentFiles({
+    accountKey: opts.accountKey,
+    attachments: attachableCreativeAttachments,
+  });
+  const enhancedFiles: ImprovementPrFileChange[] = [
+    ...gitops.output.files,
+    ...creativeAttachmentFiles,
+  ];
+  if (gitops.decision === "skip" || gitops.output.files.length === 0) {
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.skipped",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: null,
+      classification: null,
+      dangerousCategories: [],
+      metadata: {
+        skippedAt: "gitops",
+        decision: gitops.decision,
+        fileCount: gitops.output.files.length,
+        creativeIds,
+      },
+      summary: "gitops produced no YAML changes; PR not opened",
+    });
+    return buildSummary({
+      status: "skipped_no_proposal",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: mediaBuyer.decision,
+      proposalCount: mediaBuyer.output.proposals.length,
+      pullRequest: null,
+      audit: null,
+    });
+  }
+
+  // ── 8) audit ──────────────────────────────────────────────────────────
+  const audit = await pipeline.runAudit({
+    accountId: accountIdForAi,
+    proposals: mediaBuyer.output.proposals,
+    files: enhancedFiles,
+    mode: opts.mode,
+    safeCategories,
+  });
+  const auditRow = await opts.store.createAiRun(audit.aiRunInput);
+  aiRunIds.push(auditRow.id);
+  if (!audit.output || !audit.decision) {
+    return await failPipeline({
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      stage: "audit",
+      error: audit.error ?? "audit agent failed",
+      auditWriter,
+      cronRunId,
+    });
+  }
+
+  // ── 8b) plan validation (Regression fix) ───────────────────
+  // gitops の YAML 変更を実 plan / dry-run 経路に通す。LLM-authored の
+  // dryRunSummary ではなく、Zod 検証 + buildExecutionPlan による実 plan の
+  // 結果を PR body と audit metadata に残すことで、人間レビュアが実際の
+  // diff の妥当性を判断できるようにする。
+  let planValidation: ImprovementPrPlanValidationResult;
+  try {
+    planValidation = await opts.planValidator.validate({
+      accountKey: opts.accountKey,
+      files: enhancedFiles,
+    });
+  } catch (err) {
+    // バリデータ自身の例外 (FS/IO 等) は plan を skipped 扱いにし PR は発行する。
+    // 改善提案そのものを腐らせないため、例外メッセージは PR/audit に sanitize 済みで残す。
+    const message = err instanceof Error ? err.message : String(err);
+    planValidation = {
+      available: false,
+      ok: false,
+      risk: "error",
+      counts: { creates: 0, updates: 0, deletes: 0, errors: 0, warnings: 0 },
+      errors: [],
+      warnings: [],
+      summary: `plan validation skipped: validator error: ${message}`,
+      durationMs: 0,
+    };
+  }
+
+  // ── 8c) deterministic approval policy (this implementation) ───────────
+  // AI の audit は LLM のため、契約境界 (report_only は Meta 不変更 / auto_apply
+  // は safe operations のみ / dangerous は必ず PR 承認) を AI 単独で保証できない。
+  // 純粋関数 `evaluateApprovalPolicy` で同じ入力を決定論的に再評価し、
+  // fail-closed (= 厳しい方が勝つ) で AI の決定と合成する。
+  const policyResult = evaluateApprovalPolicy({
+    mode: opts.mode,
+    candidates: mediaBuyer.output.proposals.map((p) => ({
+      category: p.category,
+    })),
+    safeCategories,
+  });
+  const finalDecision = combineApprovalDecisions(
+    audit.decision,
+    policyResult.decision
+  );
+  const finalClassification = combineApprovalClassifications(
+    audit.output.classification,
+    policyResult.classification
+  );
+  const finalDangerousCategories = unionDangerousCategories(
+    audit.output.dangerousCategories,
+    policyResult.dangerousCategories
+  );
+
+  // ── 8d) fail-closed for auto_blocked decisions (regression fix) ───────
+  // 決定論的 policy または audit agent が `auto_blocked` を返した場合、PR を
+  // 開かずにここで停止する。理由:
+  //   - report_only / 危険カテゴリ等で「Meta を変えない」と決まった出力に対し
+  //     mergeable な PR を提示すると、人間が誤って merge した瞬間に
+  //     github_poll → execute_apply 経路が走り得る。
+  //   - PR を開かなければ後段の merge 検出が発火しないため、auto_blocked 決定が
+  //     merge を跨いで生き残る (= execute_apply 境界が承認決定を覆さない)。
+  // audit_log は `improvement_pr.skipped` で残し、UI / forensic から決定理由
+  // (AI 分類、policy reasons、mode、proposals 等) を完全に追跡できるようにする。
+  if (finalDecision === "auto_blocked") {
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.skipped",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: finalDecision,
+      classification: finalClassification,
+      dangerousCategories: finalDangerousCategories,
+      metadata: {
+        skippedAt: "policy_auto_blocked",
+        proposalCount: mediaBuyer.output.proposals.length,
+        fileCount: gitops.output.files.length,
+        budgetImpact: mediaBuyer.output.budgetImpact,
+        planValidation: planValidationToMetadata(planValidation),
+        snapshotIds: opts.snapshotIds ?? [],
+        mode: opts.mode,
+        aiClassification: audit.output.classification,
+        aiDecision: audit.decision,
+        aiDangerousCategories: audit.output.dangerousCategories,
+        policyDecision: policyResult.decision,
+        policyClassification: policyResult.classification,
+        policyReasons: policyResult.reasons,
+        creativeIds,
+      },
+      summary: `improvement_pr auto_blocked (${finalClassification}); PR not opened`,
+    });
+    return buildSummary({
+      status: "auto_blocked",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: mediaBuyer.decision,
+      proposalCount: mediaBuyer.output.proposals.length,
+      pullRequest: null,
+      audit: {
+        classification: finalClassification,
+        decision: finalDecision,
+        dangerousCategories: finalDangerousCategories,
+      },
+    });
+  }
+
+  // ── 9) PR creation ────────────────────────────────────────────────────
+  const prBody = composePrBody({
+    aiRationale: gitops.output.prBody,
+    mediaBuyerRationale: mediaBuyer.output.rationale,
+    risk: {
+      classification: finalClassification,
+      dangerousCategories: finalDangerousCategories,
+      rationale: audit.output.rationale,
+    },
+    auditDecision: finalDecision,
+    policyReasons: policyResult.reasons,
+    budgetImpact: mediaBuyer.output.budgetImpact,
+    planValidation,
+    snapshotIds: opts.snapshotIds ?? [],
+    // regression fix: PR body の "## 生成クリエイティブ" も deterministic QA
+    // 通過分のみを載せる (qa_failed は audit metadata の blockedCreativeIds で別軸記録)。
+    creatives: attachableCreativeAttachments,
+  });
+  let pr: ImprovementPrPullRequestRecord;
+  try {
+    pr = await publisher.createPullRequest({
+      branchName: gitops.output.branchName,
+      prTitle: gitops.output.prTitle,
+      prBody,
+      files: enhancedFiles,
+      baseRef,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.failed",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: finalDecision,
+      classification: finalClassification,
+      dangerousCategories: finalDangerousCategories,
+      metadata: {
+        failedAt: "publish_pr",
+        branchName: gitops.output.branchName,
+        fileCount: gitops.output.files.length,
+        // implementation item: PR diff には gitops files に加えて 1 creative につき
+        // 1 manifest YAML を載せている。失敗時も人間が「何を載せようとしたか」
+        // を audit から再構成できるよう、添付ファイル数と creative ids を残す。
+        // regression fix: `attachedCreativeIds` は実際に PR diff に載せた
+        // (= deterministic QA を通った) creatives のみ。`blockedCreativeIds` は
+        // qa_failed のため添付しなかった creatives を別軸で記録する。
+        attachedCreativeFileCount: creativeAttachmentFiles.length,
+        attachedCreativeIds: attachableCreativeIds,
+        blockedCreativeIds,
+        proposalCount: mediaBuyer.output.proposals.length,
+        aiClassification: audit.output.classification,
+        aiDecision: audit.decision,
+        aiDangerousCategories: audit.output.dangerousCategories,
+        policyDecision: policyResult.decision,
+        policyClassification: policyResult.classification,
+        policyReasons: policyResult.reasons,
+        planValidation: planValidationToMetadata(planValidation),
+        mode: opts.mode,
+        creativeIds,
+      },
+      summary: `improvement_pr publish failed: ${message}`,
+    });
+    return buildSummary({
+      status: "pr_failed",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: mediaBuyer.decision,
+      proposalCount: mediaBuyer.output.proposals.length,
+      pullRequest: null,
+      audit: {
+        classification: finalClassification,
+        decision: finalDecision,
+        dangerousCategories: finalDangerousCategories,
+      },
+      errorMessage: message,
+    });
+  }
+
+  // ── 9b) link creatives to PR (this implementation) ───────────────────
+  // PR が立ったので、creative_qa を通った variant 行に pullRequestId を埋め
+  // status を `attached_to_pr` に進める。creativeIds が空 (= image_prompt が
+  // variant を出さなかった、または QA で rejected) の場合は何もしない契約。
+  //
+  // regression fix: PR linkage は deterministic per-asset QA を通った
+  // (qa_passed | qa_warned) creatives のみに絞る。qa_failed と fallback_text_only
+  // は除外する (前者は blocking failure、後者は storage ref を持たないため
+  // attached_to_pr の意味的前提を満たさない)。production の Prisma store も
+  // 同じ前提で per-row 検証 → 不整合が混じったら throw する契約 (二重防御)。
+  if (linkableCreativeIds.length > 0) {
+    await opts.store.linkCreativesToPullRequest({
+      creativeIds: linkableCreativeIds,
+      pullRequestId: pr.pullRequestId,
+      pullRequestNumber: pr.prNumber,
+      status: "attached_to_pr",
+    });
+  }
+
+  // ── 10) audit_logs / approval_records ────────────────────────────────
+  await auditWriter.recordImprovementPrAudit({
+    workspaceId: opts.workspaceId,
+    accountKey: opts.accountKey,
+    accountId: account.id,
+    cronRunId,
+    action: "improvement_pr.opened",
+    pullRequest: pr,
+    aiRunIds,
+    auditDecision: finalDecision,
+    classification: finalClassification,
+    dangerousCategories: finalDangerousCategories,
+    metadata: {
+      proposalCount: mediaBuyer.output.proposals.length,
+      fileCount: gitops.output.files.length,
+      // implementation item: PR diff には gitops files に加えて 1 creative につき
+      // 1 manifest YAML (`ads/accounts/<key>/creatives/<creative_id>.yaml`) を
+      // 載せている。merge 後に human が PR diff を辿り直す際の補助として、
+      // 添付ファイル数を audit metadata にも記録する。
+      attachedCreativeFileCount: creativeAttachmentFiles.length,
+      budgetImpact: mediaBuyer.output.budgetImpact,
+      // regression fix: media_buyer の LLM-authored dryRunSummary は ai_runs に
+      // 既に保存されている。audit metadata には実 plan/dry-run 経路を通した
+      // 結果のみを残し、PR body と一致させる。
+      planValidation: planValidationToMetadata(planValidation),
+      snapshotIds: opts.snapshotIds ?? [],
+      mode: opts.mode,
+      aiClassification: audit.output.classification,
+      aiDecision: audit.decision,
+      aiDangerousCategories: audit.output.dangerousCategories,
+      policyDecision: policyResult.decision,
+      policyClassification: policyResult.classification,
+      policyReasons: policyResult.reasons,
+      // regression fix: creatives テーブル行を audit_logs から逆引きできるように
+      // しておく (acceptance: creatives table links generated assets to
+      // account, ai_run, ..., and PR; PR は pullRequest 経由で別軸で記録される)。
+      // regression fix: PR メタデータ (= 「PR にどの creative が紐づいたか」)
+      // は deterministic QA を通った行のみを記録する。`creativeIds` は当該 run
+      // で生まれた全 creatives (qa_failed 含む) を残し forensic 経路を維持する。
+      creativeIds,
+      attachedCreativeIds: attachableCreativeIds,
+      linkedCreativeIds: linkableCreativeIds,
+      blockedCreativeIds,
+    },
+    summary: `improvement_pr opened: PR #${pr.prNumber} (${finalClassification}/${finalDecision})`,
+  });
+
+  return buildSummary({
+    status: "succeeded",
+    opts,
+    account,
+    aiRunIds,
+    creativeIds,
+    mediaBuyerDecision: mediaBuyer.decision,
+    proposalCount: mediaBuyer.output.proposals.length,
+    pullRequest: pr,
+    audit: {
+      classification: finalClassification,
+      decision: finalDecision,
+      dangerousCategories: finalDangerousCategories,
+    },
+  });
+}
+
+interface FailPipelineArgs {
+  opts: RunImprovementPrOptions;
+  account: DailyReportAdAccountSnapshot;
+  aiRunIds: string[];
+  /**
+   * creative_qa 段階以降に作成済みの creatives.id 一覧。creative_qa 失敗時は
+   * 空配列、media_buyer 以降の失敗時は `creativeIds` が埋まる。
+   */
+  creativeIds?: string[];
+  stage: string;
+  error: string;
+  auditWriter: ImprovementPrAuditWriter;
+  cronRunId: string | null;
+}
+
+async function failPipeline(args: FailPipelineArgs): Promise<ImprovementPrSummary> {
+  const creativeIds = args.creativeIds ?? [];
+  await args.auditWriter.recordImprovementPrAudit({
+    workspaceId: args.opts.workspaceId,
+    accountKey: args.opts.accountKey,
+    accountId: args.account.id,
+    cronRunId: args.cronRunId,
+    action: "improvement_pr.failed",
+    pullRequest: null,
+    aiRunIds: args.aiRunIds,
+    auditDecision: null,
+    classification: null,
+    dangerousCategories: [],
+    metadata: { failedAt: args.stage, creativeIds },
+    summary: `improvement_pr ai_failed at ${args.stage}: ${args.error}`,
+  });
+  return buildSummary({
+    status: "ai_failed",
+    opts: args.opts,
+    account: args.account,
+    aiRunIds: args.aiRunIds,
+    creativeIds,
+    mediaBuyerDecision: null,
+    proposalCount: 0,
+    pullRequest: null,
+    audit: null,
+    errorMessage: args.error,
+  });
+}
+
+interface BuildSummaryArgs {
+  status: ImprovementPrRunStatus;
+  opts: RunImprovementPrOptions;
+  account: DailyReportAdAccountSnapshot;
+  aiRunIds: string[];
+  creativeIds?: string[];
+  mediaBuyerDecision: ImprovementPrDecision | null;
+  proposalCount: number;
+  pullRequest: ImprovementPrPullRequestRecord | null;
+  audit: {
+    classification: ImprovementPrAuditClassification;
+    decision: ImprovementPrAuditDecision;
+    dangerousCategories: string[];
+  } | null;
+  errorMessage?: string;
+}
+
+function buildSummary(args: BuildSummaryArgs): ImprovementPrSummary {
+  const lastAiRunId =
+    args.aiRunIds.length > 0
+      ? args.aiRunIds[args.aiRunIds.length - 1] ?? null
+      : null;
+  return {
+    status: args.status,
+    workspaceId: args.opts.workspaceId,
+    accountKey: args.opts.accountKey,
+    accountId: args.account.id,
+    mode: args.opts.mode,
+    aiRunId: lastAiRunId,
+    aiRunIds: [...args.aiRunIds],
+    creativeIds: [...(args.creativeIds ?? [])],
+    decision: args.mediaBuyerDecision,
+    proposalCount: args.proposalCount,
+    currency: args.account.currency,
+    pullRequest: args.pullRequest,
+    classification: args.audit?.classification ?? null,
+    auditDecision: args.audit?.decision ?? null,
+    dangerousCategories: args.audit?.dangerousCategories ?? [],
+    ...(args.errorMessage !== undefined ? { errorMessage: args.errorMessage } : {}),
+  };
+}
+
+function composePrBody(input: {
+  aiRationale: string;
+  mediaBuyerRationale: string;
+  risk: {
+    classification: ImprovementPrAuditClassification;
+    dangerousCategories: string[];
+    rationale: string;
+  };
+  auditDecision: ImprovementPrAuditDecision;
+  policyReasons: string[];
+  budgetImpact: ImprovementPrBudgetImpact;
+  planValidation: ImprovementPrPlanValidationResult;
+  snapshotIds: string[];
+  creatives: ImprovementPrCreativeAttachment[];
+}): string {
+  const dangerLine =
+    input.risk.dangerousCategories.length > 0
+      ? `- categories: ${input.risk.dangerousCategories.join(", ")}\n`
+      : "";
+  const snapshotLine =
+    input.snapshotIds.length > 0
+      ? input.snapshotIds.map((id) => `- ${id}`).join("\n")
+      : "- (none)";
+  const policyLines =
+    input.policyReasons.length > 0
+      ? input.policyReasons.map((r) => `- ${r}`).join("\n")
+      : "- (no deterministic policy reasons)";
+  return [
+    "## AI rationale",
+    input.aiRationale,
+    "",
+    `> media_buyer: ${input.mediaBuyerRationale}`,
+    "",
+    "## Risk",
+    `- classification: \`${input.risk.classification}\``,
+    `- decision: \`${input.auditDecision}\``,
+    dangerLine,
+    `- ${input.risk.rationale}`,
+    "",
+    "## Approval policy",
+    policyLines,
+    "",
+    "## Budget impact",
+    `- delta: \`${input.budgetImpact.deltaCurrency}\``,
+    `- after: \`${input.budgetImpact.afterCurrency}\``,
+    `- ${input.budgetImpact.notes}`,
+    "",
+    "## Dry-run",
+    formatPlanValidationForPrBody(input.planValidation),
+    "",
+    "## 生成クリエイティブ",
+    formatCreativesForPrBody(input.creatives),
+    "",
+    "## Snapshots",
+    snapshotLine,
+  ].join("\n");
+}
+
+/**
+ * implementation item: PR body の `## 生成クリエイティブ` セクションを組み立てる。
+ *
+ * 1 creative につき以下を出す:
+ *   - creative id / variant index / status (creative_status vocabulary)
+ *   - 生成理由 (image_prompt rationale)
+ *   - プロンプト要約 (prompt / negativePrompt / styleNotes; 各 1 行)
+ *   - QA 結果 per-check (recommendation + 各 issue の severity/category/message)
+ *   - preview (`storage://...` ref。バイナリ未生成なら "(プロンプトのみ)")
+ *   - リスク (per-creative の attach 区分。approve→safe, request_changes→non-blocking)
+ *
+ * creatives が空 (= image_prompt が variants を出さなかった/全て qa_failed で
+ * 添付対象なし) の場合は benign idle の説明を残し、PR body を空にしない。
+ * Image-Provider が任意である旨もここで明示し、UI design plan の
+ * 「画像 Provider 未設定/失敗は workflow 失敗ではない」原則 (principle 27) を
+ * PR レビュー視点でも担保する。
+ */
+function formatCreativesForPrBody(
+  creatives: ImprovementPrCreativeAttachment[]
+): string {
+  if (creatives.length === 0) {
+    return [
+      "- 添付された生成クリエイティブはありません。",
+      "- 画像 Provider は任意です (未設定/失敗時はテキストプロンプトのみで PR を作成します)。",
+    ].join("\n");
+  }
+  const lines: string[] = [];
+  for (const c of creatives) {
+    const preview =
+      c.storageRef && c.storageRef.length > 0
+        ? `\`${c.storageRef}\``
+        : "(プロンプトのみ — 画像バイナリは未生成)";
+    const provider =
+      c.provider && c.model
+        ? `\`${c.provider}/${c.model}\``
+        : "(provider 未割当 / プロンプトのみ)";
+    const risk = creativeAttachmentRisk(c.qa.recommendation);
+    lines.push(`- creative: \`${c.creativeDbId}\``);
+    lines.push(`  - key: \`${c.creativeKey}\``);
+    lines.push(`  - variant: ${c.variantIndex}`);
+    lines.push(`  - status: \`${c.status}\``);
+    lines.push(`  - provider/model: ${provider}`);
+    lines.push(`  - preview: ${preview}`);
+    lines.push(`  - 生成理由 (rationale): ${oneLine(c.rationale)}`);
+    lines.push(`  - prompt: ${oneLine(c.prompt.prompt)}`);
+    if (c.prompt.negativePrompt && c.prompt.negativePrompt.length > 0) {
+      lines.push(`  - negative prompt: ${oneLine(c.prompt.negativePrompt)}`);
+    }
+    if (c.prompt.styleNotes && c.prompt.styleNotes.length > 0) {
+      lines.push(`  - style notes: ${oneLine(c.prompt.styleNotes)}`);
+    }
+    lines.push(`  - QA 結果: \`${c.qa.recommendation}\` — ${oneLine(c.qa.rationale)}`);
+    if (c.qa.issues.length === 0) {
+      lines.push(`    - checks: (no issues reported)`);
+    } else {
+      for (const issue of c.qa.issues) {
+        lines.push(
+          `    - [${issue.severity}] \`${issue.category}\`: ${oneLine(issue.message)}`
+        );
+      }
+    }
+    lines.push(`  - リスク: ${risk}`);
+    lines.push(`  - image_prompt ai_run: \`${c.imagePromptAiRunId}\``);
+    lines.push(`  - creative_qa ai_run: \`${c.qa.aiRunId}\``);
+  }
+  return lines.join("\n");
+}
+
+function creativeAttachmentRisk(
+  recommendation: ImprovementPrCreativeQaRecommendation
+): string {
+  switch (recommendation) {
+    case "approve":
+      return "safe (ブロッキング issues なし)";
+    case "request_changes":
+      return "non-blocking (warn issues あり、添付は許可)";
+    case "reject":
+      // PR 添付段階で reject が混ざるのは契約違反 (orchestrator が短絡している)
+      // が、文字列としては安全に表現しておく。
+      return "blocking (本来 PR 添付されない)";
+  }
+}
+
+function oneLine(s: string): string {
+  // PR body の bullet 行は markdown レベルで 1 行に折り畳むため、改行を空白へ
+  // 正規化する。長文の場合でも先頭から 280 文字までに切り詰めて重さを抑える。
+  const flat = s.replace(/\s+/g, " ").trim();
+  if (flat.length <= 280) return flat;
+  return flat.slice(0, 277) + "...";
+}
+
+/**
+ * implementation item: 添付対象の creatives を Ads YAML 配下に配置する manifest ファイル
+ * (`ads/accounts/<account_key>/creatives/<creative_id>.yaml`) を組み立てる。
+ *
+ * - `loadAndValidateOpsRepo` は brand.yaml のみを読むため、本ファイル群は schema
+ *   検証や buildExecutionPlan を壊さない (= 副作用なしの evidence ファイル)。
+ * - 機密値 (API key 等) は image_prompt / creative_qa 出力には含まれない契約だが、
+ *   prompt 本文に万一含まれても sanitize しない (PR 本文と同じく ai_runs の
+ *   rendering boundary を継承)。`storage://` 以外の絶対 fs path は載せない。
+ * - 戻り値の path はすべて POSIX 風で、accountKey / creativeDbId は呼び出し側が
+ *   既に validate 済み (account.key / `creates` から返る uuid)。念のため traversal
+ *   になる文字 (`/`, `..`) を含むものは黙って除外する。
+ */
+function buildCreativeAttachmentFiles(input: {
+  accountKey: string;
+  attachments: ImprovementPrCreativeAttachment[];
+}): ImprovementPrFileChange[] {
+  if (input.attachments.length === 0) return [];
+  if (!isPathSafeSegment(input.accountKey)) return [];
+  const files: ImprovementPrFileChange[] = [];
+  for (const a of input.attachments) {
+    if (!isPathSafeSegment(a.creativeDbId)) continue;
+    const yaml = renderCreativeManifestYaml(input.accountKey, a);
+    const diff = yaml
+      .split("\n")
+      .map((l) => `+${l}`)
+      .join("\n");
+    files.push({
+      path: `ads/accounts/${input.accountKey}/creatives/${a.creativeDbId}.yaml`,
+      action: "create",
+      diff,
+    });
+  }
+  return files;
+}
+
+function isPathSafeSegment(s: string): boolean {
+  if (s.length === 0) return false;
+  if (s.includes("/") || s.includes("\\")) return false;
+  if (s === "." || s === "..") return false;
+  if (s.includes("..")) return false;
+  return true;
+}
+
+/**
+ * Creative attachment の YAML manifest を組み立てる。
+ *
+ * - 文字列はすべて double-quoted YAML で書き出し、`\` `"` `\n` をエスケープ。
+ * - null / 未設定の Provider 由来フィールドは `null` リテラルで明示し、
+ *   downstream reader が「prompt-only fallback」を判別できるようにする。
+ */
+function renderCreativeManifestYaml(
+  accountKey: string,
+  a: ImprovementPrCreativeAttachment
+): string {
+  const lines: string[] = [];
+  lines.push("version: 1");
+  lines.push("creative:");
+  lines.push(`  id: ${quoteYaml(a.creativeDbId)}`);
+  lines.push(`  key: ${quoteYaml(a.creativeKey)}`);
+  lines.push(`  accountKey: ${quoteYaml(accountKey)}`);
+  lines.push(`  displayName: ${quoteYaml(a.displayName)}`);
+  lines.push(`  mediaType: "image"`);
+  lines.push(`  variantIndex: ${a.variantIndex}`);
+  lines.push(`  status: ${quoteYaml(a.status)}`);
+  lines.push("prompt:");
+  lines.push(`  text: ${quoteYaml(a.prompt.prompt)}`);
+  lines.push(`  negativePrompt: ${quoteYaml(a.prompt.negativePrompt ?? "")}`);
+  lines.push(`  styleNotes: ${quoteYaml(a.prompt.styleNotes ?? "")}`);
+  lines.push(`  rationale: ${quoteYaml(a.rationale)}`);
+  lines.push("generation:");
+  lines.push(`  provider: ${a.provider ? quoteYaml(a.provider) : "null"}`);
+  lines.push(`  model: ${a.model ? quoteYaml(a.model) : "null"}`);
+  lines.push(`  storageRef: ${a.storageRef ? quoteYaml(a.storageRef) : "null"}`);
+  // regression fix: image-Provider hop が orchestrator に注入する `parameters`
+  // (variationConditions / purpose / variantCount 等) を manifest にも残し、
+  // PR レビュー時に variant 数や寸法・format を YAML から確認できるようにする。
+  // prompt-only fallback (Provider 未注入 / 失敗 / `skipBinary`) では null。
+  if (
+    a.parameters &&
+    typeof a.parameters === "object" &&
+    !Array.isArray(a.parameters) &&
+    Object.keys(a.parameters).length > 0
+  ) {
+    lines.push("  parameters:");
+    appendYamlBlock(lines, a.parameters, "    ");
+  } else {
+    lines.push("  parameters: null");
+  }
+  lines.push("qa:");
+  lines.push(`  recommendation: ${quoteYaml(a.qa.recommendation)}`);
+  lines.push(`  rationale: ${quoteYaml(a.qa.rationale)}`);
+  lines.push("  issues:");
+  if (a.qa.issues.length === 0) {
+    lines.push("    []");
+  } else {
+    for (const issue of a.qa.issues) {
+      lines.push(`    - severity: ${quoteYaml(issue.severity)}`);
+      lines.push(`      category: ${quoteYaml(issue.category)}`);
+      lines.push(`      message: ${quoteYaml(issue.message)}`);
+    }
+  }
+  lines.push("ai:");
+  lines.push(`  imagePromptAiRunId: ${quoteYaml(a.imagePromptAiRunId)}`);
+  lines.push(`  creativeQaAiRunId: ${quoteYaml(a.qa.aiRunId)}`);
+  return lines.join("\n") + "\n";
+}
+
+function quoteYaml(s: string): string {
+  // double-quoted YAML scalar: `\` `"` をエスケープし、改行は `\n` に圧縮する。
+  // タブはそのまま許容 (`"\t"` は valid scalar)。
+  const escaped = s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n/g, "\\n");
+  return `"${escaped}"`;
+}
+
+/**
+ * 任意の `Record<string, unknown>` (image-Provider hop が注入する `parameters`)
+ * を YAML ブロック形式に書き出すヘルパ。
+ *
+ * - 文字列は `quoteYaml` で double-quoted、数値・真偽値はリテラル、
+ *   `null` / `undefined` / 非有限数 / その他の型は `null` リテラル。
+ * - 入れ子オブジェクトは `key:` の次行から `+2 indent` で展開。空 `{}` は inline。
+ * - 配列は `key:` の次行から `- ` リーダで展開。空 `[]` は inline。
+ *   配列要素のオブジェクトは 1 番目のキーを `- ` 同行 + 2 番目以降を揃え
+ *   (manifest の `qa.issues` ブロックと同じ規約)。
+ *
+ * `parameters` の shape は image_prompt agent + image-Provider 実装が共同で決め、
+ * orchestrator は透過的に伝搬させる契約 (= ここでは shape 検証しない)。
+ */
+function appendYamlBlock(
+  lines: string[],
+  obj: Record<string, unknown>,
+  indent: string
+): void {
+  for (const [k, v] of Object.entries(obj)) {
+    appendYamlKeyValue(lines, k, v, indent);
+  }
+}
+
+function appendYamlKeyValue(
+  lines: string[],
+  key: string,
+  value: unknown,
+  indent: string
+): void {
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      lines.push(`${indent}${key}: []`);
+      return;
+    }
+    lines.push(`${indent}${key}:`);
+    appendYamlArrayItems(lines, value, indent);
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) {
+      lines.push(`${indent}${key}: {}`);
+      return;
+    }
+    lines.push(`${indent}${key}:`);
+    appendYamlBlock(lines, value as Record<string, unknown>, indent + "  ");
+    return;
+  }
+  lines.push(`${indent}${key}: ${formatYamlScalar(value)}`);
+}
+
+function appendYamlArrayItems(
+  lines: string[],
+  arr: unknown[],
+  indent: string
+): void {
+  // parent key の次行に `- ` 行を並べる (parent と同じ列の `+2` indent)。
+  // 既存 manifest の `  issues:` → `    -` の 2-space ステップに揃える。
+  const itemIndent = indent + "  ";
+  for (const item of arr) {
+    if (Array.isArray(item)) {
+      if (item.length === 0) {
+        lines.push(`${itemIndent}- []`);
+        continue;
+      }
+      lines.push(`${itemIndent}-`);
+      appendYamlArrayItems(lines, item, itemIndent + "  ");
+      continue;
+    }
+    if (item !== null && typeof item === "object") {
+      const entries = Object.entries(item as Record<string, unknown>);
+      if (entries.length === 0) {
+        lines.push(`${itemIndent}- {}`);
+        continue;
+      }
+      // 1 番目のキーを `- ` の同行に置き、続行は揃えで書く。
+      const [firstKey, firstValue] = entries[0]!;
+      const continuationIndent = itemIndent + "  ";
+      if (Array.isArray(firstValue)) {
+        if (firstValue.length === 0) {
+          lines.push(`${itemIndent}- ${firstKey}: []`);
+        } else {
+          lines.push(`${itemIndent}- ${firstKey}:`);
+          appendYamlArrayItems(lines, firstValue, continuationIndent);
+        }
+      } else if (firstValue !== null && typeof firstValue === "object") {
+        const sub = Object.entries(firstValue as Record<string, unknown>);
+        if (sub.length === 0) {
+          lines.push(`${itemIndent}- ${firstKey}: {}`);
+        } else {
+          lines.push(`${itemIndent}- ${firstKey}:`);
+          appendYamlBlock(
+            lines,
+            firstValue as Record<string, unknown>,
+            continuationIndent + "  "
+          );
+        }
+      } else {
+        lines.push(
+          `${itemIndent}- ${firstKey}: ${formatYamlScalar(firstValue)}`
+        );
+      }
+      for (let i = 1; i < entries.length; i++) {
+        const [k, v] = entries[i]!;
+        appendYamlKeyValue(lines, k, v, continuationIndent);
+      }
+      continue;
+    }
+    lines.push(`${itemIndent}- ${formatYamlScalar(item)}`);
+  }
+}
+
+function formatYamlScalar(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "string") return quoteYaml(value);
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : "null";
+  }
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return "null";
+}
+
+function formatPlanValidationForPrBody(
+  p: ImprovementPrPlanValidationResult
+): string {
+  if (!p.available) {
+    return [
+      `- status: \`skipped\``,
+      `- ${p.summary}`,
+    ].join("\n");
+  }
+  const lines: string[] = [];
+  lines.push(`- status: \`${p.ok ? "ok" : "error"}\``);
+  lines.push(`- risk: \`${p.risk}\``);
+  lines.push(
+    `- counts: +${p.counts.creates} ~${p.counts.updates} -${p.counts.deletes}` +
+      ` (errors=${p.counts.errors} warnings=${p.counts.warnings})`
+  );
+  lines.push(`- durationMs: \`${p.durationMs}\``);
+  if (p.errors.length > 0) {
+    lines.push("- errors:");
+    for (const e of p.errors) {
+      const ptr = e.pointer ? ` ${e.pointer}` : "";
+      lines.push(`  - \`${e.file}\`${ptr}: ${e.message}`);
+    }
+  }
+  if (p.warnings.length > 0) {
+    lines.push("- warnings:");
+    for (const w of p.warnings) {
+      const ptr = w.pointer ? ` ${w.pointer}` : "";
+      lines.push(`  - \`${w.file}\`${ptr}: ${w.message}`);
+    }
+  }
+  if (p.summary) {
+    lines.push(`- ${p.summary}`);
+  }
+  return lines.join("\n");
+}
+
+function planValidationToMetadata(
+  p: ImprovementPrPlanValidationResult
+): Record<string, unknown> {
+  return {
+    available: p.available,
+    ok: p.ok,
+    risk: p.risk,
+    counts: p.counts,
+    errors: p.errors,
+    warnings: p.warnings,
+    summary: p.summary,
+    durationMs: p.durationMs,
+  };
+}
+
+// ---------------------------------------------------------------------
+// regression fix — image-Provider hop helper
+// ---------------------------------------------------------------------
+
+interface RunImageGenerationHopInput {
+  imageProvider: ImageProvider | null;
+  creativeStorage: CreativeStorageAdapter | null;
+  accountKey: string;
+  variants: ImprovementPrImagePromptVariant[];
+  rationale: string;
+  qaPolicy: CreativeQaPolicy;
+  imagePromptAiRunId: string;
+  creativeQaAiRunId: string;
+  /** creative_qa が reject した時に Provider 呼び出し自体を skip する。 */
+  skipBinary: boolean;
+}
+
+interface PerVariantOutcome {
+  variantKey: string;
+  status: ImprovementPrCreativeStatus | null;
+  storageRef: string | null;
+  storagePath: string | null;
+}
+
+interface RunImageGenerationHopResult {
+  /** Provider が成功して bytes を書いた場合 false。Provider 未注入 / 失敗時は true。 */
+  fallback: boolean;
+  /** Provider が呼ばれた場合の name (`openai` / `mock` 等)。未注入 / 失敗時は null。 */
+  providerName: string | null;
+  /** Provider が呼ばれた場合の model id。同上 null。 */
+  model: string | null;
+  /** 生成パラメータ snapshot (variation_conditions / variant_count / purpose)。同上 null。 */
+  parameters: Record<string, unknown> | null;
+  /**
+   * 1 回の generation でまとめて永続化された assets の親ディレクトリの安定 ref
+   * (`storage://creatives/<account_key>/<creative_id>`)。`metadata.json` がここに
+   * 直下で書かれる。Web UI / proxy は `Creative.storageRef` 経由でこれを引いて
+   * `metadata.json` を読み出す (per-asset ref を渡すと `<asset>.png/metadata.json`
+   * になり 410 を引き起こすため、orchestrator は base ref をここに焼く)。
+   * Provider 未注入 / 失敗 / fallback 時は null。
+   */
+  baseStorageRef: string | null;
+  /** image_prompt の variant 順に並ぶ per-variant 永続化結果。 */
+  perVariant: PerVariantOutcome[];
+  /** Provider 失敗時の sanitized メッセージ (audit 用)。成功 / 未注入時は null。 */
+  providerError: string | null;
+}
+
+/**
+ * regression fix: image-Provider hop。`generateAndQaCreative` で実バイナリ生成 +
+ * 決定論的 Creative QA を実行し、合格 asset を `persistCreativeAssets` 経由で
+ * LocalDisk Storage Adapter に書き出す。Provider 未注入 / 失敗 / `skipBinary`
+ * の場合は prompt-only fallback (`fallback=true`) を返し、orchestrator は
+ * creatives 行を storage 列 null で書き続ける (UI design plan principle 27)。
+ *
+ * - storage adapter が無い + Provider あり、という不整合な構成では Provider 自体を
+ *   スキップして fallback 扱いにする (= 永続化境界が抜けたまま PR を出さない)。
+ * - persistCreativeAssets が throw した場合も fallback に倒す (= 部分書き込み
+ *   による storage 不整合より、prompt-only PR を優先する)。
+ */
+async function runImageGenerationHop(
+  input: RunImageGenerationHopInput
+): Promise<RunImageGenerationHopResult> {
+  const baseEmpty: PerVariantOutcome[] = input.variants.map((_, i) => ({
+    variantKey: `variant-${i}`,
+    status: null,
+    storageRef: null,
+    storagePath: null,
+  }));
+  if (
+    !input.imageProvider ||
+    input.imageProvider.enabled === false ||
+    !input.creativeStorage ||
+    input.skipBinary ||
+    input.variants.length === 0
+  ) {
+    return {
+      fallback: true,
+      providerName: null,
+      model: null,
+      parameters: null,
+      baseStorageRef: null,
+      perVariant: baseEmpty,
+      providerError: null,
+    };
+  }
+
+  // image_prompt variants を ImageProvider のリクエスト shape に展開する。
+  // `variantKey` は `variant-<index>` 採番で安定にして persistCreativeAssets の
+  // asset_id 派生 (sha256(creativeId|variantKey)) に渡す。
+  const variationConditions: ImageVariationCondition[] = input.variants.map(
+    (_, i) => ({
+      width: 1080,
+      height: 1080,
+      format: "png",
+      variantKey: `variant-${i}`,
+    })
+  );
+  const promptVariants: ImagePromptVariant[] = input.variants.map((v, i) => ({
+    variantKey: `variant-${i}`,
+    prompt: v.prompt,
+    negativePrompt: v.negativePrompt,
+    styleNotes: v.styleNotes,
+    width: 1080,
+    height: 1080,
+  }));
+
+  const result = await generateAndQaCreative({
+    provider: input.imageProvider,
+    request: {
+      prompt: input.variants[0]?.prompt ?? "",
+      variationConditions,
+      purpose: "workflow:improvement_pr",
+    },
+    variants: promptVariants,
+    policy: input.qaPolicy,
+    qaRef: input.creativeQaAiRunId,
+  });
+
+  if (!result.generation || result.outcome === "fallback_text_only") {
+    return {
+      fallback: true,
+      providerName: null,
+      model: null,
+      parameters: null,
+      baseStorageRef: null,
+      perVariant: baseEmpty,
+      providerError: result.providerError,
+    };
+  }
+
+  // Storage 永続化。creative_id は creatives 行が既に確定していないと書けないため、
+  // ここでは creative_id を「improvement_pr run + variant index」で安定に採番し、
+  // creatives 行の DB primary key と独立させる。creatives.storagePath は
+  // adapter key (`creatives/<account_key>/<creative_id>/<asset_id>.<ext>`) を
+  // そのまま保持し、`storage://` ref と 1:1 対応する (UI design plan principle 24)。
+  const creativeIdForStorage = `imgrun_${input.imagePromptAiRunId}`;
+  let persisted: PersistCreativeAssetsResult;
+  try {
+    persisted = await persistCreativeAssets({
+      storage: input.creativeStorage,
+      accountKey: input.accountKey,
+      creativeId: creativeIdForStorage,
+      generation: result.generation,
+      qa: result.qa,
+      links: {
+        imagePromptAiRunId: input.imagePromptAiRunId,
+        creativeQaAiRunId: input.creativeQaAiRunId,
+      },
+    });
+  } catch {
+    // Storage 失敗は workflow を腐らせず prompt-only fallback に倒す。
+    return {
+      fallback: true,
+      providerName: null,
+      model: null,
+      parameters: null,
+      baseStorageRef: null,
+      perVariant: baseEmpty,
+      providerError: "creative storage write failed",
+    };
+  }
+
+  // image_prompt variant index → 永続化された asset を引くための map。
+  const assetByKey = new Map<string, PersistedCreativeAsset>();
+  for (const a of persisted.assets) assetByKey.set(a.variantKey, a);
+
+  const perVariant: PerVariantOutcome[] = input.variants.map((_, i) => {
+    const variantKey = `variant-${i}`;
+    const asset = assetByKey.get(variantKey) ?? null;
+    let status: ImprovementPrCreativeStatus | null = null;
+    if (asset) {
+      // Per-asset overall is the deterministic QA outcome from generateAndQaCreative.
+      // Map qa_passed / qa_warned / qa_failed verbatim into creative_status vocabulary.
+      switch (asset.qaOverall) {
+        case "qa_passed":
+        case "qa_warned":
+        case "qa_failed":
+          status = asset.qaOverall;
+          break;
+        default:
+          status = null;
+          break;
+      }
+    }
+    return {
+      variantKey,
+      status,
+      storageRef: asset?.storageRef ?? null,
+      storagePath: asset?.storageKey ?? null,
+    };
+  });
+
+  return {
+    fallback: false,
+    providerName: result.generation.meta.provider,
+    model: result.generation.meta.model,
+    parameters: {
+      variationConditions: result.generation.meta.parameters.variationConditions,
+      purpose: result.generation.meta.parameters.purpose,
+      variantCount: result.generation.meta.parameters.variantCount,
+    },
+    baseStorageRef: persisted.baseStorageRef,
+    perVariant,
+    providerError: null,
+  };
+}
+

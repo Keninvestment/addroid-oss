@@ -1,0 +1,1599 @@
+// AdDroid OSS — execute_apply ハンドラ本体。
+//
+// merged PR から enqueue された `apply_jobs` 行を取り、対応する Ads YAML
+// (next + previous) を `AdsLoader` 経由で取得し、`buildExecutionPlan` で
+// PlanAction[] に変換し、`MetaActionExecutor` 経由で 1 件ずつ Meta CLI へ
+// 送って `apply_jobs` を `succeeded` / `failed` / `simulated` に遷移させる。
+//
+// the current implementation 受入基準:
+//   - "Apply a valid YAML change as PAUSED resources or a mocked equivalent in
+//      local tests."
+//   - "New campaigns must be created PAUSED by default."
+//   - "Activate is separate from Apply" (= apply 経路で active 化させない)。
+//
+// 本モジュールは Prisma を直接 import しない。`ApplyJobStore` /
+// `MetaActionExecutor` / `AdsLoader` はすべて呼び出し側 (apps/worker) が注入する。
+// テストは `__tests__/fakes.ts` の in-memory fake で置換する。
+
+import type {
+  BrandYaml,
+  CreateAdAction,
+  CreateAdsetAction,
+  CreateCampaignAction,
+  PlanAction,
+  PlanFinding,
+} from "@addroid/yaml-schemas";
+import { buildExecutionPlan } from "@addroid/yaml-schemas";
+
+import {
+  buildAdAccountLockKey,
+  computeBackoffDelayMs,
+  createInProcessAdAccountLockProvider,
+  type AdAccountLockProvider,
+  type MetaRateLimitPolicy,
+} from "./rate-limit.js";
+import {
+  resolveExecutionMode,
+  type ExecutionMode,
+} from "./execution-mode.js";
+import type {
+  AccountExecutionModes,
+  ApplyApprovalSnapshot,
+  ApplyAuditAction,
+  ApplyJobContext,
+  ApplyJobStore,
+  ApplyTerminalState,
+  ExecutionLogInput,
+  JsonValue,
+  UpsertAppliedAdsNodeInput,
+} from "./store.js";
+
+// ---------------------------------------------------------------------
+// AdsLoader — apply_job が指す PR の Ads YAML 状態を返す境界。
+// ---------------------------------------------------------------------
+
+/**
+ * 1 アカウント分の Ads YAML 状態 (PR before/after)。
+ * `previous` が null の場合は「全件新規作成」として扱う。
+ */
+export interface AccountAdsState {
+  accountKey: string;
+  next: BrandYaml;
+  previous: BrandYaml | null;
+}
+
+export interface AdsLoaderInput {
+  context: ApplyJobContext;
+}
+
+export interface AdsLoadResult {
+  /** ロード元の identifier (実装が決める; ログに `source` として出る)。 */
+  source: "local_dir" | "fixture" | "mock" | "unavailable";
+  /** ロード時の備考。UI/ログに表示される (token を含めないこと)。 */
+  detail?: string;
+  /** 影響を受けたアカウント分の状態。空配列なら "no source" 扱い → simulated。 */
+  accounts: AccountAdsState[];
+}
+
+export interface AdsLoader {
+  loadForApply(input: AdsLoaderInput): Promise<AdsLoadResult>;
+}
+
+// ---------------------------------------------------------------------
+// MetaActionExecutor — 1 件の PlanAction を Meta 側に反映する境界。
+//   real 実装は Meta CLI runner を、テスト/ローカルは in-memory mock を使う。
+// ---------------------------------------------------------------------
+
+export interface ExecuteActionInput {
+  action: PlanAction;
+  context: ApplyJobContext;
+  /** リトライ回数 (初回 = 0)。executor は基本この値を意識しない。 */
+  attempt: number;
+}
+
+export type ExecuteActionStatus =
+  | "success"
+  | "auth_error"
+  | "rate_limit_error"
+  | "api_error"
+  | "unknown_error"
+  | "skipped";
+
+export interface ExecuteActionResult {
+  status: ExecuteActionStatus;
+  /** UI/ログ用の 1 行サマリ。token を含めないこと。 */
+  message: string;
+  /** sanitized payload (UI の ExecutionLogPanel が展開表示する想定)。 */
+  logPayload: JsonValue;
+  /**
+   * `rate_limit_error` のときは backoff/retry のヒントを返す。
+   * 未指定なら orchestrator が既定 (5s × 指数, 最大 3 回) を使う。
+   */
+  retry?: {
+    /** 次回試行までのディレイ ms。 */
+    delayMs: number;
+    /** トータル試行回数 (この値を超えると諦める)。 */
+    maxAttempts: number;
+  };
+  /**
+   * 通知系 exit (auth_error / api_error / unknown_error) で executor が
+   * オーケストレータに渡す audit 情報。`MetaCliRecommendedAction.auditAction`
+   * から組み立てられ、`runExecuteApply` がそのまま `audit_logs` に書く
+   * (regression fix: production 経路で recommendedAction を実際に実行する)。
+   *
+   * 未指定なら orchestrator は legacy fallback (auth_error の場合のみ
+   * `oauth.meta.reauth_required`) を選ぶ。
+   */
+  notify?: {
+    auditAction: ApplyAuditAction;
+    /** sanitized 1 行説明 (token を含めない)。 */
+    detail: string;
+  };
+  /** 成功時に Meta 側で確定した external id (campaignId / adsetId / adId / creativeId)。 */
+  externalId?: string;
+}
+
+export interface MetaActionExecutor {
+  /**
+   * 1 件の `PlanAction` を Meta API/CLI に反映する。
+   *
+   * orchestrator は `enforcePausedOnPlanAction` を経由した「PAUSED 化済み」
+   * action のみをこの関数に渡す。executor 側で initialState を再書き換えしないこと。
+   */
+  executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult>;
+}
+
+// ---------------------------------------------------------------------
+// PAUSED enforcement (pure helper)
+// ---------------------------------------------------------------------
+
+/**
+ * `create_*` 系の PlanAction は initialState を必ず "paused" に上書きする。
+ *
+ * Activate (= ACTIVE 化) は本契約では別操作・別 audit に分離する仕様のため、
+ * Apply 経路の create_* はすべて PAUSED で Meta に反映する。YAML 側で
+ * `initialState: active` が宣言されていても、apply 段階で握りつぶす。
+ *
+ * `update_*` 系は initialState の変更を受け付けないようにし、active 化の
+ * 副流入を防ぐ (`changes.initialState` を drop する)。
+ *
+ * 戻り値は新規オブジェクトで、入力の PlanAction は変更しない (immutable)。
+ */
+export function enforcePausedOnPlanAction(action: PlanAction): {
+  action: PlanAction;
+  rewritten: boolean;
+} {
+  switch (action.kind) {
+    case "create_campaign":
+    case "create_adset":
+    case "create_ad": {
+      if (action.initialState === "paused") return { action, rewritten: false };
+      const rewritten = { ...action, initialState: "paused" as const };
+      return { action: rewritten as CreateCampaignAction | CreateAdsetAction | CreateAdAction, rewritten: true };
+    }
+    case "update_campaign":
+    case "update_adset":
+    case "update_ad": {
+      if (!("changes" in action) || !action.changes.initialState) {
+        return { action, rewritten: false };
+      }
+      // Drop any active-flip from updates. ACTIVE 化は Activate 経路の責務。
+      const restChanges: typeof action.changes = {};
+      for (const [k, v] of Object.entries(action.changes)) {
+        if (k === "initialState") continue;
+        restChanges[k] = v;
+      }
+      // changes が空になったらこの action を no-op にする。
+      const rewritten = { ...action, changes: restChanges };
+      return { action: rewritten as PlanAction, rewritten: true };
+    }
+    default:
+      return { action, rewritten: false };
+  }
+}
+
+/** 中身のない update_* (changes={}) は実行不要としてスキップ判定する。 */
+export function isNoopAction(action: PlanAction): boolean {
+  if (
+    action.kind === "update_campaign" ||
+    action.kind === "update_adset" ||
+    action.kind === "update_ad" ||
+    action.kind === "update_creative" ||
+    action.kind === "update_experiment"
+  ) {
+    return Object.keys(action.changes).length === 0;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------
+// runExecuteApply — orchestrator
+// ---------------------------------------------------------------------
+
+export interface RunExecuteApplyOptions {
+  applyJobId: string;
+  workspaceId: string;
+  store: ApplyJobStore;
+  loader: AdsLoader;
+  executor: MetaActionExecutor;
+  /**
+   * test seam: backoff sleep 関数。既定は `setTimeout` を使う実装。
+   * テストでは値を観測 + 即解決する fake を渡す。
+   */
+  sleep?: (ms: number) => Promise<void>;
+  /** 既定: 3 回。rate-limit 時の最大試行回数 (executor が retry を返さない場合の上限)。 */
+  defaultRateLimitMaxAttempts?: number;
+  /** 既定: 5_000ms (= 5s)。同上。 */
+  defaultRateLimitInitialBackoffMs?: number;
+  /** 既定: 60_000ms (= 60s)。指数バックオフの上限。 */
+  defaultRateLimitMaxBackoffMs?: number;
+  /**
+   * test seam: per-account concurrency lock の registry を共有する。
+   * `runActivate` と同じ既定 registry (in-process map) を共有するため、
+   * 通常は省略し、テストでのみ独立 Map を渡す。
+   *
+   * `lockProvider` を渡したときは無視される (provider 側で in-process
+   * 段を内蔵するため)。
+   */
+  lockRegistry?: Map<string, Promise<unknown>>;
+  /**
+   * Cross-process ad_account ロック境界。
+   *
+   * 旧実装は `withAccountLock` の module-local Map で同一プロセス内のみ
+   * 直列化していたが、Apply は `apps/worker` で、Activate は `apps/web` /
+   * `apps/cli` で動くため、Apply×Activate の race を直列化できなかった。
+   * 本オプションには `createCrossProcessAdAccountLockProvider` 等で
+   * 組み立てた cross-process provider を渡す。
+   *
+   * 省略時は `createInProcessAdAccountLockProvider()` (テスト / standalone
+   * 向けの in-process フォールバック) を使う。production 経路 (apps/worker)
+   * は必ず明示的に provider を渡すこと。
+   */
+  lockProvider?: AdAccountLockProvider;
+}
+
+export interface ApplyActionOutcome {
+  action: PlanAction;
+  status: ExecuteActionStatus;
+  message: string;
+  attempts: number;
+  rewrittenForPaused: boolean;
+}
+
+export interface RunExecuteApplySummary {
+  applyJobId: string;
+  state: ApplyTerminalState;
+  source: AdsLoadResult["source"];
+  accountsTouched: number;
+  totalActions: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  pausedRewrites: number;
+  outcomes: ApplyActionOutcome[];
+  errorMessage?: string;
+  /** 処理を中断した理由 (auth_error / api_error / unknown_error / plan_error / rate_limit_exhausted / unapproved_state / report_only_mode) */
+  abortReason?:
+    | "auth_error"
+    | "api_error"
+    | "unknown_error"
+    | "plan_error"
+    | "rate_limit_exhausted"
+    | "unapproved_state"
+    | "report_only_mode";
+}
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * pg-boss `execute_apply` ハンドラの本体。
+ *
+ * 流れ:
+ *   1. ApplyJobContext を取得。見つからなければ "failed (no_context)"。
+ *   2. apply_jobs を `running` に遷移。
+ *   3. AdsLoader でアカウント別 next/previous YAML を取得。
+ *      - ロード結果が空 (= local checkout 不在 / mocked source none) なら
+ *        `simulated` に倒し audit に `apply.simulated` を記録して終了。
+ *   4. 各アカウントについて buildExecutionPlan を走らせ、guardrail/structural
+ *      の error finding があれば「plan error」として失敗。
+ *   5. 各 PlanAction を PAUSED 化 → MetaActionExecutor に渡す。
+ *      - rate_limit_error は backoff + 再試行。
+ *      - auth_error / unknown_error は中断。残り action は skip 扱い。
+ *      - 個別実行ごとに `execution_logs (kind=apply)` に sanitized payload を記録。
+ *   6. apply_jobs を確定 (succeeded / failed)、audit_logs に終端イベントを 1 行。
+ */
+export async function runExecuteApply(
+  opts: RunExecuteApplyOptions
+): Promise<RunExecuteApplySummary> {
+  const sleep = opts.sleep ?? defaultSleep;
+  const maxAttemptsDefault = opts.defaultRateLimitMaxAttempts ?? 3;
+  const initialBackoffDefault = opts.defaultRateLimitInitialBackoffMs ?? 5_000;
+  const maxBackoffDefault = opts.defaultRateLimitMaxBackoffMs ?? 60_000;
+  // regression fix: cross-process ad_account ロック provider。production の
+  // apps/worker は Postgres advisory lock 実装を必ず注入する。テスト /
+  // standalone は省略でき、その場合は in-process フォールバックを使う。
+  // `opts.lockRegistry` は legacy seam として in-process フォールバックの
+  // registry にだけ反映する (provider 注入時は意味を持たない)。
+  const lockProvider: AdAccountLockProvider =
+    opts.lockProvider ??
+    createInProcessAdAccountLockProvider(opts.lockRegistry ?? new Map());
+
+  const baseSummary = (
+    state: ApplyTerminalState,
+    extra: Partial<RunExecuteApplySummary> = {}
+  ): RunExecuteApplySummary => ({
+    applyJobId: opts.applyJobId,
+    state,
+    source: extra.source ?? "unavailable",
+    accountsTouched: extra.accountsTouched ?? 0,
+    totalActions: extra.totalActions ?? 0,
+    succeeded: extra.succeeded ?? 0,
+    failed: extra.failed ?? 0,
+    skipped: extra.skipped ?? 0,
+    pausedRewrites: extra.pausedRewrites ?? 0,
+    outcomes: extra.outcomes ?? [],
+    ...(extra.errorMessage !== undefined ? { errorMessage: extra.errorMessage } : {}),
+    ...(extra.abortReason !== undefined ? { abortReason: extra.abortReason } : {}),
+  });
+
+  // 1) PR メタ取得
+  const contextRaw = await opts.store.findApplyJobContext(opts.applyJobId);
+  if (!contextRaw) {
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage: "apply_job context not found (deleted PR or stale row)",
+      result: { reason: "no_context" },
+    });
+    return baseSummary("failed", {
+      errorMessage: "apply_job context not found",
+    });
+  }
+  // closure 内 (runPlanForAccount) でも non-null narrowing を維持するため
+  // 別変数に固定する (runActivate の fixedNode と同パターン)。
+  // regression fix: revalidation 成功後に snapshot.approvalRecordId を焼き付けて
+  // 上書きできるよう `let` で宣言する (executor 経由で MetaCliInvocation.refs に
+  // 伝播し、Apply 経路の Meta CLI execution_log を承認境界に紐付ける)。
+  let context: ApplyJobContext = contextRaw;
+
+  // 1.5) 実行時 GitOps 再検証 (regression fix)
+  // enqueue 時に branch protection を経由して auto_approved になっていても、
+  // 実行段階で:
+  //   - PR が closed 等 merged ではなくなっている
+  //   - ops repo の branch protection が外されている
+  //   - approval_records が 1 行も無い (= 手で apply_jobs を挿入した)
+  //   - 最新 approval が rejected / auto_blocked
+  // のいずれかであれば Meta mutation 経路に到達させない。
+  // markApplyRunning より前で fail-closed させるため、Meta CLI / executor は呼ばない。
+  const snapshot = await opts.store.loadApplyApprovalSnapshot(opts.applyJobId);
+  const revalidation = evaluateApprovalSnapshot(snapshot);
+  if (!revalidation.ok) {
+    const errorMessage = `apply blocked at execution time: ${revalidation.reason}`;
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "error",
+      message: `apply_job ${opts.applyJobId}: blocked — ${revalidation.reason}`,
+      payload: {
+        stage: "revalidation",
+        reason: revalidation.reason,
+        detail: revalidation.detail,
+        snapshot: snapshotForLog(snapshot),
+        prNumber: context.prNumber,
+        headSha: context.headSha,
+        pullRequestId: context.pullRequestId,
+      },
+    });
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage,
+      result: {
+        reason: "unapproved_state",
+        revalidation: revalidation.reason,
+        detail: revalidation.detail,
+      },
+    });
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.blocked_unapproved",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: {
+        reason: revalidation.reason,
+        detail: revalidation.detail,
+        snapshot: snapshotForLog(snapshot),
+      },
+    });
+    return baseSummary("failed", {
+      errorMessage,
+      abortReason: "unapproved_state",
+    });
+  }
+
+  // regression fix: revalidation を通過した snapshot から approvalRecordId を
+  // ApplyJobContext に焼き付ける。これは MetaActionExecutor 経由で Meta CLI
+  // invocation の `refs.approvalRecordId` に伝播し、Apply の各 CLI 実行を
+  // `execution_logs` 上で承認境界 (approval_records) に紐付けるための情報源。
+  // snapshot は revalidation 成功時点で必ず存在し、latestApprovalDecision が
+  // approved/auto_approved のいずれかなので approvalRecordId は通常 string。
+  // ただし型上は null も許容するため、フォールバックを残す。
+  context = {
+    ...context,
+    approvalRecordId: snapshot?.approvalRecordId ?? null,
+  };
+
+  // 2) running 遷移
+  await opts.store.markApplyRunning({ applyJobId: opts.applyJobId });
+  await opts.store.recordApplyExecutionLog({
+    workspaceId: opts.workspaceId,
+    kind: "apply",
+    refType: "apply_job",
+    refId: opts.applyJobId,
+    level: "info",
+    message: `apply_job ${opts.applyJobId}: starting (pr#${context.prNumber})`,
+    payload: {
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      pullRequestId: context.pullRequestId,
+    },
+  });
+
+  // 3) Ads YAML 取得
+  let load: AdsLoadResult;
+  try {
+    load = await opts.loader.loadForApply({ context });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "error",
+      message: `apply_job ${opts.applyJobId}: ads loader threw — ${message}`,
+      payload: { errorMessage: message, stage: "load" },
+    });
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage: `ads loader failed: ${message}`,
+      result: { reason: "loader_error", detail: message },
+    });
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.failed",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: { reason: "loader_error", detail: message },
+    });
+    return baseSummary("failed", {
+      errorMessage: message,
+      abortReason: "unknown_error",
+    });
+  }
+
+  if (load.accounts.length === 0) {
+    // mocked equivalent path: ローダがソースを提供できない場合は simulated。
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "info",
+      message: `apply_job ${opts.applyJobId}: no ads source available, recording as simulated`,
+      payload: {
+        source: load.source,
+        detail: load.detail ?? null,
+      },
+    });
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "simulated",
+      result: {
+        reason: "no_source",
+        source: load.source,
+        detail: load.detail ?? null,
+      },
+    });
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.simulated",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: {
+        reason: "no_source",
+        source: load.source,
+        detail: load.detail ?? null,
+      },
+    });
+    return baseSummary("simulated", { source: load.source });
+  }
+
+  // 3.5) execute-time per-account execution mode revalidation (regression fix)
+  //
+  // enqueue 時 (`runGithubPollOnce`) では PR が触る accountKey が分からない
+  // ため workspace mode の hard-lock のみで判定している。ここで AdsLoader が
+  // 返した `load.accounts` の accountKey 集合を使い、`workspaces.executionMode`
+  // と `ad_accounts.modeOverride` を再取得して `resolveExecutionMode` で
+  // per-account に評価する。`report_only` に倒れる accountKey が 1 つでも
+  // あれば Meta executor を呼ばず fail-closed する。受入基準:
+  //   - "report_only never mutates Meta"
+  //   - "auto_apply only executes pre-approved safe operations"
+  // を Meta CLI 直前で強制する境界。
+  const accountKeys = load.accounts.map((a) => a.accountKey);
+  const modeContext = await opts.store.loadAccountExecutionModes({
+    workspaceId: opts.workspaceId,
+    accountKeys,
+  });
+  const reportOnlyAccounts = collectReportOnlyAccounts(
+    accountKeys,
+    modeContext
+  );
+  if (reportOnlyAccounts.length > 0) {
+    const errorMessage =
+      `apply blocked at execution time: report_only mode is in effect for ` +
+      `account(s) ${reportOnlyAccounts.map((r) => r.accountKey).join(", ")}`;
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "error",
+      message: `apply_job ${opts.applyJobId}: blocked — report_only_mode`,
+      payload: {
+        stage: "mode_revalidation",
+        reason: "report_only_mode",
+        workspaceMode: modeContext.workspaceMode,
+        reportOnlyAccounts: reportOnlyAccounts.map((r) => ({
+          accountKey: r.accountKey,
+          override: r.override,
+          effectiveMode: r.effectiveMode,
+        })),
+        prNumber: context.prNumber,
+        headSha: context.headSha,
+        pullRequestId: context.pullRequestId,
+      },
+    });
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage,
+      result: {
+        reason: "report_only_mode",
+        workspaceMode: modeContext.workspaceMode,
+        reportOnlyAccounts: reportOnlyAccounts.map((r) => ({
+          accountKey: r.accountKey,
+          override: r.override,
+          effectiveMode: r.effectiveMode,
+        })),
+      },
+    });
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.blocked_unapproved",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: {
+        reason: "report_only_mode",
+        workspaceMode: modeContext.workspaceMode,
+        reportOnlyAccounts: reportOnlyAccounts.map((r) => ({
+          accountKey: r.accountKey,
+          override: r.override,
+          effectiveMode: r.effectiveMode,
+        })),
+      },
+    });
+    return baseSummary("failed", {
+      source: load.source,
+      accountsTouched: load.accounts.length,
+      errorMessage,
+      abortReason: "report_only_mode",
+    });
+  }
+
+  // 4) plan 構築 (各アカウント、エラー finding は plan_error)
+  const plans: { accountKey: string; actions: PlanAction[] }[] = [];
+  const planErrors: Array<{ accountKey: string; finding: PlanFinding }> = [];
+  for (const acct of load.accounts) {
+    const plan = buildExecutionPlan({
+      account: acct.accountKey,
+      next: acct.next,
+      previous: acct.previous,
+    });
+    for (const finding of plan.findings) {
+      if (finding.level === "error") {
+        planErrors.push({ accountKey: acct.accountKey, finding });
+      }
+    }
+    plans.push({ accountKey: acct.accountKey, actions: plan.actions });
+  }
+  if (planErrors.length > 0) {
+    const summary =
+      `plan validation failed (${planErrors.length} error finding(s))`;
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "error",
+      message: `apply_job ${opts.applyJobId}: ${summary}`,
+      payload: {
+        stage: "plan",
+        findings: planErrors.map((p) => ({
+          account: p.accountKey,
+          message: p.finding.message,
+          ...(p.finding.pointer ? { pointer: p.finding.pointer } : {}),
+        })),
+      },
+    });
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage: summary,
+      result: {
+        reason: "plan_error",
+        findingCount: planErrors.length,
+      },
+    });
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.failed",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: {
+        reason: "plan_error",
+        findingCount: planErrors.length,
+      },
+    });
+    return baseSummary("failed", {
+      source: load.source,
+      accountsTouched: load.accounts.length,
+      errorMessage: summary,
+      abortReason: "plan_error",
+    });
+  }
+
+  // 5) PlanAction を PAUSED 化 → executor に渡す。
+  const outcomes: ApplyActionOutcome[] = [];
+  let succeeded = 0;
+  let failed = 0;
+  let skipped = 0;
+  let pausedRewrites = 0;
+  let totalActions = 0;
+
+  let abortReason: RunExecuteApplySummary["abortReason"] | undefined;
+  let abortMessage: string | undefined;
+
+  // regression fix: 終端 audit (`apply.executed` / `apply.failed`) に external_id /
+  // ads_hierarchy.id を載せるための evidence collector。Meta 側で確定した
+  // external_id と、`upsertAppliedAdsNode` が返した local 行 id を action ごとに
+  // 保持し、最後の `recordApplyAudit` メタデータに焼き付ける。
+  const affectedNodes: AffectedNodeRecord[] = [];
+  let failingAction: FailingActionRecord | undefined;
+
+  // 受入要件 "Rate limiting enforces ad_account-level concurrency of 1": 同一
+  // `runExecuteApply` 内では accounts は順次処理 (for-loop) されるが、複数の
+  // `runExecuteApply` が同時に走ったとき (= 別 PR の apply_job が並行) に同じ
+  // ad_account を触る race を防ぐため、per-account の inner block を
+  // `lockProvider.withLock` で直列化する。
+  //
+  // regression fix: lock 識別子は `buildAdAccountLockKey({ workspaceId,
+  // accountKey })` の canonical 形を使い、Activate (`runActivate`) と同じ
+  // 識別子に解決する。これにより同一 ad_account に対する Apply と Activate
+  // の並行実行も直列化される (旧実装では Apply=accountKey, Activate=accountId
+  // の異なる識別子を使っていたため Apply×Activate の race が起きていた)。
+  //
+  // regression fix: 旧実装は `withAccountLock` の module-local Map を直接呼んで
+  // いたため、同一 Node.js プロセス内の race しか直列化できなかった。本番では
+  // Apply は apps/worker で、Activate は apps/web / apps/cli で動くため、
+  // worker の Apply と web/CLI の Activate は別プロセスから同時に Meta CLI を
+  // 叩きうる。`lockProvider` (production では Postgres advisory lock を背に
+  // 持つ実装) を経由することで cross-process でも 1 並行を強制する。
+  //
+  // abort 中は Meta API 接触なしで残 action を skipped に倒すため、ロックを
+  // 取らずに進める。
+  for (const plan of plans) {
+    if (abortReason) {
+      for (const rawAction of plan.actions) {
+        totalActions += 1;
+        const { action, rewritten } = enforcePausedOnPlanAction(rawAction);
+        if (rewritten) pausedRewrites += 1;
+        skipped += 1;
+        outcomes.push({
+          action,
+          status: "skipped",
+          message: `skipped due to earlier ${abortReason}`,
+          attempts: 0,
+          rewrittenForPaused: rewritten,
+        });
+        await opts.store.recordApplyExecutionLog({
+          workspaceId: opts.workspaceId,
+          kind: "apply",
+          refType: "apply_job",
+          refId: opts.applyJobId,
+          level: "info",
+          message: `apply_job ${opts.applyJobId}: skipped ${action.kind}`,
+          payload: {
+            account: plan.accountKey,
+            action: actionForLog(action),
+            reason: abortReason,
+          },
+        });
+      }
+      continue;
+    }
+
+    await lockProvider.withLock(
+      buildAdAccountLockKey({
+        workspaceId: opts.workspaceId,
+        accountKey: plan.accountKey,
+      }),
+      async () => {
+        await runPlanForAccount(plan);
+      }
+    );
+  }
+
+  // ----- end accounts loop -----
+
+  // 6) 終端 (このスコープでは abortReason / outcomes / 集計値が確定済み)
+  // 以降の処理は元の終端ブロックへ続く。
+
+  // ----- 内部関数: 1 アカウント分の plan を実行する -----
+  async function runPlanForAccount(plan: { accountKey: string; actions: PlanAction[] }): Promise<void> {
+    for (const rawAction of plan.actions) {
+      totalActions += 1;
+      const { action, rewritten } = enforcePausedOnPlanAction(rawAction);
+      if (rewritten) pausedRewrites += 1;
+
+      if (abortReason) {
+        // ロック取得後に別 account で abort になったケースに備え、内側でも検査。
+        skipped += 1;
+        outcomes.push({
+          action,
+          status: "skipped",
+          message: `skipped due to earlier ${abortReason}`,
+          attempts: 0,
+          rewrittenForPaused: rewritten,
+        });
+        await opts.store.recordApplyExecutionLog({
+          workspaceId: opts.workspaceId,
+          kind: "apply",
+          refType: "apply_job",
+          refId: opts.applyJobId,
+          level: "info",
+          message: `apply_job ${opts.applyJobId}: skipped ${action.kind}`,
+          payload: {
+            account: plan.accountKey,
+            action: actionForLog(action),
+            reason: abortReason,
+          },
+        });
+        continue;
+      }
+
+      if (isNoopAction(action)) {
+        skipped += 1;
+        outcomes.push({
+          action,
+          status: "skipped",
+          message: "noop after paused enforcement (changes empty)",
+          attempts: 0,
+          rewrittenForPaused: rewritten,
+        });
+        await opts.store.recordApplyExecutionLog({
+          workspaceId: opts.workspaceId,
+          kind: "apply",
+          refType: "apply_job",
+          refId: opts.applyJobId,
+          level: "info",
+          message: `apply_job ${opts.applyJobId}: noop ${action.kind}`,
+          payload: {
+            account: plan.accountKey,
+            action: actionForLog(action),
+            reason: "noop",
+            rewrittenForPaused: rewritten,
+          },
+        });
+        continue;
+      }
+
+      // 試行ループ (rate-limit 時のみ繰り返す)
+      let attempt = 0;
+      let lastResult: ExecuteActionResult | null = null;
+      while (true) {
+        attempt += 1;
+        let result: ExecuteActionResult;
+        try {
+          result = await opts.executor.executeAction({
+            action,
+            context,
+            attempt: attempt - 1,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          result = {
+            status: "unknown_error",
+            message: `executor threw: ${message}`,
+            logPayload: { errorMessage: message },
+          };
+        }
+        lastResult = result;
+
+        await opts.store.recordApplyExecutionLog({
+          workspaceId: opts.workspaceId,
+          kind: "apply",
+          refType: "apply_job",
+          refId: opts.applyJobId,
+          level: result.status === "success" ? "info" : "warn",
+          message: `apply_job ${opts.applyJobId}: ${action.kind} (${plan.accountKey}) → ${result.status} [attempt ${attempt}]`,
+          payload: {
+            account: plan.accountKey,
+            action: actionForLog(action),
+            attempt,
+            executor: result.logPayload,
+            rewrittenForPaused: rewritten,
+          },
+        });
+
+        if (result.status === "success") break;
+        if (result.status === "rate_limit_error") {
+          const maxAttempts = result.retry?.maxAttempts ?? maxAttemptsDefault;
+          if (attempt >= maxAttempts) {
+            // exhausted
+            break;
+          }
+          const baseDelay =
+            result.retry?.delayMs ??
+            computeBackoffDelayMs(attempt, {
+              maxAttempts: maxAttemptsDefault,
+              initialBackoffMs: initialBackoffDefault,
+              maxBackoffMs: maxBackoffDefault,
+              factor: 2,
+            } satisfies MetaRateLimitPolicy);
+          await sleep(baseDelay);
+          continue;
+        }
+        // auth_error / unknown_error / skipped: break and let outer loop decide.
+        break;
+      }
+
+      const finalResult = lastResult!;
+      if (finalResult.status === "success") {
+        // regression fix: create_* (campaign/adset/ad) は ads_hierarchy に
+        // 新規行を作るため、Meta 側で確定した external_id 無しに success を
+        // 受け入れると、後続 Activate が `ads_hierarchy.externalId` 未確定で
+        // 永久に拒否される。executor が externalId を返さなかった場合は
+        // 「Meta 側に作成されたかも知れないが追跡不能」状態として fail-closed
+        // し、null externalId の PAUSED 行は決して作らない。
+        if (
+          isCreateActionRequiringExternalId(action.kind) &&
+          !nonEmptyString(finalResult.externalId)
+        ) {
+          failed += 1;
+          const message =
+            `${action.kind} reported success but Meta CLI returned no externalId; ` +
+            `refusing to persist ads_hierarchy row without an activatable identifier`;
+          outcomes.push({
+            action,
+            status: "unknown_error",
+            message,
+            attempts: attempt,
+            rewrittenForPaused: rewritten,
+          });
+          await opts.store.recordApplyExecutionLog({
+            workspaceId: opts.workspaceId,
+            kind: "apply",
+            refType: "apply_job",
+            refId: opts.applyJobId,
+            level: "error",
+            message: `apply_job ${opts.applyJobId}: ${action.kind} (${plan.accountKey}) → fail-closed missing_external_id`,
+            payload: {
+              stage: "persist_hierarchy",
+              reason: "missing_external_id",
+              account: plan.accountKey,
+              action: actionForLog(action),
+              executor: finalResult.logPayload,
+              rewrittenForPaused: rewritten,
+            },
+          });
+          abortReason = "unknown_error";
+          abortMessage = message;
+          failingAction = buildFailingActionRecord({
+            action,
+            accountKey: plan.accountKey,
+            attemptedExternalId: finalResult.externalId,
+          });
+          await opts.store.recordApplyAudit({
+            workspaceId: opts.workspaceId,
+            action: "meta.cli_unknown_error",
+            applyJobId: opts.applyJobId,
+            pullRequestId: context.pullRequestId,
+            prNumber: context.prNumber,
+            headSha: context.headSha,
+            ref: `pr#${context.prNumber}@${context.headSha}`,
+            metadata: {
+              reason: "missing_external_id",
+              account: plan.accountKey,
+              actionKind: action.kind,
+              detail: message,
+              failingAction: failingActionForLog(failingAction),
+            },
+          });
+          continue;
+        }
+        succeeded += 1;
+        outcomes.push({
+          action,
+          status: "success",
+          message: finalResult.message,
+          attempts: attempt,
+          rewrittenForPaused: rewritten,
+        });
+        // regression fix: PAUSED ads_hierarchy 行を upsert して externalId と
+        // PR の commit sha を local 状態に焼き付ける。Activate 経路はこの行を
+        // 読んで Meta を叩くため、ここで永続化しないと apply 後の Activate が
+        // 「external_id 未確定」で永久に拒否される。
+        // regression fix: 戻り値の hierarchy.id を affectedNodes に取り込み、
+        // 終端 audit metadata の `affectedNodes[]` に external_id と一緒に出す。
+        const hierarchyId = await persistAppliedHierarchyNode({
+          action,
+          plan,
+          finalResult,
+          context,
+          opts,
+        });
+        const ident = nodeIdentForAction(action);
+        affectedNodes.push({
+          accountKey: plan.accountKey,
+          actionKind: action.kind,
+          nodeType: ident.nodeType,
+          nodeKey: ident.nodeKey,
+          externalId: nonEmptyString(finalResult.externalId)
+            ? finalResult.externalId
+            : null,
+          hierarchyId: hierarchyId ?? null,
+        });
+        continue;
+      }
+
+      // 失敗パスの分岐
+      failed += 1;
+      outcomes.push({
+        action,
+        status: finalResult.status,
+        message: finalResult.message,
+        attempts: attempt,
+        rewrittenForPaused: rewritten,
+      });
+
+      // regression fix: 失敗 action は account / actionKind / nodeKey /
+      // attemptedExternalId をまとめて failingAction に保持する。終端
+      // `apply.failed` audit metadata と通知系 audit metadata の双方に出す
+      // (どの Meta オブジェクトを触ろうとしていたかを監査ログから追跡可能にする)。
+      const recordedFailingAction = buildFailingActionRecord({
+        action,
+        accountKey: plan.accountKey,
+        attemptedExternalId: finalResult.externalId,
+      });
+      if (finalResult.status === "auth_error") {
+        abortReason = "auth_error";
+        abortMessage = finalResult.message;
+        failingAction = recordedFailingAction;
+        // regression fix: notification audit は executor の `notify` (=
+        // MetaCliRecommendedAction.auditAction) を優先する。FakeMetaActionExecutor
+        // 等の旧 caller が notify を立てない場合は legacy 値にフォールバック。
+        await opts.store.recordApplyAudit({
+          workspaceId: opts.workspaceId,
+          action: finalResult.notify?.auditAction ?? "oauth.meta.reauth_required",
+          applyJobId: opts.applyJobId,
+          pullRequestId: context.pullRequestId,
+          prNumber: context.prNumber,
+          headSha: context.headSha,
+          ref: `pr#${context.prNumber}@${context.headSha}`,
+          metadata: {
+            reason: "auth_error",
+            account: plan.accountKey,
+            actionKind: action.kind,
+            detail: finalResult.notify?.detail ?? finalResult.message,
+            failingAction: failingActionForLog(recordedFailingAction),
+          },
+        });
+      } else if (finalResult.status === "api_error") {
+        abortReason = "api_error";
+        abortMessage = finalResult.message;
+        failingAction = recordedFailingAction;
+        // regression fix: api_error は notify が立っているはず。立っていなければ
+        // 既定の `meta.api_error` を使う (recommendedAction が api_error 由来である
+        // 限りこのフォールバックには到達しない)。
+        await opts.store.recordApplyAudit({
+          workspaceId: opts.workspaceId,
+          action: finalResult.notify?.auditAction ?? "meta.api_error",
+          applyJobId: opts.applyJobId,
+          pullRequestId: context.pullRequestId,
+          prNumber: context.prNumber,
+          headSha: context.headSha,
+          ref: `pr#${context.prNumber}@${context.headSha}`,
+          metadata: {
+            reason: "api_error",
+            account: plan.accountKey,
+            actionKind: action.kind,
+            detail: finalResult.notify?.detail ?? finalResult.message,
+            failingAction: failingActionForLog(recordedFailingAction),
+          },
+        });
+      } else if (finalResult.status === "rate_limit_error") {
+        abortReason = "rate_limit_exhausted";
+        abortMessage = `rate-limit retries exhausted after ${attempt} attempts: ${finalResult.message}`;
+        failingAction = recordedFailingAction;
+      } else {
+        abortReason = "unknown_error";
+        abortMessage = finalResult.message;
+        failingAction = recordedFailingAction;
+        // regression fix: unknown_error は recommendedAction.fail_fast_notify が
+        // 紐付く想定。executor が notify を立てている場合のみ追加 audit を残す。
+        if (finalResult.notify) {
+          await opts.store.recordApplyAudit({
+            workspaceId: opts.workspaceId,
+            action: finalResult.notify.auditAction,
+            applyJobId: opts.applyJobId,
+            pullRequestId: context.pullRequestId,
+            prNumber: context.prNumber,
+            headSha: context.headSha,
+            ref: `pr#${context.prNumber}@${context.headSha}`,
+            metadata: {
+              reason: "unknown_error",
+              account: plan.accountKey,
+              actionKind: action.kind,
+              detail: finalResult.notify.detail,
+              failingAction: failingActionForLog(recordedFailingAction),
+            },
+          });
+        }
+      }
+    }
+  }
+
+  // 6) 終端
+  if (abortReason) {
+    const errorMessage = abortMessage ?? `apply aborted: ${abortReason}`;
+    await opts.store.markApplyFinished({
+      applyJobId: opts.applyJobId,
+      state: "failed",
+      errorMessage,
+      result: {
+        reason: abortReason,
+        succeeded,
+        failed,
+        skipped,
+        pausedRewrites,
+        accountsTouched: load.accounts.length,
+      },
+    });
+    // regression fix: abort 前に Meta 反映 + ads_hierarchy 永続化が完了した
+    // action の external_id / hierarchy.id を `affectedNodes` に乗せ、abort を
+    // 引き起こした action の identification を `failingAction` に乗せる。
+    // これにより `apply.failed` 監査行から「何が反映済みで、何で詰まったか」
+    // を external_id 単位で追跡できる。
+    await opts.store.recordApplyAudit({
+      workspaceId: opts.workspaceId,
+      action: "apply.failed",
+      applyJobId: opts.applyJobId,
+      pullRequestId: context.pullRequestId,
+      prNumber: context.prNumber,
+      headSha: context.headSha,
+      ref: `pr#${context.prNumber}@${context.headSha}`,
+      metadata: {
+        reason: abortReason,
+        succeeded,
+        failed,
+        skipped,
+        pausedRewrites,
+        accountsTouched: load.accounts.length,
+        affectedNodes: affectedNodesForLog(affectedNodes),
+        failingAction: failingAction
+          ? failingActionForLog(failingAction)
+          : null,
+      },
+    });
+    return baseSummary("failed", {
+      source: load.source,
+      accountsTouched: load.accounts.length,
+      totalActions,
+      succeeded,
+      failed,
+      skipped,
+      pausedRewrites,
+      outcomes,
+      errorMessage,
+      abortReason,
+    });
+  }
+
+  // すべて成功 (no actions の場合も succeeded に倒す — plan は通っているため)
+  await opts.store.markApplyFinished({
+    applyJobId: opts.applyJobId,
+    state: "succeeded",
+    result: {
+      succeeded,
+      failed,
+      skipped,
+      pausedRewrites,
+      accountsTouched: load.accounts.length,
+    },
+  });
+  // regression fix: `apply.executed` audit metadata に成功 action ごとの
+  // external_id (Meta 側) と ads_hierarchy.id (local) を含める。Activate /
+  // 後段 audit 連携が「どの Meta 物体が、どの hierarchy 行と紐付いたか」を
+  // 集計値だけではなく ID で辿れるようにする。
+  await opts.store.recordApplyAudit({
+    workspaceId: opts.workspaceId,
+    action: "apply.executed",
+    applyJobId: opts.applyJobId,
+    pullRequestId: context.pullRequestId,
+    prNumber: context.prNumber,
+    headSha: context.headSha,
+    ref: `pr#${context.prNumber}@${context.headSha}`,
+    metadata: {
+      succeeded,
+      failed,
+      skipped,
+      pausedRewrites,
+      accountsTouched: load.accounts.length,
+      totalActions,
+      affectedNodes: affectedNodesForLog(affectedNodes),
+    },
+  });
+  return baseSummary("succeeded", {
+    source: load.source,
+    accountsTouched: load.accounts.length,
+    totalActions,
+    succeeded,
+    failed,
+    skipped,
+    pausedRewrites,
+    outcomes,
+  });
+}
+
+// ---------------------------------------------------------------------
+// 内部 helpers
+// ---------------------------------------------------------------------
+
+/**
+ * PlanAction を execution_logs.payload に乗せられる形にする。
+ *
+ * - field 名は YAML 由来 (id 等) のみ。token は含まれない。
+ * - 大きい構造 (variants 等) はそのまま JSON シリアライズして OK。
+ * - `account` は plan.account として既に乗っているため重複させない。
+ */
+function actionForLog(action: PlanAction): JsonValue {
+  // structuredClone を使わず JSON 経由で「JSON-friendly」値に正規化する。
+  const cloned = JSON.parse(JSON.stringify(action)) as JsonValue;
+  return cloned;
+}
+
+// ---------------------------------------------------------------------
+// regression fix: ads_hierarchy persistence on Apply success
+//
+// 1 つの PlanAction を `UpsertAppliedAdsNodeInput` に翻訳する純粋関数と、
+// それを呼び出して `execution_logs` にエラー痕跡を残しつつ apply を継続させる
+// ラッパを定義する。
+//
+// 対象は campaign / adset / ad のみ (creative は別テーブル `creatives` に
+// 永続化される — 本契約のスコープ外)。delete_* は Meta CLI runner の
+// `META_CLI_SUPPORTED_OPERATIONS` に未登録のため status="success" に到達しない。
+// ---------------------------------------------------------------------
+
+/**
+ * regression fix: Apply success が ads_hierarchy 永続化のために external_id を
+ * 必須とする PlanAction kinds。runPlanForAccount の success 分岐で fail-closed
+ * 判定に使われ、`deriveAppliedAdsNodeInput` の create_* 分岐でも防御的に
+ * 同じルールを適用する (executor 側で漏れた場合の二重防御)。
+ */
+export function isCreateActionRequiringExternalId(
+  kind: PlanAction["kind"]
+): boolean {
+  return (
+    kind === "create_campaign" ||
+    kind === "create_adset" ||
+    kind === "create_ad"
+  );
+}
+
+function nonEmptyString(value: string | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function deriveAppliedAdsNodeInput(args: {
+  action: PlanAction;
+  workspaceId: string;
+  externalId: string | undefined;
+  lastCommitSha: string;
+}): UpsertAppliedAdsNodeInput | null {
+  const { action, workspaceId, externalId, lastCommitSha } = args;
+  // regression fix: create_* で external_id が空のまま落ちてきたら、ここでも
+  // null を返して永続化を拒否する (runPlanForAccount の fail-closed と同じ
+  // 不変条件を二重防御する)。
+  if (
+    isCreateActionRequiringExternalId(action.kind) &&
+    !nonEmptyString(externalId)
+  ) {
+    return null;
+  }
+  const externalIdMaybe = nonEmptyString(externalId) ? { externalId } : {};
+  const spec = actionForLog(action);
+  switch (action.kind) {
+    case "create_campaign":
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "campaign",
+        nodeKey: action.campaignId,
+        displayName: action.name,
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+        status: "paused",
+      };
+    case "update_campaign": {
+      const renamed = extractDisplayNameFromChanges(action.changes);
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "campaign",
+        nodeKey: action.campaignId,
+        ...(renamed !== undefined ? { displayName: renamed } : {}),
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+      };
+    }
+    case "create_adset":
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "adset",
+        nodeKey: action.adsetId,
+        displayName: action.name,
+        parentNodeType: "campaign",
+        parentNodeKey: action.campaignId,
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+        status: "paused",
+      };
+    case "update_adset": {
+      const renamed = extractDisplayNameFromChanges(action.changes);
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "adset",
+        nodeKey: action.adsetId,
+        ...(renamed !== undefined ? { displayName: renamed } : {}),
+        parentNodeType: "campaign",
+        parentNodeKey: action.campaignId,
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+      };
+    }
+    case "create_ad":
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "ad",
+        nodeKey: action.adId,
+        displayName: action.name,
+        parentNodeType: "adset",
+        parentNodeKey: action.adsetId,
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+        status: "paused",
+      };
+    case "update_ad": {
+      const renamed = extractDisplayNameFromChanges(action.changes);
+      return {
+        workspaceId,
+        accountKey: action.account,
+        nodeType: "ad",
+        nodeKey: action.adId,
+        ...(renamed !== undefined ? { displayName: renamed } : {}),
+        parentNodeType: "adset",
+        parentNodeKey: action.adsetId,
+        ...externalIdMaybe,
+        lastCommitSha,
+        spec,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function extractDisplayNameFromChanges(
+  changes: Record<string, { from: unknown; to: unknown }>
+): string | undefined {
+  const nameChange = changes.name;
+  if (nameChange && typeof nameChange.to === "string") return nameChange.to;
+  return undefined;
+}
+
+async function persistAppliedHierarchyNode(args: {
+  action: PlanAction;
+  plan: { accountKey: string; actions: PlanAction[] };
+  finalResult: ExecuteActionResult;
+  context: ApplyJobContext;
+  opts: RunExecuteApplyOptions;
+}): Promise<string | null> {
+  const { action, plan, finalResult, context, opts } = args;
+  const input = deriveAppliedAdsNodeInput({
+    action,
+    workspaceId: opts.workspaceId,
+    externalId: finalResult.externalId,
+    lastCommitSha: context.headSha,
+  });
+  if (!input) return null;
+  try {
+    // regression fix: 戻り値の hierarchy.id を呼び出し側に返し、終端 audit の
+    // `affectedNodes[].hierarchyId` evidence として焼き付ける。
+    const { id } = await opts.store.upsertAppliedAdsNode(input);
+    return id;
+  } catch (err) {
+    // Meta 側は反映済みのため apply 全体を fail にしない。Activate のための
+    // ads_hierarchy 行が欠落している事実だけを execution_logs (warn) に残し、
+    // 後続 action の処理は継続する。
+    const message = err instanceof Error ? err.message : String(err);
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: "warn",
+      message: `apply_job ${opts.applyJobId}: ads_hierarchy upsert failed for ${action.kind} (${input.nodeKey})`,
+      payload: {
+        stage: "persist_hierarchy",
+        account: plan.accountKey,
+        accountKey: input.accountKey,
+        nodeType: input.nodeType,
+        nodeKey: input.nodeKey,
+        externalId: input.externalId ?? null,
+        errorMessage: message,
+      },
+    });
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------
+// regression fix: terminal audit evidence helpers
+//
+// `apply.executed` / `apply.failed` の audit_logs.metadata に external_id /
+// ads_hierarchy.id / 失敗 action 情報を載せるためだけの小さい純粋関数群。
+// 監査で「どの Meta オブジェクトが、どの local hierarchy 行と紐付いたか」と
+// 「abort はどの action の何で起きたか」を集計値ではなく ID で追跡する。
+// ---------------------------------------------------------------------
+
+type NodeIdent = {
+  nodeType: "campaign" | "adset" | "ad" | "creative" | "experiment";
+  nodeKey: string;
+};
+
+interface AffectedNodeRecord extends NodeIdent {
+  accountKey: string;
+  actionKind: PlanAction["kind"];
+  /** Meta 側で確定した external_id (例: act_xxx/cmp_yyy)。executor が返さなければ null。 */
+  externalId: string | null;
+  /** `upsertAppliedAdsNode` が返した local 行 id。creative や upsert 失敗時は null。 */
+  hierarchyId: string | null;
+}
+
+interface FailingActionRecord extends NodeIdent {
+  accountKey: string;
+  actionKind: PlanAction["kind"];
+  /**
+   * 失敗 action が触ろうとしていた Meta external_id。executor が
+   * `update_x` で対象オブジェクトの id を返している場合等の externalId を
+   * 立てていればそれを使う。立っていなければ null (= 真の失敗で id 取得不能)。
+   */
+  attemptedExternalId: string | null;
+}
+
+function nodeIdentForAction(action: PlanAction): NodeIdent {
+  switch (action.kind) {
+    case "create_campaign":
+    case "update_campaign":
+    case "delete_campaign":
+      return { nodeType: "campaign", nodeKey: action.campaignId };
+    case "create_adset":
+    case "update_adset":
+    case "delete_adset":
+      return { nodeType: "adset", nodeKey: action.adsetId };
+    case "create_ad":
+    case "update_ad":
+    case "delete_ad":
+      return { nodeType: "ad", nodeKey: action.adId };
+    case "create_creative":
+    case "update_creative":
+    case "delete_creative":
+      return { nodeType: "creative", nodeKey: action.creativeId };
+    case "create_experiment":
+    case "update_experiment":
+    case "delete_experiment":
+      return { nodeType: "experiment", nodeKey: action.experimentId };
+  }
+}
+
+function buildFailingActionRecord(args: {
+  action: PlanAction;
+  accountKey: string;
+  attemptedExternalId: string | undefined;
+}): FailingActionRecord {
+  const ident = nodeIdentForAction(args.action);
+  return {
+    accountKey: args.accountKey,
+    actionKind: args.action.kind,
+    nodeType: ident.nodeType,
+    nodeKey: ident.nodeKey,
+    attemptedExternalId: nonEmptyString(args.attemptedExternalId)
+      ? args.attemptedExternalId
+      : null,
+  };
+}
+
+function affectedNodesForLog(records: AffectedNodeRecord[]): JsonValue {
+  return records.map((r) => ({
+    accountKey: r.accountKey,
+    actionKind: r.actionKind,
+    nodeType: r.nodeType,
+    nodeKey: r.nodeKey,
+    externalId: r.externalId,
+    hierarchyId: r.hierarchyId,
+  })) as JsonValue;
+}
+
+function failingActionForLog(record: FailingActionRecord): JsonValue {
+  return {
+    accountKey: record.accountKey,
+    actionKind: record.actionKind,
+    nodeType: record.nodeType,
+    nodeKey: record.nodeKey,
+    attemptedExternalId: record.attemptedExternalId,
+  };
+}
+
+// ---------------------------------------------------------------------
+// regression fix: execute-time approval revalidation
+//
+// runExecuteApply は 1.5) ステップで `loadApplyApprovalSnapshot` の結果を
+// この関数に通し、Meta mutation 経路に進めるかを判定する。stale な apply_job /
+// 手で挿入された apply_job / branch protection を後から外された ops repo を
+// すべて 1 か所で fail-closed する境界。
+//
+// すべての revalidation 失敗は audit_logs に `apply.blocked_unapproved` として
+// 残され、execution_logs (kind=apply, level=error) と apply_jobs.state=failed
+// と合わせて 3 段で監査証跡を残す。
+// ---------------------------------------------------------------------
+
+type RevalidationFailureReason =
+  | "snapshot_unavailable"
+  | "pr_not_merged"
+  | "branch_protection_revoked"
+  | "no_approval_record"
+  | "approval_rejected";
+
+type RevalidationResult =
+  | { ok: true }
+  | { ok: false; reason: RevalidationFailureReason; detail: string };
+
+export function evaluateApprovalSnapshot(
+  snapshot: ApplyApprovalSnapshot | null
+): RevalidationResult {
+  if (!snapshot) {
+    return {
+      ok: false,
+      reason: "snapshot_unavailable",
+      detail:
+        "apply_job に紐付く PR / ops repo が見つからないため実行を拒否しました (手挿入または PR 削除の可能性)。",
+    };
+  }
+  if (snapshot.pullRequestState !== "merged") {
+    return {
+      ok: false,
+      reason: "pr_not_merged",
+      detail: `現在の PR state="${snapshot.pullRequestState}" は merged ではないため Meta mutation を実行しません。`,
+    };
+  }
+  if (!snapshot.branchProtectionApplied) {
+    return {
+      ok: false,
+      reason: "branch_protection_revoked",
+      detail:
+        "ops repo の branch protection が現時点で適用されていないため、approval enforcement を再確認できず実行を拒否しました。",
+    };
+  }
+  if (snapshot.latestApprovalDecision === null) {
+    return {
+      ok: false,
+      reason: "no_approval_record",
+      detail:
+        "approval_records に 1 行も無いため、GitOps 経由で承認された apply_job として認識できません (手で apply_jobs を挿入した可能性)。",
+    };
+  }
+  if (
+    snapshot.latestApprovalDecision !== "auto_approved" &&
+    snapshot.latestApprovalDecision !== "approved"
+  ) {
+    return {
+      ok: false,
+      reason: "approval_rejected",
+      detail: `最新の approval_records.decision="${snapshot.latestApprovalDecision}" は承認状態ではありません。`,
+    };
+  }
+  return { ok: true };
+}
+
+function snapshotForLog(snapshot: ApplyApprovalSnapshot | null): JsonValue {
+  if (!snapshot) return null;
+  return {
+    pullRequestState: snapshot.pullRequestState,
+    branchProtectionApplied: snapshot.branchProtectionApplied,
+    latestApprovalDecision: snapshot.latestApprovalDecision,
+    approvalRecordId: snapshot.approvalRecordId,
+    mergedAt: snapshot.mergedAt ? snapshot.mergedAt.toISOString() : null,
+  };
+}
+
+// ---------------------------------------------------------------------
+// regression fix: per-account execution mode fail-closed helper
+//
+// AdsLoader が返した accountKey 集合に対して `resolveExecutionMode` を 1 件
+// ずつ通し、`report_only` に倒れる account を抽出する。`runExecuteApply` は
+// 1 件でも該当があれば Meta executor を呼ばずに `apply.blocked_unapproved`
+// audit と `failed` 状態に倒す。
+// ---------------------------------------------------------------------
+
+interface ReportOnlyAccountRecord {
+  accountKey: string;
+  /** raw な ad_accounts.modeOverride 値 (UI 表示用)。 */
+  override: string | null;
+  effectiveMode: ExecutionMode;
+}
+
+function collectReportOnlyAccounts(
+  accountKeys: readonly string[],
+  context: AccountExecutionModes
+): ReportOnlyAccountRecord[] {
+  const out: ReportOnlyAccountRecord[] = [];
+  for (const key of accountKeys) {
+    const override = context.overrideByAccountKey[key] ?? null;
+    const effective = resolveExecutionMode(context.workspaceMode, override);
+    if (effective === "report_only") {
+      out.push({ accountKey: key, override, effectiveMode: effective });
+    }
+  }
+  return out;
+}
+
+// re-export for convenience; orchestrator caller がこの型を再宣言しなくて済む。
+export type { ApplyJobContext, ApplyJobStore, ExecutionLogInput };

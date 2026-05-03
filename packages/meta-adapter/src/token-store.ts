@@ -1,0 +1,60 @@
+// AdDroid OSS — Meta OAuth token persistence boundary.
+//
+// adapter は `oauth_tokens` テーブルを直接触らず、本 interface 越しに保存/取得する。
+// 暗号化は adapter 側で実施し、Store には常に ciphertext を渡す。
+//
+// 実装:
+//   - InMemoryMetaTokenStore  (本ファイル) — テストとローカル simulation 用
+//   - PrismaMetaTokenStore     (apps/web/lib/meta-runtime.ts)
+
+import type { MetaTokenProvider } from "./types.js";
+
+export interface MetaOAuthTokenRecord {
+  provider: MetaTokenProvider;
+  /** 表示用の安定識別子 (Meta user id 等)。機微ではない。 */
+  accountIdentifier: string;
+  scopes: string[];
+  /** 暗号化済み access token (例 "v1.aes256gcm.iv.tag.payload")。 */
+  accessTokenCiphertext: string;
+  /** Meta は refresh_token を持たないが、interface 統一のため null 許容で残す。 */
+  refreshTokenCiphertext?: string | null;
+  /** long-lived token の expiresAt。null = 不明 (System User token 等)。 */
+  expiresAt?: Date | null;
+  connectedAt: Date;
+}
+
+export interface MetaOAuthTokenStore {
+  /** provider+account 単位で upsert する。 */
+  saveOAuthToken(record: MetaOAuthTokenRecord): Promise<void>;
+  /** 直近で接続された 1 件を返す。 */
+  loadOAuthToken(provider: MetaTokenProvider): Promise<MetaOAuthTokenRecord | null>;
+}
+
+/**
+ * メモリ内に保持するテスト用 store。同一 provider+account は最新値で上書きされ、
+ * `loadOAuthToken` は connectedAt 降順で最も新しい行を返す。
+ */
+export class InMemoryMetaTokenStore implements MetaOAuthTokenStore {
+  private records = new Map<string, MetaOAuthTokenRecord>();
+
+  async saveOAuthToken(record: MetaOAuthTokenRecord): Promise<void> {
+    const key = `${record.provider}:${record.accountIdentifier}`;
+    this.records.set(key, { ...record });
+  }
+
+  async loadOAuthToken(provider: MetaTokenProvider): Promise<MetaOAuthTokenRecord | null> {
+    let latest: MetaOAuthTokenRecord | null = null;
+    for (const rec of this.records.values()) {
+      if (rec.provider !== provider) continue;
+      if (!latest || rec.connectedAt.getTime() > latest.connectedAt.getTime()) {
+        latest = rec;
+      }
+    }
+    return latest ? { ...latest } : null;
+  }
+
+  /** test helper. */
+  size(): number {
+    return this.records.size;
+  }
+}

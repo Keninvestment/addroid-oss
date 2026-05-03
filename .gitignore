@@ -1,0 +1,74 @@
+# Node
+node_modules/
+.npm/
+.pnpm-store/
+
+# TypeScript / build
+dist/
+build/
+*.tsbuildinfo
+
+# Next.js
+.next/
+out/
+next-env.d.ts.bak
+
+# Prisma generated client (committed only via @prisma/client; generated files are not tracked)
+prisma/.tmp/
+
+# Environment & secrets — NEVER commit
+.env
+.env.*
+!.env.example
+secrets.local.yaml
+secrets.local.yml
+*.local.yaml.bak
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+.npmrc
+
+# AdDroid runtime / local state
+.addroid-test-home/
+.addroid-local/
+.addroid-ci-home/
+
+# AdDroid DB dumps (`addroid backup`) — NEVER commit, always treat as secrets-equivalent
+*.dump
+backups/
+
+# npm pack artifacts (CI / release)
+addroid-cli-*.tgz
+*.tgz
+
+# OSS hygiene scan output (--json mode)
+oss-hygiene-report.json
+
+# Logs / coverage
+*.log
+logs/
+coverage/
+
+# Local browser exploration artifacts
+.playwright-mcp/
+
+# Generated local browser-test evidence. Product/docs assets should live under
+# an owning package directory instead of the repository root.
+/scenario*.png
+/*-page.png
+/cron-controls.png
+/operational-logs-rate-limit.png
+/approvals-pr-preview-merge.png
+/reports-daily-kpi.png
+
+# Local assistant scratch files
+/.claude/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!.vscode/settings.json.example

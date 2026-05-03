@@ -1,0 +1,16 @@
+version: 1
+# AdDroid に登録する cron プリセット。
+# the current implementation では github_poll のみ enabled: true、それ以外は後続タスクで切り替えます。
+schedules:
+  - name: github_poll
+    cron: "*/2 * * * *"
+    enabled: true
+  - name: daily_report
+    cron: "0 9 * * *"
+    enabled: false
+  - name: budget_guard
+    cron: "*/15 * * * *"
+    enabled: false
+  - name: improvement_pr
+    cron: "0 10 * * 1"
+    enabled: false

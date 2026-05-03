@@ -1,0 +1,98 @@
+// `addroid status` — ローカル AdDroid プロセス + 直近 doctor 結果のスナップショット。
+//
+// pid file (~/.addroid/run/up.json) と DoctorResult 直近 1 行を読み出し、
+// 「いま web/worker は動いているのか」「直近の依存診断結果は何か」を 1 画面で示す。
+
+import { resolveAddroidPaths, readAddroidConfig } from "@addroid/config";
+import { isProcessAlive, readUpState } from "../lib/processes.js";
+
+interface DoctorRow {
+  ranAt: Date;
+  overall: string;
+  checks: unknown;
+}
+
+export async function runStatus(_args: string[]): Promise<number> {
+  const paths = resolveAddroidPaths();
+  const lines: string[] = [];
+  lines.push("[addroid status]");
+  lines.push("");
+
+  const config = await readAddroidConfig().catch(() => null);
+  lines.push(`  config        : ${config ? `${paths.configFile} (loaded)` : `${paths.configFile} (not found — \`addroid init\`)`}`);
+  if (config) {
+    lines.push(`  workspace     : ${config.workspace.slug} — ${config.workspace.displayName}`);
+    lines.push(`  database ref  : ${config.database.urlRef}`);
+    lines.push(
+      `  web bind      : ${config.web?.hostname ?? "127.0.0.1"}:${config.web?.port ?? 3000}`
+    );
+  }
+  lines.push("");
+
+  const state = await readUpState(paths);
+  if (!state) {
+    lines.push("  processes     : (not running — pid file 無し)");
+  } else {
+    const parentAlive = isProcessAlive(state.parentPid);
+    const webFailed = state.webStatus === "failed";
+    lines.push(`  mode          : ${state.mode}`);
+    lines.push(`  started at    : ${state.startedAt}`);
+    lines.push(
+      `  web URL       : ${state.webUrl}${
+        webFailed ? "  [web-failed — worker のみ稼働中]" : ""
+      }`
+    );
+    lines.push(
+      `  parent pid    : ${state.parentPid} ${parentAlive ? "[ ok  ]" : "[stopped]"}`
+    );
+    if (state.mode === "shared") {
+      const webLabel = webFailed
+        ? `worker only (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
+        : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
+      lines.push(`  web/worker    : ${webLabel}`);
+    } else {
+      const workerAlive = isProcessAlive(state.workerPid);
+      const webLabel = webFailed
+        ? `not running (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
+        : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
+      lines.push(`  web           : ${webLabel}`);
+      lines.push(
+        `  worker pid    : ${state.workerPid ?? "(none)"} ${
+          state.workerPid ? (workerAlive ? "[ ok  ]" : "[stopped]") : "[absent]"
+        }`
+      );
+    }
+  }
+  lines.push("");
+
+  const doctor = await readLatestDoctor();
+  if (doctor) {
+    lines.push(`  last doctor   : ${doctor.ranAt.toISOString()}  overall=${doctor.overall}`);
+  } else {
+    lines.push("  last doctor   : (記録なし — `addroid doctor` を実行すると残ります)");
+  }
+  lines.push("");
+  process.stdout.write(lines.join("\n"));
+  return 0;
+}
+
+async function readLatestDoctor(): Promise<DoctorRow | null> {
+  if (!process.env.DATABASE_URL) return null;
+  let mod: typeof import("@addroid/db");
+  try {
+    mod = await import("@addroid/db");
+  } catch {
+    return null;
+  }
+  const { prisma } = mod;
+  try {
+    const row = await prisma.doctorResult.findFirst({ orderBy: { ranAt: "desc" } });
+    return row
+      ? { ranAt: row.ranAt, overall: row.overall, checks: row.checks }
+      : null;
+  } catch {
+    return null;
+  } finally {
+    await prisma.$disconnect().catch(() => undefined);
+  }
+}

@@ -1,0 +1,246 @@
+# AdDroid OSS — CI workflow.
+#
+# 目的:
+#   - GitHub Actions can build, typecheck, test, package, and run npm publish dry-run.
+#   - The installed package exposes the `addroid` CLI bin and can run `addroid doctor`
+#     in a clean smoke-test environment.
+#
+# 構成:
+#   1) install         — npm ci (フル workspace)
+#   2) typecheck       — workspaces 全体
+#   3) db setup        — 使い捨て PostgreSQL service container に対し `npm run db:push`
+#                        を実行し、AdDroid 12 必須テーブルが作成されることを検証する
+#                        (acceptance: "Automated checks cover ... database setup ...")
+#   4) test            — workspaces 全体 (PostgreSQL なしで成立する unit / integration test のみ)
+#   5) build           — workspaces 全体 (web は next build、cli は esbuild バンドル)
+#   6) browser e2e     — `npm run test:browser` (apps/web/scripts/browser-test.mjs) を
+#                        使い捨て PostgreSQL + ubuntu-latest 標準の Google Chrome に対して実行し、
+#                        Web UI SSR (全 SideNav ルート) / API interaction / browser flow を検証する
+#                        (acceptance: "Automated checks cover ... Web UI" /
+#                         "Browser/E2E evidence proves the final local Web UI is navigable")
+#   7) package         — `apps/cli` を `npm pack` し、tarball をクリーンな temp dir に install して
+#                        `addroid --help` / `addroid doctor` が動くことを検証する smoke test
+#   8) publish-dry-run — `npm publish --dry-run --access public --workspace apps/cli`
+#                        (実 publish は人間の承認を経て、別ワークフローから手動 dispatch する)
+#
+# 重要:
+#   - 本ワークフローは `npm publish` を実行しない (dry-run のみ)。
+#   - secret や `NPM_TOKEN` への依存はなく、fork からの PR でも完全に走る。
+#   - `prisma generate` が typecheck の前段で必要 (apps/cli, apps/worker, apps/web は @prisma/client の型に依存)。
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-package:
+    name: build / typecheck / test / package
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      # CI で外部 API を絶対に叩かないためのフェイルクローズ既定値。
+      # 個別ジョブは必要に応じて上書きする。
+      ADDROID_META_ADS_CLI_MOCK: "1"
+      ADDROID_GITHUB_OAUTH_MOCK: "1"
+      ADDROID_LLM_MOCK: "1"
+      # smoke-test / typecheck で `~/.addroid` を汚さないため、CI 専用の HOME-anchored ディレクトリを使う。
+      ADDROID_HOME: ${{ github.workspace }}/.addroid-ci-home
+
+    # 使い捨て PostgreSQL サービスコンテナ。
+    # release-readiness check:
+    #   "Automated checks cover ... database setup ..."
+    # 本サービスは "Database setup" ステップ専用で、tests / smoke-test では
+    # DATABASE_URL を渡さないため接続されない (DB 不要なテスト郡は従来どおり skip)。
+    # POSTGRES_USER=POSTGRES_DB=addroid とすることで、
+    # ロール `addroid` がそのまま `addroid` DB のオーナーとなり、
+    # CREATE SCHEMA pgboss / Prisma db push がそのまま成立する
+    # (prisma/README.md §"DB 反映" に記述された operator setup と同等)。
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: addroid
+          POSTGRES_PASSWORD: addroid
+          POSTGRES_DB: addroid
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U addroid -d addroid"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js (from .nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+
+      - name: Print toolchain versions
+        run: |
+          node --version
+          npm --version
+
+      - name: OSS hygiene scan (secrets / personal paths / hardcoded values)
+        # release-readiness check:
+        #   "Secret/hardcoded-value scans find no committed token, personal path,
+        #    personal GitHub account, local credential, or unsafe environment default."
+        # Runs before `npm ci` so that an offending commit fails fast without
+        # paying the dependency-install cost. Pure stdlib Node — no install needed.
+        run: node scripts/oss-hygiene-scan.mjs
+
+      - name: Install dependencies (npm ci, workspaces)
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate Prisma client
+        # @prisma/client の型を typecheck の前に展開する。DB には接続しない。
+        run: npm run db:generate
+
+      - name: Typecheck (all workspaces)
+        run: npm run typecheck
+
+      - name: Database setup (`db:push` against disposable PostgreSQL)
+        # release-readiness check:
+        #   "Automated checks cover init/doctor/up, **database setup**, worker startup, ..."
+        # 本ステップは GitHub Actions の使い捨て PostgreSQL service container に対して
+        # operator が初回セットアップで実行する `npm run db:push` をそのまま走らせ、
+        # AdDroid 12 必須テーブル (workspaces / oauth_tokens / ad_accounts /
+        # ads_hierarchy / performance_snapshots / ai_runs / github_pull_requests /
+        # approval_records / cron_runs / execution_logs / audit_logs / creatives) が
+        # 実 PostgreSQL に作成されることを検証する。
+        #
+        # DATABASE_URL は本ステップだけに限定して渡す (job 全体には渡さない)。
+        # これにより、DB を持たない前提の test / smoke-test ステップは従来どおり
+        # DB 必須テストを skip し、本ステップだけが実 DB に接続する。
+        env:
+          DATABASE_URL: postgres://addroid:addroid@localhost:5432/addroid  # oss-hygiene-allow: ephemeral CI postgres service container; disposed at job end.
+        run: |
+          set -euo pipefail
+          # 1) サービスコンテナの起動確認 (health check で起動済みのはずだが冗長で安全)。
+          for _ in $(seq 1 30); do
+            if PGPASSWORD=addroid psql -h localhost -U addroid -d addroid -c 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          PGPASSWORD=addroid psql -h localhost -U addroid -d addroid -v ON_ERROR_STOP=1 -c 'SELECT version();'
+
+          # 2) prisma/README.md と同等の public schema 所有権セットアップ。
+          #    POSTGRES_USER=addroid で起動しているため通常は不要だが、
+          #    operator が辿る setup 手順に CI でも忠実に従う。
+          PGPASSWORD=addroid psql -h localhost -U addroid -d addroid -v ON_ERROR_STOP=1 \
+            -c "ALTER SCHEMA public OWNER TO addroid;" \
+            -c "GRANT ALL ON SCHEMA public TO addroid;"
+
+          # 3) Prisma スキーマを反映 (operator が走らせる `npm run db:push` と同じ動線)。
+          #    --skip-generate: 既に prisma generate 済みなので再生成しない。
+          #    --accept-data-loss: 空 DB のため実害なし、対話プロンプトを抑止する防御的フラグ。
+          npm run db:push -- --skip-generate --accept-data-loss
+
+          # 4) 12 必須テーブルが本当に PostgreSQL 内に作成されたかを検証する。
+          REQUIRED_TABLES="workspaces,oauth_tokens,ad_accounts,ads_hierarchy,performance_snapshots,ai_runs,github_pull_requests,approval_records,cron_runs,execution_logs,audit_logs,creatives"
+          ACTUAL=$(PGPASSWORD=addroid psql -h localhost -U addroid -d addroid -t -A -v ON_ERROR_STOP=1 \
+            -c "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY(string_to_array('${REQUIRED_TABLES}', ',')::text[]);")
+          if [ "${ACTUAL}" != "12" ]; then
+            echo "FAIL: db:push did not create all 12 required AdDroid tables (found ${ACTUAL}/12)."
+            PGPASSWORD=addroid psql -h localhost -U addroid -d addroid -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
+            exit 1
+          fi
+          echo "ok: 12/12 required AdDroid tables created by db:push."
+
+      - name: Run tests (all workspaces, --if-present)
+        # 本ステップは PostgreSQL を必要としない unit / integration test のみが走る。
+        # DATABASE_URL を渡さないため、DB 必須テストは個々の suite で skip される。
+        # (DB 接続を伴うスキーマ反映の検証は直前の "Database setup" ステップで実施済み。)
+        run: npm test
+
+      - name: Build all workspaces (web / worker / cli)
+        # `npm run build --workspaces --if-present` を実行する。
+        #   - apps/web : `next build`            (Next.js production build)
+        #   - apps/cli : `node build.mjs`        (esbuild で `dist/index.mjs` を出力)
+        #   - apps/worker : `tsc --noEmit`       (tsx で常駐起動するため bundle artifact は不要。
+        #                                         ただし build phase で worker workspace が
+        #                                         silently skip されないよう、TypeScript の
+        #                                         strict build verification を必ず走らせる)
+        #   - packages/*  : build script を持たない (workspace 間で TypeScript ソースを共有する
+        #                   設計のため emit しない。`--if-present` で意図的に skip される)
+        run: npm run build
+
+      - name: Browser / Web UI E2E (`npm run test:browser`)
+        # release-readiness check:
+        #   "Automated checks cover ... Web UI."
+        #   "Browser/E2E evidence proves the final local Web UI is navigable
+        #    and primary flows do not show broken or placeholder-only states."
+        #
+        # 本ステップは apps/web/scripts/browser-test.mjs を CI 上で実行し、
+        # 以下を gate に組み込む:
+        #   * 全 SideNav 主要ルート (/ /accounts /plans /campaigns /improvements
+        #     /creatives /github /approvals /cron /cron/runs /cron/audit /logs
+        #     /setup) の SSR 200 OK と primary nav の出力。
+        #   * Web UI のクライアントコントロールが叩く API endpoint の validation。
+        #   * Chromium (Google Chrome 標準パス) を CDP で driver する browser flow
+        #     (/approvals 一覧 + 詳細 / cron toggle / cron schedule edit / run-now)。
+        #
+        # 必要条件:
+        #   - PostgreSQL: 上の "Database setup" ステップで既に起動 + `db:push` 済み。
+        #     DATABASE_URL を本ステップにも渡し、harness の prisma fixture seed が
+        #     成立する状態にする。
+        #   - Chrome: ubuntu-latest runner には Google Chrome (/usr/bin/google-chrome)
+        #     が標準で同梱されている。harness の CHROME_CANDIDATES に含まれているため
+        #     追加 install は不要。
+        #
+        # opt-out:
+        #   - 本ステップでは `ADDROID_BROWSER_TEST_OPT_OUT` を設定しない。Chrome / DB
+        #     どちらかが欠ける CI では ブラウザー検証 は失敗扱いとし、
+        #     opt-out は手動 dispatch / 別 workflow に限定する (CONTRIBUTING.md §2)。
+        env:
+          DATABASE_URL: postgres://addroid:addroid@localhost:5432/addroid  # oss-hygiene-allow: ephemeral CI postgres service container; disposed at job end.
+          ADDROID_META_ADS_CLI_MOCK: "1"
+          ADDROID_GITHUB_OAUTH_MOCK: "1"
+          ADDROID_LLM_MOCK: "1"
+        run: npm run test:browser
+
+      - name: Package smoke test (`@addroid/cli`)
+        # apps/cli/scripts/smoke-test.mjs:
+        #   npm pack → temp dir に install → addroid --help / addroid doctor を verify。
+        # ネットワーク・DB を一切叩かない。
+        run: npm run package:smoke
+
+      - name: npm publish dry-run (`@addroid/cli`)
+        # release-readiness constraint:
+        #   実 publish は人間承認なしに行わない。本 step は --dry-run で公開予定の
+        #   tarball 内容を出力するのみで、副作用を起こさない。
+        run: npm run publish:dry-run
+
+      - name: Pack CLI tarball (artifact upload用)
+        # `--dry-run` は tarball をディスクに残さないため、artifact 用に明示的に pack する。
+        # 中身は smoke-test で検証済みのものと一致する (`prepack` で同じ build を走らせる)。
+        run: npm pack --workspace apps/cli
+
+      - name: Upload CLI tarball as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: addroid-cli-tarball
+          path: addroid-cli-*.tgz
+          if-no-files-found: ignore
+          retention-days: 7

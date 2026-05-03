@@ -1,0 +1,25 @@
+{
+  "name": "@addroid/queue",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"src/__tests__/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@addroid/llm-provider": "*",
+    "@addroid/yaml-schemas": "*",
+    "pg-boss": "^10.1.5"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/node": "^20.11.30",
+    "tsx": "^4.16.5"
+  }
+}

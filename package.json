@@ -1,0 +1,56 @@
+{
+  "name": "addroid-oss",
+  "private": true,
+  "version": "0.0.0",
+  "description": "AdDroid OSS — self-hostable, GitOps-driven Meta ad operations console.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/addroid-oss/addroid#readme",
+  "bugs": {
+    "url": "https://github.com/addroid-oss/addroid/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/addroid-oss/addroid.git"
+  },
+  "author": "The AdDroid OSS Authors",
+  "keywords": [
+    "addroid",
+    "meta-ads",
+    "facebook-ads",
+    "gitops",
+    "operator-console",
+    "self-hosted",
+    "localhost-only",
+    "outbound-only"
+  ],
+  "engines": {
+    "node": ">=22.11.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "test:browser": "npm run test:browser --workspace apps/web",
+    "dev": "npm run dev --workspace apps/web -- --hostname 127.0.0.1",
+    "dev:worker": "npm run dev --workspace apps/worker",
+    "db:generate": "prisma generate --schema prisma/schema.prisma",
+    "db:push": "prisma db push --schema prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema prisma/schema.prisma",
+    "addroid": "npm run --workspace apps/cli start --",
+    "package:cli": "npm run build --workspace apps/cli",
+    "package:smoke": "npm run package:smoke --workspace apps/cli",
+    "publish:dry-run": "npm publish --workspace apps/cli --dry-run --access public",
+    "oss:hygiene": "node scripts/oss-hygiene-scan.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "prisma": "^5.18.0",
+    "tsx": "^4.16.5",
+    "typescript": "^5.5.4"
+  }
+}
