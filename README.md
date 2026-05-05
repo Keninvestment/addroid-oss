@@ -131,21 +131,28 @@ AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。
 - [Create app](https://developers.facebook.com/apps/create/)
 - [Meta: Create an app](https://developers.facebook.com/docs/development/create-an-app/)
 - [Meta Marketing API](https://developers.facebook.com/docs/marketing-api/)
+- [Meta Marketing API: Get Started](https://developers.facebook.com/docs/marketing-apis/get-started)
+- [Meta: Install Apps, Generate, Refresh, and Revoke System User Tokens](https://developers.facebook.com/docs/marketing-api/system-users/install-apps-and-generate-tokens)
 - [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 
 手順:
 
 1. [Meta for Developers](https://developers.facebook.com/) にログインし、必要なら開発者登録を完了します。
 2. [Apps dashboard](https://developers.facebook.com/apps/) で **Create app** を押します。
-3. 用途は Business / business integration / manage business assets に近いものを選びます。Business Portfolio への紐付けを求められた場合は、広告アカウントを管理している Business を選びます。
-4. Product で **Marketing API** を有効化します。
-5. token を発行します。非エンジニア向けの長期運用では、Meta Business Suite / Business Settings で System User を作成し、広告アカウントを割り当てて System User Access Token を生成する方式を推奨します。検証だけなら Graph API Explorer で User Access Token を生成しても構いませんが、期限切れしやすい点に注意してください。
-6. Permission / scope は、まず `ads_read`, `ads_management` を使います。Business 配下の資産取得で必要な場合は `business_management` も付与します。
-7. 初回セットアップ後、Meta アカウント連携は次で行います。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
+3. app type は **Business** を選びます。Business Portfolio への紐付けを求められた場合は、広告アカウントを管理している Business を選びます。
+4. App Dashboard の **Add products** から **Marketing API** を有効化します。
+5. 長期運用では System User Access Token を推奨します。Meta Business Settings で **Users > System Users** を開き、System User を作成または選択します。
+6. 同じ System User 画面で **Add Assets** を押し、対象の **Ad Account** と **App** を割り当てます。広告の作成・更新まで行う場合は、Ad Account 側の権限を Admin 相当にしてください。
+7. System User を選んだ状態で **Generate New Token** を押し、手順 2-4 で用意した Business App を選択します。
+8. Permission / scope は、まず `ads_read`, `ads_management` を選びます。Business 配下の資産取得で必要な場合は `business_management` も付与します。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
+9. 表示された token は、その画面を離れると再表示できない前提で安全な場所に一時保管します。AdDroid へ登録した後は、平文を共有・コミットしないでください。
+10. 初回セットアップ後、Meta アカウント連携は次で行います。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
 ```bash
 npm run addroid -- auth meta
 ```
+
+検証だけなら [Graph API Explorer](https://developers.facebook.com/tools/explorer/) で User Access Token を生成して使うこともできます。ただし User token は個人ログインに紐付き、期限切れしやすいため、非エンジニアが継続運用する AdDroid では System User Access Token を標準手順とします。
 
 Access Token はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
 などには貼らず、`addroid auth meta` の入力欄にだけ貼ってください。AdDroid は token を
