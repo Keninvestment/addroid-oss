@@ -14,16 +14,17 @@ export const dynamic = "force-dynamic";
 
 export async function POST(
   _request: Request,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
-  if (!isCronPresetName(params.name)) {
+  const { name } = await params;
+  if (!isCronPresetName(name)) {
     return NextResponse.json(
-      { ok: false, error: `Unknown cron preset: ${params.name}` },
+      { ok: false, error: `Unknown cron preset: ${name}` },
       { status: 400 }
     );
   }
 
-  const result = await runCronNow(params.name);
+  const result = await runCronNow(name);
   if (!result.ok) {
     return NextResponse.json(
       { ok: false, error: result.error },

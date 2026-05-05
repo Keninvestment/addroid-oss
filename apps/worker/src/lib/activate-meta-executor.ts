@@ -407,7 +407,7 @@ export interface ActivateExecutorSelection {
 }
 
 /**
- * env と Meta OAuth 状態から、Activate に使う executor を決定する。
+ * env と Meta token 状態から、Activate に使う executor を決定する。
  *
  * - `ADDROID_META_CLI_BIN` 未設定 → fail-closed `MockActivateExecutor`
  *   (Activate は実 Meta API への副作用を起こす最終操作なので、CLI 未設定状態で

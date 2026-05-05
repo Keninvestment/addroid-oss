@@ -1,4 +1,4 @@
-// AdDroid OSS — Meta OAuth token persistence boundary.
+// AdDroid OSS — Meta token persistence boundary.
 //
 // adapter は `oauth_tokens` テーブルを直接触らず、本 interface 越しに保存/取得する。
 // 暗号化は adapter 側で実施し、Store には常に ciphertext を渡す。

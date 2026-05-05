@@ -11,9 +11,7 @@ const nextConfig = {
     // 画像最適化を行わない (outbound-only ポリシー & ローカル静的アセットのみ想定)
     unoptimized: true,
   },
-  experimental: {
-    typedRoutes: false,
-  },
+  typedRoutes: false,
   // 共有 packages/* を Next.js のトランスパイル対象に含める
   transpilePackages: [
     "@addroid/db",

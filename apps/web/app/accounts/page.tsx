@@ -1,6 +1,6 @@
 // AdDroid OSS — /accounts ページ.
 //
-// Meta OAuth 接続状態、Business 一覧 (runtime cache 由来)、登録済み Ad Account 一覧、
+// Meta 接続状態、Business 一覧 (runtime cache 由来)、登録済み Ad Account 一覧、
 // デフォルトアカウント選択、再認証フロー、再認証履歴 を 1 ページに集約する。
 //
 // 設計原則:
@@ -176,7 +176,7 @@ export default async function AccountsPage({
     <>
       <PageHeader
         title="Meta Accounts"
-        subtitle="Meta Login for Business 接続、Business 一覧、Ad Account の登録、デフォルト切替、再認証。"
+        subtitle="Meta Access Token 接続、Ad Account の登録、デフォルト切替、再認証。"
       />
 
       <div className="page-body page-body--single">
@@ -192,11 +192,11 @@ export default async function AccountsPage({
               title="Meta と未連携です。"
               description={
                 adapterChoice === "stub"
-                  ? `Meta OAuth が未設定です: ${adapterReason}。addroid init で Meta App ID / App Secret を設定してください。どちらも暗号化されて保存されます。`
-                  : "下のボタンから Meta OAuth を開始してください。OAuth client は ~/.addroid/secrets.local.yaml の暗号化済み設定を参照します。"
+                  ? `Meta token support が未設定です: ${adapterReason}。addroid init で ENCRYPTION_KEY を設定してください。`
+                  : "CLI で `addroid auth meta` を実行し、Meta Access Token を暗号化保存してください。OAuth callback を使う場合のみ下のボタンを利用できます。"
               }
               action={
-                adapterChoice !== "stub" ? (
+                adapterChoice === "real" || adapterChoice === "mock" ? (
                   <a className="btn btn--primary" href="/api/oauth/meta/begin">
                     Connect Meta
                   </a>
@@ -223,7 +223,7 @@ export default async function AccountsPage({
                   {
                     label: "Adapter",
                     value: (
-                      <StatusBadge state={adapterChoice === "real" ? "ok" : adapterChoice === "mock" ? "info" : "warn"}>
+                      <StatusBadge state={adapterChoice === "real" || adapterChoice === "token" ? "ok" : adapterChoice === "mock" ? "info" : "warn"}>
                         {adapterChoice}
                       </StatusBadge>
                     ),
@@ -259,6 +259,7 @@ export default async function AccountsPage({
               <ReauthButton
                 expired={expiryClass === "error"}
                 expiringSoon={expiryClass === "warn"}
+                oauthRefreshAvailable={adapterChoice === "real" || adapterChoice === "mock"}
               />
             </div>
           )}
@@ -268,8 +269,8 @@ export default async function AccountsPage({
           title="Businesses"
           subtitle={
             cache
-              ? `Meta GraphQL から取得 · 最終取得 ${cache.fetchedAt.toISOString()}`
-              : "Meta GraphQL の runtime cache (再起動後は再取得が必要)"
+              ? `Meta Graph API から取得 · 最終取得 ${cache.fetchedAt.toISOString()}`
+              : "Meta Graph API の runtime cache (再起動後は再取得が必要)"
           }
           status={
             <RefreshBusinessesButton disabled={!oauth || adapterChoice === "stub"} />
@@ -317,7 +318,7 @@ export default async function AccountsPage({
           {accounts.length === 0 ? (
             <EmptyState
               title="登録済みの Ad Account はありません。"
-              description="Meta と連携すると、Meta GraphQL から取得した Ad Account を自動で登録します。手動で追加するには右上の Add account を使用してください。"
+              description="Meta と連携すると、Meta Graph API から取得した Ad Account を自動で登録します。手動で追加するには右上の Add account を使用してください。"
             />
           ) : (
             <SetDefaultAccountForm
@@ -342,7 +343,7 @@ export default async function AccountsPage({
             empty={
               <EmptyState
                 title="再認証イベントはまだありません。"
-                description="Meta OAuth の接続・再認証・期限切れがここに記録されます。"
+                description="Meta 接続・再認証・期限切れがここに記録されます。"
               />
             }
             columns={[
@@ -391,7 +392,7 @@ function renderBanner(
   if (oauth === "error") {
     return (
       <div className="banner" data-state="error">
-        <span className="banner__title">Meta OAuth に失敗しました</span>
+        <span className="banner__title">Meta 接続に失敗しました</span>
         <span>{reason ?? "詳細不明のエラー。/setup の Doctor 結果を確認してください。"}</span>
       </div>
     );

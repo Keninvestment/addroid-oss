@@ -1,0 +1,101 @@
+// AdDroid OSS — Stored-token Meta adapter.
+//
+// Manual Access Token 登録で保存された `oauth_tokens(provider="meta")` を使う
+// adapter。OAuth client (App ID / Secret / redirect URI) が無くても、保存済み
+// token で /me/adaccounts 等を取得し、Meta Ads CLI へ短命に token を渡せる。
+
+import {
+  fetchAdAccounts as fetchAdAccountsApi,
+  fetchBusinesses as fetchBusinessesApi,
+} from "./api.js";
+import {
+  MetaAdapterNotImplementedError,
+  MetaAdapterUnauthenticatedError,
+  MetaTokenExpiredError,
+  type MetaAccessTokenLease,
+  type MetaAdAccount,
+  type MetaAdapter,
+  type MetaBeginOAuthResult,
+  type MetaBusiness,
+  type MetaOAuthConnection,
+  type MetaRefreshResult,
+} from "./types.js";
+import type { MetaOAuthTokenRecord, MetaOAuthTokenStore } from "./token-store.js";
+import type { CryptoEncryptDecrypt } from "./real.js";
+
+export interface StoredTokenMetaAdapterDeps {
+  tokenStore: MetaOAuthTokenStore;
+  crypto: CryptoEncryptDecrypt;
+  fetchImpl?: typeof fetch;
+}
+
+export class StoredTokenMetaAdapter implements MetaAdapter {
+  private readonly tokenStore: MetaOAuthTokenStore;
+  private readonly crypto: CryptoEncryptDecrypt;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(deps: StoredTokenMetaAdapterDeps) {
+    this.tokenStore = deps.tokenStore;
+    this.crypto = deps.crypto;
+    this.fetchImpl = deps.fetchImpl ?? fetch;
+  }
+
+  async beginOAuth(): Promise<MetaBeginOAuthResult> {
+    throw new MetaAdapterNotImplementedError("beginOAuth");
+  }
+
+  async completeOAuth(): Promise<MetaOAuthConnection> {
+    throw new MetaAdapterNotImplementedError("completeOAuth");
+  }
+
+  async refreshLongLivedToken(): Promise<MetaRefreshResult> {
+    throw new MetaAdapterNotImplementedError("refreshLongLivedToken");
+  }
+
+  async loadAccessTokenPlaintext(): Promise<MetaAccessTokenLease | null> {
+    const rec = await this.tokenStore.loadOAuthToken("meta");
+    if (!rec) return null;
+    if (rec.expiresAt && rec.expiresAt.getTime() < Date.now()) {
+      throw new MetaTokenExpiredError(rec.expiresAt);
+    }
+    return {
+      accessToken: this.crypto.decrypt(rec.accessTokenCiphertext),
+      scopes: rec.scopes,
+      expiresAt: rec.expiresAt ?? null,
+      accountIdentifier: rec.accountIdentifier,
+    };
+  }
+
+  async fetchBusinesses(): Promise<MetaBusiness[]> {
+    const lease = await this.requireLease("fetch businesses");
+    return fetchBusinessesApi({
+      accessToken: lease.accessToken,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  async fetchAdAccounts(): Promise<MetaAdAccount[]> {
+    const lease = await this.requireLease("fetch ad accounts");
+    return fetchAdAccountsApi({
+      accessToken: lease.accessToken,
+      fetchImpl: this.fetchImpl,
+    });
+  }
+
+  private async requireLease(op: string): Promise<MetaAccessTokenLease> {
+    const rec = await this.tokenStore.loadOAuthToken("meta");
+    if (!rec) throw new MetaAdapterUnauthenticatedError(op);
+    if (rec.expiresAt && rec.expiresAt.getTime() < Date.now()) {
+      throw new MetaTokenExpiredError(rec.expiresAt);
+    }
+    return {
+      accessToken: this.crypto.decrypt(rec.accessTokenCiphertext),
+      scopes: rec.scopes,
+      expiresAt: rec.expiresAt ?? null,
+      accountIdentifier: rec.accountIdentifier,
+    };
+  }
+}
+
+// 型を export 経路に通すための無参照参照。
+export type _StoredTokenRecordRef = MetaOAuthTokenRecord;

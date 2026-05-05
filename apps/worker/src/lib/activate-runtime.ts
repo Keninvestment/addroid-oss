@@ -189,7 +189,7 @@ export interface ExecuteActivateOptions {
 
 /**
  * Web/CLI/worker の任意経路から共通で呼ばれる Activate エントリ。
- * - executor を env + Meta OAuth 状態から解決
+ * - executor を env + Meta token 状態から解決
  * - Prisma を裏に持つ store を組み立て
  * - runActivate を実行し、結果と executor mode を返す
  */

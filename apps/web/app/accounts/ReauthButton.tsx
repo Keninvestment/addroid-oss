@@ -8,6 +8,7 @@ import { useState } from "react";
 interface Props {
   expired: boolean;
   expiringSoon: boolean;
+  oauthRefreshAvailable?: boolean;
 }
 
 interface Feedback {
@@ -16,7 +17,7 @@ interface Feedback {
   reauthRequired?: boolean;
 }
 
-export function ReauthButton({ expired, expiringSoon }: Props) {
+export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = true }: Props) {
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
@@ -57,6 +58,20 @@ export function ReauthButton({ expired, expiringSoon }: Props) {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (!oauthRefreshAvailable) {
+    return (
+      <div className="banner" data-state={expired ? "error" : expiringSoon ? "warn" : "ok"}>
+        <span className="banner__title">
+          {expired ? "Meta token の再入力が必要です" : "Manual token"}
+        </span>
+        <span>
+          Access Token 方式では OAuth refresh は使いません。更新する場合は CLI で{" "}
+          <code className="inline-code">addroid auth meta</code> を再実行してください。
+        </span>
+      </div>
+    );
   }
 
   const variant = expired || feedback?.variant === "error" ? "primary" : "default";

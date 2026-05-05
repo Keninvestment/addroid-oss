@@ -33,7 +33,7 @@ AdDroid は **localhost-only / outbound-only** で動作するセルフホスト
 - `secrets.local.yaml`, `secrets.local.yml`
 - AdDroid の `~/.addroid/` 配下のファイル一切
 - GitHub OAuth トークン / Personal Access Token
-- Meta OAuth アクセストークン / リフレッシュトークン
+- Meta Access Token / OAuth リフレッシュトークン
 - Slack Bot トークン (`xoxb-*`) / App-level トークン (`xapp-*`) / User トークン (`xoxp-*`)
 - Codex / OpenAI OAuth トークン / API Key
 - `ENCRYPTION_KEY` 値
@@ -151,7 +151,7 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 
 ## 5. Meta token / sandbox / mock の取扱い
 
-- Meta OAuth トークンは `oauth_tokens` (provider="meta") に AES-256-GCM で保存。
+- Meta Access Token / OAuth トークンは `oauth_tokens` (provider="meta") に AES-256-GCM で保存。
 - 開発・E2E では `ADDROID_META_OAUTH_MOCK=1` で `MockMetaAdapter` を選択。Mock は
   外部 `graph.facebook.com` への通信を一切行わず、in-memory `MockMetaSandbox` で
   campaign / adset / ad / creative / insights を deterministic に再現します。

@@ -16,11 +16,12 @@ interface Body {
 
 export async function POST(
   request: Request,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
-  if (!isCronPresetName(params.name)) {
+  const { name } = await params;
+  if (!isCronPresetName(name)) {
     return NextResponse.json(
-      { ok: false, error: `Unknown cron preset: ${params.name}` },
+      { ok: false, error: `Unknown cron preset: ${name}` },
       { status: 400 }
     );
   }
@@ -37,7 +38,7 @@ export async function POST(
     );
   }
 
-  const result = await setCronSchedule(params.name, payload.cron);
+  const result = await setCronSchedule(name, payload.cron);
   if (!result.ok) {
     return NextResponse.json(
       { ok: false, error: result.error },

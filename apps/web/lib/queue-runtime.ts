@@ -18,7 +18,6 @@ import type PgBoss from "pg-boss";
 import { bootPgBoss } from "@addroid/queue";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __addroidWebQueueBoss__: Promise<PgBoss> | undefined;
 }
 

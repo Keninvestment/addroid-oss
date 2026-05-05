@@ -59,7 +59,6 @@
     "@addroid/ops-template": "*",
     "@addroid/queue": "*",
     "@addroid/yaml-schemas": "*",
-    "@types/node": "^20.11.30",
     "esbuild": "^0.27.7",
     "tsx": "^4.16.5",
     "typescript": "^5.5.4"

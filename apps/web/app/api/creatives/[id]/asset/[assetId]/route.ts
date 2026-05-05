@@ -28,10 +28,9 @@ const CREATIVE_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export async function GET(
   _request: Request,
-  { params }: { params: { id: string; assetId: string } }
+  { params }: { params: Promise<{ id: string; assetId: string }> }
 ) {
-  const creativeId = params.id;
-  const assetId = params.assetId;
+  const { id: creativeId, assetId } = await params;
 
   if (!CREATIVE_ID_PATTERN.test(creativeId) || !ASSET_ID_PATTERN.test(assetId)) {
     return new NextResponse("Not found", { status: 404 });

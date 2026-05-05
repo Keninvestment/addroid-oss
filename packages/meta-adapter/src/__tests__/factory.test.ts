@@ -6,6 +6,7 @@ import {
   MockMetaAdapter,
   RealMetaAdapter,
   StubMetaAdapter,
+  StoredTokenMetaAdapter,
   selectMetaAdapter,
   type CryptoEncryptDecrypt,
   type MetaOAuthClientConfig,
@@ -52,6 +53,16 @@ test("selectMetaAdapter falls back to the stub when OAuth is not configured", as
   assert.equal(sel.choice, "stub");
   assert.ok(sel.adapter instanceof StubMetaAdapter);
   await assert.rejects(() => sel.adapter.beginOAuth(), MetaAdapterNotImplementedError);
+});
+
+test("selectMetaAdapter chooses stored-token adapter when crypto is configured without OAuth client", () => {
+  const sel = selectMetaAdapter({
+    env: {},
+    tokenStore: new InMemoryMetaTokenStore(),
+    crypto: CRYPTO,
+  });
+  assert.equal(sel.choice, "token");
+  assert.ok(sel.adapter instanceof StoredTokenMetaAdapter);
 });
 
 test("selectMetaAdapter mock adapter inherits a custom mockUserId", async () => {

@@ -100,7 +100,7 @@ function printHelp() {
       "  plan      ops repo から apply 案を simulate (--dry-run 必須)",
       "  activate  PAUSED 状態の Meta オブジェクトを ACTIVE に遷移 (Apply と別経路で監査)",
       "  cron      cron プリセットの list / enable / disable / set / run / logs (pg-boss + cron_schedules)",
-      "  auth      provider 別のトークン登録 (Meta OAuth / Slack Socket Mode)",
+      "  auth      provider 別のトークン登録 (Meta Access Token / Slack Socket Mode)",
       "  accounts  Meta Ad Account の取得・登録・デフォルト選択",
       "  backup    DATABASE_URL の DB を pg_dump で ~/.addroid/backups に保存 (Prisma + pg-boss を含む)",
       "  restore   pg_restore --clean --if-exists でダンプを復元 (実行前に `addroid down` を推奨)",

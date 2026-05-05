@@ -10,7 +10,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { getCryptoBoundary, readLocalSecrets } from "@addroid/config";
 import { runInit } from "../commands/init.js";
 
 interface Captured {
@@ -283,6 +282,11 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       const configRaw = fs.readFileSync(path.join(home, "config.yaml"), "utf8");
       assert.match(configRaw, /slug: agency-ops/);
       assert.match(configRaw, /displayName: Agency Ops/);
+      assert.match(out.stdout, /Meta Access Token setup:/);
+      assert.match(out.stdout, /実際の Meta 広告アカウント.*必須/);
+      assert.match(out.stdout, /OAuth callback ではなく Access Token 入力方式/);
+      assert.match(out.stdout, /HTTPS callback URL を用意する必要はありません/);
+      assert.match(out.stdout, /token 入力後.*Ad Account.*選択/);
       assert.match(out.stdout, /Ready\./);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
@@ -293,7 +297,7 @@ test("init --interactive は prompt の回答で .env / config を作る", async
   });
 });
 
-test("init --interactive は Meta OAuth App ID / App Secret を暗号化して secrets.local.yaml に保存する", async () => {
+test("init --interactive は Meta Access Token 入力方式を案内し OAuth secret を要求しない", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
     const env = {
@@ -305,8 +309,6 @@ test("init --interactive は Meta OAuth App ID / App Secret を暗号化して s
     const answers = [
       "Agency Ops",
       "postgresql://addroid:secret@localhost:5432/addroid",
-      "100000000000001",
-      "plain-meta-secret",
     ];
 
     const { code, out } = await capture(() =>
@@ -323,29 +325,21 @@ test("init --interactive は Meta OAuth App ID / App Secret を暗号化して s
           env,
           isTTY: true,
           prompt: async () => answers.shift() ?? "",
-          confirm: async (question) => question.includes("Meta OAuth App ID"),
+          confirm: async () => false,
           randomBytes: () => Buffer.alloc(32, 8),
         }
       )
     );
 
     assert.equal(code, 0, out.stdout + out.stderr);
-    const secrets = await readLocalSecrets(env);
-    const appIdCiphertext = secrets?.meta?.oauth?.appIdCiphertext;
-    const appSecretCiphertext = secrets?.meta?.oauth?.appSecretCiphertext;
-    assert.ok(appIdCiphertext);
-    assert.ok(appSecretCiphertext);
-    assert.notEqual(appIdCiphertext, "100000000000001");
-    assert.notEqual(appSecretCiphertext, "plain-meta-secret");
-    assert.equal(getCryptoBoundary(env).decrypt(appIdCiphertext), "100000000000001");
-    assert.equal(getCryptoBoundary(env).decrypt(appSecretCiphertext), "plain-meta-secret");
     const raw = fs.readFileSync(path.join(home, "secrets.local.yaml"), "utf8");
-    assert.doesNotMatch(raw, /100000000000001/);
-    assert.doesNotMatch(raw, /plain-meta-secret/);
     assert.doesNotMatch(raw, /appId:/);
     assert.doesNotMatch(raw, /appSecret:/);
-    assert.match(raw, /appIdCiphertext:/);
-    assert.match(raw, /appSecretCiphertext:/);
+    assert.doesNotMatch(raw, /appIdCiphertext:/);
+    assert.doesNotMatch(raw, /appSecretCiphertext:/);
+    assert.match(out.stdout, /Meta Access Token setup:/);
+    assert.match(out.stdout, /addroid auth meta/);
+    assert.doesNotMatch(out.stdout, /Valid OAuth Redirect URIs/);
   });
 });
 

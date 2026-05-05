@@ -87,8 +87,8 @@ export function createPrismaMetaTokenStore(prisma: PrismaClient): MetaOAuthToken
 }
 
 /**
- * `~/.addroid/secrets.local.yaml` 等から Meta OAuth クライアント設定を組み立てる。
- * App ID / Secret が揃わなければ null を返し、`selectMetaAdapter` は Stub に倒れる。
+ * `~/.addroid/secrets.local.yaml` 等から上級者向け Meta OAuth client 設定を組み立てる。
+ * App ID / Secret が揃わなければ null を返す。標準の token 入力方式では null でよい。
  */
 export async function loadMetaOAuthClientFromEnv(
   env: NodeJS.ProcessEnv = process.env
@@ -129,11 +129,12 @@ export interface BuildPrismaMetaAdapterOptions {
 }
 
 /**
- * Prisma 永続 token store + Meta OAuth client + crypto boundary から
+ * Prisma 永続 token store + 上級者向け Meta OAuth client + crypto boundary から
  * `selectMetaAdapter` を呼んで `MetaAdapterSelection` を返す。
  *
  * - `ADDROID_META_OAUTH_MOCK=1` → Mock
- * - OAuth client + crypto 揃う → Real (本番)
+ * - OAuth client + crypto 揃う → Real (上級者向け OAuth)
+ * - crypto のみ → StoredToken (標準の Access Token 入力方式)
  * - それ以外 → Stub (`loadAccessTokenPlaintext` は null を返し、後段で
  *   auth_error + reauth notify に変換される — regression fix/012 共通)
  */

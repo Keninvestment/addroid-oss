@@ -1,11 +1,12 @@
 // AdDroid OSS — Meta OAuth begin endpoint.
 //
 // `/accounts` ページの "Connect Meta" 導線から GET される。
-// 採用された adapter (mock / real / stub) によって挙動を切り替える:
+// 採用された adapter (mock / real / token / stub) によって挙動を切り替える:
 //   - mock : `addroid.invalid` の URL は実在しないので、内部 callback に code=mock-<state>
 //            でループバックさせ、ローカルだけで OAuth が完結する。
 //   - real : Facebook の authorize URL に 302 リダイレクトする。
-//   - stub : OAuth client / 暗号化境界が未設定。`/accounts` へ理由付きで戻す。
+//   - token: Access Token 標準経路。OAuth は CLI の `addroid auth meta --oauth` のみ。
+//   - stub : 暗号化境界が未設定。`/accounts` へ理由付きで戻す。
 
 import { NextResponse } from "next/server";
 import { getActiveMetaAdapter } from "../../../../../lib/meta-runtime";
@@ -16,11 +17,13 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   try {
     const { adapter, choice } = await getActiveMetaAdapter();
-    if (choice === "stub") {
+    if (choice === "stub" || choice === "token") {
       return NextResponse.redirect(
         new URL(
           `/accounts?oauth=error&reason=${encodeURIComponent(
-            "Meta OAuth client is not configured. Run addroid init to store encrypted meta.oauth.appIdCiphertext / appSecretCiphertext, and ensure ENCRYPTION_KEY is set."
+            choice === "token"
+              ? "Manual Access Token mode is active. Run `addroid auth meta` in your terminal, or use `addroid auth meta --oauth` only after configuring an HTTPS OAuth callback."
+              : "Meta token encryption is not configured. Run addroid init to set ENCRYPTION_KEY."
           )}`,
           url
         ),

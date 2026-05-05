@@ -1,6 +1,6 @@
 // `addroid auth <provider>` — provider 別の OAuth/トークン登録 CLI。
 //
-// Meta OAuth と Slack token 登録を CLI から実行する。
+// Meta Access Token / OAuth と Slack token 登録を CLI から実行する。
 //
 // `addroid auth slack`:
 //   入力: --xoxb / --xapp / --channel フラグ、または環境変数
@@ -44,8 +44,13 @@ import {
   type SocketModeChannelOpener,
 } from "@addroid/config";
 import {
+  buildAppAccessToken,
+  debugToken,
+  fetchAdAccounts,
+  fetchMeProfile,
   MetaAdapterNotImplementedError,
   MetaOAuthStateMismatchError,
+  MetaOAuthExchangeError,
   type MetaAdAccount,
   type MetaOAuthConnection,
 } from "@addroid/meta-adapter";
@@ -53,7 +58,11 @@ import {
   defaultApiKeyChatUrl,
   type ApiKeyLLMProviderName,
 } from "@addroid/llm-provider";
-import { buildPrismaMetaAdapterSelection } from "../../../worker/src/lib/meta-runtime.js";
+import {
+  buildPrismaMetaAdapterSelection,
+  createPrismaMetaTokenStore,
+  loadMetaOAuthClientFromEnv,
+} from "../../../worker/src/lib/meta-runtime.js";
 import {
   ensureCliWorkspace,
   formatAccountLine,
@@ -74,6 +83,8 @@ interface ParsedSlackArgs {
 
 interface ParsedMetaArgs {
   kind: "meta";
+  mode: "token" | "oauth";
+  accessToken?: string;
   asJson: boolean;
   openBrowser: boolean;
   selectDefault: boolean;
@@ -121,6 +132,8 @@ export interface SlackAuthRunOptions {
    * `now()` 注入 (テストで決定的にする用途)。
    */
   now?: () => Date;
+  /** Meta Graph API 用 fetch 注入。テストでモックする。 */
+  metaFetch?: typeof fetch;
 }
 
 export async function runAuthCommand(
@@ -138,7 +151,7 @@ export async function runAuthCommand(
     return 0;
   }
   if (parsed.kind === "meta") {
-    return await runAuthMeta(parsed);
+    return await runAuthMeta(parsed, opts);
   }
   if (parsed.kind === "llm") {
     return await runAuthLlm(parsed, opts);
@@ -157,6 +170,8 @@ function parseArgs(args: string[]): ParsedAction {
     return { kind: "help" };
   }
   if (provider === "meta") {
+    let mode: "token" | "oauth" = "token";
+    let accessToken: string | undefined;
     let asJson = false;
     let openBrowser = true;
     let selectDefault = true;
@@ -168,6 +183,27 @@ function parseArgs(args: string[]): ParsedAction {
       }
       if (a === "--json") {
         asJson = true;
+      } else if (a === "--oauth") {
+        mode = "oauth";
+      } else if (a === "--token" || a === "--manual") {
+        mode = "token";
+        const next = rest[i + 1];
+        if (next && !next.startsWith("--")) {
+          accessToken = next;
+          i += 1;
+        }
+      } else if (a.startsWith("--token=")) {
+        mode = "token";
+        accessToken = a.slice("--token=".length);
+      } else if (a === "--access-token") {
+        mode = "token";
+        const next = rest[i + 1];
+        if (!next) return optionMissing("auth meta", a);
+        accessToken = next;
+        i += 1;
+      } else if (a.startsWith("--access-token=")) {
+        mode = "token";
+        accessToken = a.slice("--access-token=".length);
       } else if (a === "--no-open") {
         openBrowser = false;
       } else if (a === "--no-select-default") {
@@ -203,7 +239,15 @@ function parseArgs(args: string[]): ParsedAction {
         stdoutHelp: true,
       };
     }
-    return { kind: "meta", asJson, openBrowser, selectDefault, timeoutMs };
+    return {
+      kind: "meta",
+      mode,
+      ...(accessToken !== undefined ? { accessToken } : {}),
+      asJson,
+      openBrowser,
+      selectDefault,
+      timeoutMs,
+    };
   }
 
   if (provider === "llm") {
@@ -564,7 +608,162 @@ function promptSecret(question: string): Promise<string> {
   });
 }
 
-async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
+async function runAuthMeta(
+  parsed: ParsedMetaArgs,
+  opts: SlackAuthRunOptions = {}
+): Promise<number> {
+  if (parsed.mode === "token") {
+    return runAuthMetaToken(parsed, opts);
+  }
+  return runAuthMetaOAuth(parsed);
+}
+
+async function runAuthMetaToken(
+  parsed: ParsedMetaArgs,
+  opts: SlackAuthRunOptions = {}
+): Promise<number> {
+  if (!process.env.DATABASE_URL) {
+    process.stderr.write(
+      "[addroid auth meta] DATABASE_URL が設定されていません。先に `addroid init` を実行してください。\n"
+    );
+    return 2;
+  }
+
+  let crypto: ReturnType<typeof getCryptoBoundary>;
+  try {
+    crypto = getCryptoBoundary(process.env);
+  } catch (err) {
+    const message =
+      err instanceof CryptoNotConfiguredError
+        ? err.message
+        : `ENCRYPTION_KEY の初期化に失敗しました: ${(err as Error).message}`;
+    process.stderr.write(`[addroid auth meta] ${message}\n`);
+    return 2;
+  }
+
+  const { prisma } = (await import("@addroid/db")) as {
+    prisma: MetaAccountsPrisma & { $disconnect: () => Promise<void> };
+  };
+  try {
+    const accessToken = (parsed.accessToken ?? (await promptSecret("Meta Access Token"))).trim();
+    if (!looksLikeMetaAccessToken(accessToken)) {
+      process.stderr.write(
+        "[addroid auth meta] Meta Access Token が空、または形式が不自然です。\n"
+      );
+      return 2;
+    }
+
+    const fetchImpl = opts.metaFetch ?? fetch;
+    const workspace = await ensureCliWorkspace(prisma);
+    const [me, adAccounts] = await Promise.all([
+      fetchMeProfile({ accessToken, fetchImpl }).catch(() => null),
+      fetchAdAccounts({ accessToken, fetchImpl, limit: 100 }),
+    ]);
+    if (adAccounts.length === 0) {
+      process.stderr.write(
+        "[addroid auth meta] この token で取得できる Ad Account がありません。ads_read / ads_management 権限と Business 側の割り当てを確認してください。\n"
+      );
+      return 1;
+    }
+
+    const debug = await tryDebugManualMetaToken(accessToken, fetchImpl);
+    const scopes = debug?.scopes ?? [];
+    const expiresAt =
+      typeof debug?.expiresAt === "number" && debug.expiresAt > 0
+        ? new Date(debug.expiresAt * 1000)
+        : null;
+    const missingScopes = requiredMetaScopesMissing(scopes);
+    const connectedAt = opts.now?.() ?? new Date();
+    const accountIdentifier = debug?.userId || me?.id || me?.name || "meta-token";
+    const tokenStore = createPrismaMetaTokenStore(prisma as never);
+    await tokenStore.saveOAuthToken({
+      provider: "meta",
+      accountIdentifier,
+      scopes,
+      accessTokenCiphertext: crypto.encrypt(accessToken),
+      expiresAt,
+      connectedAt,
+    });
+
+    const synced = await syncMetaAdAccounts(
+      prisma,
+      workspace.id,
+      adAccounts as readonly MetaAdAccount[]
+    );
+    const defaultAccount =
+      parsed.selectDefault && synced.accounts.length > 0
+        ? await chooseAndSetMetaDefault(prisma, workspace.id, synced.accounts)
+        : null;
+
+    await prisma.auditLog.create({
+      data: {
+        workspaceId: workspace.id,
+        actor: "user:meta-token",
+        action: "oauth.meta.connected",
+        target: `oauth_tokens:meta:${accountIdentifier}`,
+        ref: accountIdentifier,
+        metadata: {
+          authMethod: "manual_access_token",
+          scopes,
+          connectedAt: connectedAt.toISOString(),
+          expiresAt: expiresAt?.toISOString() ?? null,
+          adAccountsFetched: adAccounts.length,
+          adAccountsRegistered: synced.registered,
+          adAccountsUpdated: synced.updated,
+          missingRecommendedScopes: missingScopes,
+        },
+      },
+    });
+
+    if (parsed.asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: true,
+            provider: "meta",
+            authMethod: "manual_access_token",
+            accountIdentifier,
+            adAccounts: adAccounts.length,
+            registered: synced.registered,
+            updated: synced.updated,
+            defaultAccount,
+            scopes,
+            missingRecommendedScopes: missingScopes,
+            expiresAt: expiresAt?.toISOString() ?? null,
+          },
+          null,
+          2
+        )}\n`
+      );
+    } else {
+      process.stdout.write("[addroid auth meta]\n\n");
+      process.stdout.write("  auth method   : manual access token\n");
+      process.stdout.write(`  connected     : ${accountIdentifier}\n`);
+      process.stdout.write(`  ad accounts   : ${adAccounts.length}\n`);
+      process.stdout.write(`  registered    : ${synced.registered}\n`);
+      process.stdout.write(`  updated       : ${synced.updated}\n`);
+      process.stdout.write(
+        `  default       : ${defaultAccount?.metaAccountId ?? defaultAccount?.key ?? "unset"}\n`
+      );
+      process.stdout.write(`  expires       : ${expiresAt?.toISOString() ?? "unknown / never"}\n`);
+      if (scopes.length > 0) process.stdout.write(`  scopes        : ${scopes.join(", ")}\n`);
+      if (missingScopes.length > 0) {
+        process.stdout.write(
+          `  warning       : 推奨権限が不足している可能性があります (${missingScopes.join(", ")})\n`
+        );
+      }
+      process.stdout.write("  token         : encrypted (oauth_tokens.accessTokenCiphertext)\n");
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`[addroid auth meta] ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await prisma.$disconnect().catch(() => undefined);
+  }
+}
+
+async function runAuthMetaOAuth(parsed: ParsedMetaArgs): Promise<number> {
   if (!process.env.DATABASE_URL) {
     process.stderr.write(
       "[addroid auth meta] DATABASE_URL が設定されていません。先に `addroid init` を実行してください。\n"
@@ -591,7 +790,7 @@ async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
     if (adapterSelection.choice === "stub") {
       process.stderr.write(
         `[addroid auth meta] Meta OAuth が未設定です: ${adapterSelection.reason}\n` +
-          "  `addroid init` で Meta OAuth App ID / App Secret を設定してください (どちらも暗号化保存されます)。\n"
+          "  通常は `addroid auth meta` で Access Token を入力してください。OAuth callback 経路を使う場合のみ Meta OAuth client を環境変数または secrets.local.yaml に設定してください。\n"
       );
       return 2;
     }
@@ -666,6 +865,35 @@ async function runAuthMeta(parsed: ParsedMetaArgs): Promise<number> {
     callbackServer?.close();
     await prisma.$disconnect().catch(() => undefined);
   }
+}
+
+async function tryDebugManualMetaToken(
+  accessToken: string,
+  fetchImpl: typeof fetch
+): Promise<{ userId: string; scopes: string[]; expiresAt: number } | null> {
+  const client = await loadMetaOAuthClientFromEnv(process.env);
+  if (!client) return null;
+  try {
+    const info = await debugToken({
+      appAccessToken: buildAppAccessToken(client),
+      inputToken: accessToken,
+      fetchImpl,
+    });
+    if (!info.isValid) throw new MetaOAuthExchangeError("debugToken: token is not valid");
+    return { userId: info.userId, scopes: info.scopes, expiresAt: info.expiresAt };
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeMetaAccessToken(value: string): boolean {
+  return value.trim().length >= 20 && !/\s/.test(value.trim());
+}
+
+function requiredMetaScopesMissing(scopes: readonly string[]): string[] {
+  if (scopes.length === 0) return [];
+  const set = new Set(scopes);
+  return ["ads_read", "ads_management"].filter((scope) => !set.has(scope));
 }
 
 function resolveCliRedirectUri(): URL | null {
@@ -1104,15 +1332,19 @@ function printHelp() {
       "addroid auth — provider 別の OAuth/トークン登録",
       "",
       "Usage:",
-      "  addroid auth meta [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
+      "  addroid auth meta [--token <access_token>] [--no-select-default] [--json]",
+      "  addroid auth meta --oauth [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
       "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
       "  addroid auth llm --provider <openai|anthropic> [--api-key <key>] [--model <model>] [--base-url <url>] [--json]",
       "  addroid auth llm --provider <openai|anthropic> --disconnect [--json]",
       "",
       "Options:",
-      "  --no-open          Meta OAuth URL をブラウザで自動オープンしない",
-      "  --no-select-default Meta OAuth 後の Ad Account 既定選択をスキップ",
-      "  --timeout-ms <ms>  Meta OAuth callback 待機時間 (既定 180000)",
+      "  --token <token>    Meta Access Token。未指定時は非表示入力",
+      "  --access-token <token> --token と同じ",
+      "  --oauth            上級者向け: Meta OAuth callback 経路を使う",
+      "  --no-open          Meta OAuth URL をブラウザで自動オープンしない (--oauth 時のみ)",
+      "  --no-select-default Meta Ad Account 既定選択をスキップ",
+      "  --timeout-ms <ms>  Meta OAuth callback 待機時間 (既定 180000, --oauth 時のみ)",
       "  --xoxb <token>     Slack Bot User OAuth Token (xoxb-*)",
       "  --xapp <token>     Slack App-Level Token (xapp-*, Socket Mode 用)",
       "  --channel <id>     通知先チャンネル ID (Cxxxx / Gxxxx / Dxxxx)",
@@ -1129,8 +1361,9 @@ function printHelp() {
       "  OPENAI_API_KEY, ANTHROPIC_API_KEY, ADDROID_LLM_PROVIDER",
       "",
       "Notes:",
-      "  - Meta OAuth は localhost callback で完了し、長期トークンを暗号化して oauth_tokens に保存します。",
-      "  - Meta OAuth 後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
+      "  - Meta の標準経路は Access Token 入力です。HTTPS callback URL は不要です。",
+      "  - token 入力後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
+      "  - OAuth callback は `addroid auth meta --oauth` の上級者向け経路として残しています。",
       "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
       "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",
       "  - 平文トークンは ENCRYPTION_KEY (AES-256-GCM) で暗号化し oauth_tokens に保存します。",

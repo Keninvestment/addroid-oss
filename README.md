@@ -8,8 +8,8 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
 > **Status:** Initial OSS release candidate. `npm install` / `addroid init` /
 > `addroid up` の 3 コマンドでローカル起動が完結します。`addroid init` は uv /
 > Python / Meta Ads CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
-> Slack / Meta OAuth / LLM Provider / Image Provider は任意統合で、未設定でも core
-> ヘルスチェックを通過します。
+> Meta 広告アカウントを実際に利用するには Meta Access Token が必須です。未設定でも core
+> ヘルスチェックは通りますが、Apply / Activate / レポート取得はできません。
 
 ---
 
@@ -27,9 +27,9 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
   経由してから Meta に反映されます。
 - **Apply / Activate split**: PR merge から発火する Apply は新規オブジェクトを **PAUSED**
   で作成するのみで、ACTIVE 化は別経路 (`addroid activate` / Web UI / Slack) で行います。
-- **任意統合は idle で OK**: Slack / Meta / LLM Provider / Image Provider が未設定の状態で
-  Web UI は 200 OK を返し、Dashboard は idle 表示になります。任意統合不在を error として
-  扱いません。
+- **未設定統合は idle で OK**: Slack / Meta / LLM Provider / Image Provider が未設定の状態でも
+  Web UI は 200 OK を返し、Dashboard は idle 表示になります。ただし実際の Meta 広告アカウントを
+  利用するには Meta Access Token が必須です。
 
 詳細は [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) を参照してください。
 
@@ -52,7 +52,7 @@ Node.js 22.11 以上を使ってください。
 | `addroid init` | Python 3.12+ | Meta Ads CLI の実行環境 | uv-managed Python 3.13 を導入 |
 | `addroid init` | Meta Ads CLI | Meta 広告への insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
 | `addroid init` | PostgreSQL 16+ | AdDroid DB、queue、監査ログ | Homebrew / apt / dnf 等を実行前に確認 |
-| Meta 側で作成 | Meta Developer App | App ID / App Secret と OAuth 認証 | ユーザーが Meta for Developers で作成 |
+| Meta 側で発行 | Meta Access Token | Meta 広告アカウント接続、Apply / Activate、レポート取得 | ユーザーが Meta Business Suite / Graph API Explorer 等で発行 |
 
 `addroid init` は初回セットアップ中に次の依存を診断します。不足している場合は、
 実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う可能性がある
@@ -76,10 +76,10 @@ PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必�
 
 - `.env`: `DATABASE_URL`、`ENCRYPTION_KEY`、Meta Ads CLI のパス
 - `~/.addroid/config.yaml`: AdDroid のローカル設定
-- `~/.addroid/secrets.local.yaml`: Meta OAuth App ID / App Secret などの暗号化済み secret
+- `~/.addroid/secrets.local.yaml`: provider 固有の暗号化済み secret stub
 - `~/.addroid/storage` / `~/.addroid/logs` / `~/.addroid/run`: 実行時データ、ログ、pid file
 
-これらの secret 系ファイルは git 追跡対象外です。Meta OAuth App ID / App Secret は
+これらの secret 系ファイルは git 追跡対象外です。Meta Access Token は
 `ENCRYPTION_KEY` で暗号化され、平文では保存しません。
 
 ### サポート対象プラットフォーム
@@ -101,10 +101,10 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 詳細は [`docs/SETUP.md` §1](docs/SETUP.md) と
 [`docs/TROUBLESHOOTING.md` §0](docs/TROUBLESHOOTING.md) を参照してください。
 
-任意要件 (未設定でも core 動作可):
+実利用で必要な外部連携:
 
 - GitHub OAuth クライアント — ops repo bootstrap と PR ポーリングに必要
-- Meta OAuth クライアント — Apply / Activate 実行に必要 (sandbox / mock 経路で開発可能)
+- Meta Access Token — 実際の Meta 広告アカウント接続、Apply / Activate、レポート取得に必須
 - LLM Provider — AI workflow 実行に必要。初回セットアップでは OpenAI / Anthropic API key
   または Codex OAuth を選択できます (未設定時は StubLLMProvider で fail-closed)
 - Image Provider — クリエイティブ画像生成に必要。OpenAI API key は GPT Image 2 に再利用でき、
@@ -113,11 +113,16 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 ---
 
-## Meta App ID / App Secret の取得
+## Meta Access Token の取得
 
-Meta へ実際に接続して Apply / Activate するには、Meta for Developers で OAuth 用の
-App を作成し、App ID / App Secret を取得します。画面名は Meta 側で変わることが
-ありますが、流れは次の通りです。
+Meta へ実際に接続して Apply / Activate するには、Meta Marketing API を呼び出せる
+Access Token が必要です。AdDroid の標準セットアップは OAuth callback を使わず、
+`addroid auth meta` で token を貼り付ける方式です。ローカル利用のために HTTPS
+callback URL やトンネルサービスを用意する必要はありません。
+
+App ID / App Secret だけでは広告アカウントの読み書きはできません。Meta Ads CLI と
+AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。AdDroid は token
+入力後に取得できる Ad Account を表示し、利用するアカウントを選択します。
 
 公式リンク:
 
@@ -125,53 +130,56 @@ App を作成し、App ID / App Secret を取得します。画面名は Meta �
 - [Apps dashboard](https://developers.facebook.com/apps/)
 - [Create app](https://developers.facebook.com/apps/create/)
 - [Meta: Create an app](https://developers.facebook.com/docs/development/create-an-app/)
-- [Meta: Facebook Login for Business](https://developers.facebook.com/docs/facebook-login/facebook-login-for-business/)
 - [Meta Marketing API](https://developers.facebook.com/docs/marketing-api/)
+- [Graph API Explorer](https://developers.facebook.com/tools/explorer/)
 
 手順:
 
 1. [Meta for Developers](https://developers.facebook.com/) にログインし、必要なら開発者登録を完了します。
 2. [Apps dashboard](https://developers.facebook.com/apps/) で **Create app** を押します。
 3. 用途は Business / business integration / manage business assets に近いものを選びます。Business Portfolio への紐付けを求められた場合は、広告アカウントを管理している Business を選びます。
-4. App 作成後、App Dashboard の **Settings > Basic** で **App ID** を確認します。同じ画面の **App Secret** は `Show` などで表示してコピーします。
-5. Product で **Facebook Login for Business** を追加し、必要に応じて **Marketing API** も有効化します。
-6. Facebook Login for Business の OAuth 設定で **Valid OAuth Redirect URIs** に次を登録します。
-
-```text
-http://127.0.0.1:3000/api/oauth/meta/callback
-```
-
-`ADDROID_WEB_PORT` を変える場合は、ポート番号も同じ値にしてください。
-
-7. Permission / scope は、まず `ads_read`, `ads_management`, `business_management` を使います。App が Development mode の間は、基本的に App admin / developer / tester と、その人がアクセスできる Business / Ad Account で試してください。
-8. `npm run addroid -- init` の対話中に Meta OAuth App ID / App Secret を聞かれたら、ここで取得した値を入力します。どちらも暗号化されて `~/.addroid/secrets.local.yaml` に保存されます。
-9. 初回セットアップ後、Meta アカウント連携は次で行います。
+4. Product で **Marketing API** を有効化します。
+5. token を発行します。非エンジニア向けの長期運用では、Meta Business Suite / Business Settings で System User を作成し、広告アカウントを割り当てて System User Access Token を生成する方式を推奨します。検証だけなら Graph API Explorer で User Access Token を生成しても構いませんが、期限切れしやすい点に注意してください。
+6. Permission / scope は、まず `ads_read`, `ads_management` を使います。Business 配下の資産取得で必要な場合は `business_management` も付与します。
+7. 初回セットアップ後、Meta アカウント連携は次で行います。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
 ```bash
 npm run addroid -- auth meta
 ```
 
-App Secret はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
-などには貼らず、`addroid init` の入力欄にだけ貼ってください。
+Access Token はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
+などには貼らず、`addroid auth meta` の入力欄にだけ貼ってください。AdDroid は token を
+`ENCRYPTION_KEY` で暗号化して `oauth_tokens` に保存し、Meta Ads CLI 実行時だけ
+`ACCESS_TOKEN` / `AD_ACCOUNT_ID` として子プロセスに渡します。
+
+OAuth callback を使いたい上級者は `npm run addroid -- auth meta --oauth` を利用できます。
+この場合は HTTPS の callback URL を Meta App に登録できる環境が必要です。通常のローカル
+OSS 利用では token 入力方式を使ってください。
 
 ---
 
-## 3-command クイックスタート
+## クイックスタート
 
 ```bash
 # 1. 依存をインストール
 npm install
 
 # 2. 初回セットアップ
-#    uv / Python / Meta Ads CLI / PostgreSQL の不足分は確認しながら入れられます。
+#    uv / Python / Meta Ads CLI / PostgreSQL の不足分と、Meta Access Token の必要項目を確認できます。
 npm run addroid -- init
 
-# 3. web (127.0.0.1:3000) と worker (pg-boss) を起動
+# 3. 実際の Meta 広告アカウントを接続
+#    Meta Access Token を貼り付けると、取得できる Ad Account が表示されます。
+npm run addroid -- auth meta
+npm run addroid -- accounts select
+
+# 4. web (127.0.0.1:3000) と worker (pg-boss) を起動
 npm run addroid -- up
 ```
 
 `addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
-コマンドを見せた上で個別に確認します。
+コマンドを見せた上で個別に確認します。Meta token が未設定の場合は、Access Token の
+必要権限と `addroid auth meta` の手順を画面に表示します。
 
 初回セットアップで作成・設定されるもの:
 
@@ -181,6 +189,8 @@ npm run addroid -- up
 - PostgreSQL の `addroid` DB / role (ローカル既定ではランダム password を生成)
 - Prisma schema
 - uv-managed Python 3.13 と Meta Ads CLI
+- Meta Access Token: 実利用では必須。入力された値は暗号化して `oauth_tokens` に保存し、
+  取得できる Ad Account から既定アカウントを選択
 - LLM Provider: OpenAI / Anthropic API key は `addroid auth llm` 経由で暗号化保存、
   Codex OAuth は `addroid up` 後に `/ai` から接続
 - Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex OAuth の場合は
@@ -213,7 +223,7 @@ npm run addroid -- init --install-deps
 
 日次レポートは Meta Ads CLI の `ads insights get` を優先して使います。
 `ADDROID_META_CLI_BIN` が未設定の開発環境では mock insights に戻ります。CLI で取得できない
-柔軟な breakdown / attribution window が必要な場合は、Meta OAuth 認証済みの状態で
+柔軟な breakdown / attribution window が必要な場合は、Meta Access Token 登録済みの状態で
 `ADDROID_META_GRAPH_INSIGHTS_FALLBACK=1` を設定すると Graph API の read-only fallback を使えます。
 
 自然言語の自動運用リクエストは、直接 Meta を変更せず、まず
@@ -309,7 +319,7 @@ addroid/
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | プロセスモデル、モノレポ境界、Prisma スキーマ、cron preset、Apply / Activate split |
 | [`docs/SECURITY.md`](docs/SECURITY.md) | localhost-only / outbound-only 前提、token 暗号化、Meta / Slack / LLM トークン取扱、OSS リリース衛生 |
 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | よくある失敗モード (DB / `ENCRYPTION_KEY` / ポート競合 / OAuth / outbound 接続 / Slack Socket Mode / LLM 未設定) |
-| [`docs/META.md`](docs/META.md) | Meta OAuth セットアップ、sandbox / mock harness、Apply / Activate split |
+| [`docs/META.md`](docs/META.md) | Meta Access Token セットアップ、sandbox / mock harness、Apply / Activate split |
 | [`docs/SLACK.md`](docs/SLACK.md) | Slack Socket Mode セットアップ (任意)、manifest テンプレ、`/adops` subcommand |
 | [`docs/LLM_PROVIDER.md`](docs/LLM_PROVIDER.md) | Codex / OpenAI OAuth、`ADDROID_LLM_MOCK`、StubLLMProvider fail-closed、Image Provider |
 | [`docs/GITOPS.md`](docs/GITOPS.md) | ops repo 構成、PR ポーリング、3 つの merge 経路 (GitHub / Web / Slack) と承認境界 |

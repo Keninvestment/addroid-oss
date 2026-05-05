@@ -23,6 +23,10 @@ export {
   type RealMetaAdapterDeps,
 } from "./real.js";
 export {
+  StoredTokenMetaAdapter,
+  type StoredTokenMetaAdapterDeps,
+} from "./token-adapter.js";
+export {
   ADDROID_META_REQUIRED_SCOPES,
   META_AUTHORIZE_URL,
   META_GRAPH_API_VERSION,

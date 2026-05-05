@@ -23,11 +23,8 @@ import {
   ConfigParseError,
   defaultAddroidConfig,
   ensureAddroidPaths,
-  getCryptoBoundary,
   readAddroidConfig,
-  readLocalSecrets,
   writeAddroidConfig,
-  writeLocalSecrets,
   type AddroidConfig,
 } from "@addroid/config";
 import {
@@ -203,10 +200,11 @@ async function runNonInteractiveSetup(
   lines.push("");
   lines.push("Next steps:");
   lines.push("  1. addroid doctor");
-  lines.push("  2. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
-  lines.push("  3. addroid auth meta");
+  lines.push("  2. Meta Access Token を用意");
+  lines.push("  3. addroid auth meta                    # token 入力 + Ad Account 選択");
   lines.push("  4. addroid accounts select");
-  lines.push("  5. addroid up");
+  lines.push("  5. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
+  lines.push("  6. addroid up");
   lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
@@ -336,22 +334,21 @@ async function runInteractiveInit(
   }
 
   if (!opts.mockIntegrations) {
-    const configured = await maybeConfigureMetaOAuthSecrets({
-      env,
-      prompt,
+    const configured = await maybeConfigureMetaAccessToken({
       confirm,
       out,
       assumeYes: opts.yes,
     });
     const shouldConnect =
       configured &&
-      (opts.yes || (await confirm("Meta OAuth で接続して Ad Account を選択しますか?", true)));
+      !opts.yes &&
+      (await confirm("Meta Access Token を入力して Ad Account を選択しますか?", true));
     if (shouldConnect) {
       process.stdout.write(out.join("\n") + "\n");
       out.length = 0;
       const { runAuthCommand } = await import("./auth.js");
       const code = await runAuthCommand(["meta"]);
-      out.push(`  Meta OAuth    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+      out.push(`  Meta Token    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
       if (code !== 0) {
         out.push("                  後で `addroid auth meta` を実行してください。");
       }
@@ -367,54 +364,43 @@ async function runInteractiveInit(
   out.push("");
   out.push("Ready.");
   out.push("  1. addroid doctor");
-  out.push("  2. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
-  out.push("  3. addroid auth meta");
-  out.push("  4. addroid accounts select");
+  out.push("  2. addroid auth meta                    # Meta Access Token 入力 + Ad Account 選択");
+  out.push("  3. addroid accounts select");
+  out.push("  4. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
   out.push("  5. addroid up");
   out.push("");
   process.stdout.write(out.join("\n"));
   return 0;
 }
 
-async function maybeConfigureMetaOAuthSecrets(opts: {
-  env: NodeJS.ProcessEnv;
-  prompt: PromptFn;
+async function maybeConfigureMetaAccessToken(opts: {
   confirm: ConfirmFn;
   out: string[];
   assumeYes: boolean;
 }): Promise<boolean> {
-  const existing = await readLocalSecrets(opts.env).catch(() => null);
-  if (existing?.meta?.oauth?.appIdCiphertext && existing.meta.oauth.appSecretCiphertext) {
-    opts.out.push("  Meta OAuth    : client configured");
-    return true;
+  opts.out.push("");
+  opts.out.push("Meta Access Token setup:");
+  opts.out.push("  実際の Meta 広告アカウントを接続して Apply / Activate / レポート取得を行うには必須です。");
+  opts.out.push("  AdDroid の標準設定は OAuth callback ではなく Access Token 入力方式です。");
+  opts.out.push("  ローカル利用で HTTPS callback URL を用意する必要はありません。");
+  opts.out.push("  Meta Business Suite / Graph API Explorer 等で token を発行し、この後の入力欄に貼り付けます。");
+  opts.out.push("  必要な権限の目安: ads_read, ads_management。Business 配下の資産取得では business_management が必要になる場合があります。");
+  opts.out.push("  token 入力後、AdDroid が取得できる Ad Account を表示し、利用するアカウントを選択します。");
+  opts.out.push("  入力値は ENCRYPTION_KEY で暗号化し、平文では保存しません。");
+  process.stdout.write(opts.out.join("\n") + "\n");
+  opts.out.length = 0;
+
+  if (opts.assumeYes) {
+    opts.out.push("  Meta Token    : skipped (--yes では token 入力を省略)");
+    opts.out.push("                  後で `addroid auth meta` を実行してください。");
+    return false;
   }
-  const shouldConfigure =
-    !opts.assumeYes &&
-    (await opts.confirm("Meta OAuth App ID / App Secret を secrets.local.yaml に設定しますか?", false));
+  const shouldConfigure = await opts.confirm("Meta Access Token を今ここで設定しますか? (実利用には必須)", true);
   if (!shouldConfigure) {
-    opts.out.push("  Meta OAuth    : not configured");
+    opts.out.push("  Meta Token    : not configured");
+    opts.out.push("                  後で `addroid auth meta` を実行してください。");
     return false;
   }
-  const appId = (await opts.prompt("Meta App ID", "")).trim();
-  const appSecret = (await opts.prompt("Meta App Secret", "")).trim();
-  if (!appId || !appSecret) {
-    opts.out.push("  Meta OAuth    : skipped (App ID / App Secret が未入力)");
-    return false;
-  }
-  const crypto = getCryptoBoundary(opts.env);
-  const next = {
-    ...(existing ?? {}),
-    meta: {
-      ...(existing?.meta ?? {}),
-      oauth: {
-        ...(existing?.meta?.oauth ?? {}),
-        appIdCiphertext: crypto.encrypt(appId),
-        appSecretCiphertext: crypto.encrypt(appSecret),
-      },
-    },
-  };
-  const result = await writeLocalSecrets(next, opts.env);
-  opts.out.push(`  Meta OAuth    : ${result.path} ${result.wrote ? "(updated)" : "(unchanged)"}`);
   return true;
 }
 
@@ -1083,16 +1069,18 @@ function printScaffoldResult(result: ScaffoldResult): void {
   if (!process.env.DATABASE_URL) {
     lines.push("  1. addroid init --interactive    # .env / DB まで対話セットアップ");
     lines.push("  2. addroid doctor");
-    lines.push("  3. addroid auth llm --provider openai");
-    lines.push("  4. addroid auth meta");
+    lines.push("  3. Meta Access Token を用意");
+    lines.push("  4. addroid auth meta             # token 入力 + Ad Account 選択");
     lines.push("  5. addroid accounts select");
-    lines.push("  6. addroid up");
+    lines.push("  6. addroid auth llm --provider openai");
+    lines.push("  7. addroid up");
   } else {
     lines.push("  1. addroid doctor");
-    lines.push("  2. addroid auth llm --provider openai");
-    lines.push("  3. addroid auth meta");
+    lines.push("  2. Meta Access Token を用意");
+    lines.push("  3. addroid auth meta             # token 入力 + Ad Account 選択");
     lines.push("  4. addroid accounts select");
-    lines.push("  5. addroid up");
+    lines.push("  5. addroid auth llm --provider openai");
+    lines.push("  6. addroid up");
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -1203,6 +1191,10 @@ function printInitHelp(): void {
       "  --mock-integrations    初回検証用に mock フラグを .env に追加",
       "",
       "Interactive setup:",
+      "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",
+      "  標準設定では OAuth callback を使わず、token 入力後に取得可能な Ad Account を表示します。",
+      "  `addroid auth meta` で token を暗号化保存し、Ad Account を選択します。",
+      "  OAuth callback を使う上級者向け経路は `addroid auth meta --oauth` です。",
       "  LLM Provider は openai-api-key / anthropic-api-key / codex-oauth から選択できます。",
       "  API key は `addroid auth llm` 経由で ENCRYPTION_KEY により暗号化保存されます。",
       "",

@@ -183,7 +183,7 @@ export default async function DashboardPage() {
         <div className="col-span-6">
           <Panel
             title="Meta Ads"
-            subtitle="Meta OAuth と登録済み Ad Account"
+            subtitle="Meta Access Token と登録済み Ad Account"
             status={
               <StatusDot state={metaConnected ? "ok" : "warn"}>
                 {metaConnected ? "connected" : "not connected"}
@@ -193,8 +193,10 @@ export default async function DashboardPage() {
             <KeyValueList
               items={[
                 {
-                  label: "OAuth",
-                  value: metaConnected ? "Meta と連携済み" : "Meta と未連携 (/accounts から接続)",
+                  label: "Token",
+                  value: metaConnected
+                    ? "Meta と連携済み"
+                    : "Meta と未連携 (CLI で接続)",
                 },
                 {
                   label: "Active Ad Accounts",

@@ -15,11 +15,12 @@ interface Body {
 
 export async function POST(
   request: Request,
-  { params }: { params: { name: string } }
+  { params }: { params: Promise<{ name: string }> }
 ) {
-  if (!isCronPresetName(params.name)) {
+  const { name } = await params;
+  if (!isCronPresetName(name)) {
     return NextResponse.json(
-      { ok: false, error: `Unknown cron preset: ${params.name}` },
+      { ok: false, error: `Unknown cron preset: ${name}` },
       { status: 400 }
     );
   }
@@ -36,7 +37,7 @@ export async function POST(
     );
   }
 
-  const result = await toggleCron(params.name, payload.enabled);
+  const result = await toggleCron(name, payload.enabled);
   if (!result.ok) {
     return NextResponse.json(
       { ok: false, error: result.error },

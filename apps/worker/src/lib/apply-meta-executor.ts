@@ -842,7 +842,7 @@ export interface ApplyExecutorSelection {
 }
 
 /**
- * env と Meta OAuth 状態から、apply に使う executor を決定する。
+ * env と Meta token 状態から、apply に使う executor を決定する。
  *
  * - `ADDROID_META_CLI_BIN` 設定 → CliApplyExecutor。token が現時点で読めるか
  *   どうかでは分岐しない:

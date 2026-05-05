@@ -1,20 +1,24 @@
 # AdDroid OSS — Meta Setup
 
-AdDroid の Meta 連携は **任意統合**ですが、Apply (PR merge → 新規オブジェクト作成) と
-Activate (PAUSED → ACTIVE) を実行するには Meta OAuth が完了している必要があります。
+AdDroid で実際の Meta 広告アカウントを利用するには **Meta Access Token が必須**です。
+Meta Access Token が登録されていない状態では、Apply (PR merge → 新規オブジェクト作成)、
+Activate (PAUSED → ACTIVE)、ad_accounts 同期、レポート取得は実行できません。
+
 未連携の状態でも Web UI / cron / Doctor は通常通り動作し、`/setup#meta` および
-`/accounts` は idle 表示になります。
+`/accounts` は idle 表示になります。これは初回起動と開発検証を妨げないための挙動であり、
+実利用で Meta Access Token を省略できるという意味ではありません。
 
 ---
 
 ## 1. 連携モードの選択
 
-Meta adapter は env と OAuth client config から決定されます (`packages/meta-adapter/src/factory.ts`)。
+Meta adapter は env、OAuth client config、暗号化境界から決定されます (`packages/meta-adapter/src/factory.ts`)。
 
 | 条件 | 採択される adapter | 用途 |
 |---|---|---|
 | `ADDROID_META_OAUTH_MOCK=1` | `MockMetaAdapter` | E2E / smoke-test / 開発 (外部通信なし) |
 | OAuth client config 完備 + `ENCRYPTION_KEY` 設定済 | `RealMetaAdapter` | 本番 / sandbox app 接続 |
+| `ENCRYPTION_KEY` 設定済 | `StoredTokenMetaAdapter` | 標準の Access Token 入力接続 |
 | 上記以外 | `StubMetaAdapter` | 未連携状態 (UI で idle 表示) |
 
 `MockMetaAdapter` は `MockMetaSandbox` を内蔵しており、campaign / adset / ad / creative /
@@ -23,49 +27,40 @@ insights をすべて in-memory で deterministic に再現します。`graph.fa
 
 ---
 
-## 2. 本番 / sandbox 接続 (`RealMetaAdapter`)
+## 2. 本番 / sandbox 接続 (`StoredTokenMetaAdapter`)
 
-### 2.1 Meta App の準備
+### 2.1 Access Token の準備
 
-1. [Meta for Developers](https://developers.facebook.com/) で App を作成
-2. Marketing API の権限 (`ads_management`, `ads_read`, `business_management` など
-   ops repo の Ads YAML が要求する scope) を追加
-3. OAuth Redirect URI に `http://127.0.0.1:3000/api/oauth/meta/callback` を登録
-   (localhost のみ受け付けます。public ドメインは不要)
-4. Client ID / Client Secret を取得
+1. [Meta for Developers](https://developers.facebook.com/) で Business App を作成
+2. Marketing API を有効化
+3. `ads_read`, `ads_management` を含む Access Token を発行
+4. Business 配下の資産取得が必要な場合は `business_management` も付与
+5. System User token を使う場合は、Business Settings で System User に対象 Ad Account を割り当てる
+
+非エンジニア向けの標準手順では OAuth callback は使いません。ローカル利用のために
+HTTPS callback URL、public domain、ngrok 等を用意する必要はありません。
 
 > **Sandbox app**: Meta の Sandbox mode で App を作成すると、本番予算には影響しない
 > 検証用 app type が得られます。AdDroid は app type をトークン取得時に判定し、
 > Web UI で `Meta: act_xxx · sandbox` と表示します。
 
-### 2.2 OAuth client secret
+### 2.2 Token の保存
 
-Meta OAuth App ID / App Secret は `addroid init` の対話型 wizard で入力します。
-どちらも `ENCRYPTION_KEY` で暗号化され、`~/.addroid/secrets.local.yaml` には
-暗号文 (`appIdCiphertext` / `appSecretCiphertext`) だけを保存します。
+`addroid auth meta` で貼り付けた Access Token は、`ENCRYPTION_KEY` で暗号化して
+`oauth_tokens(provider="meta")` に保存します。Meta Ads CLI 実行時は公式 CLI 互換の
+`ACCESS_TOKEN` / `AD_ACCOUNT_ID` だけを短命な子プロセス環境に注入します。
 
-保存後の形は次の通りです。ciphertext は手で編集せず、再設定したい場合は
-`addroid init` を再実行してください。
-
-```yaml
-meta:
-  oauth:
-    appIdCiphertext: "v1.aes256gcm...."
-    appSecretCiphertext: "v1.aes256gcm...."
-```
-
-OAuth で取得した long-lived token も `ENCRYPTION_KEY` で暗号化して `oauth_tokens`
-に保存します。Meta Ads CLI 実行時は公式 CLI 互換の `ACCESS_TOKEN` /
-`AD_ACCOUNT_ID` だけを短命な子プロセス環境に注入します。
-
-### 2.3 OAuth フロー
+### 2.3 Token 入力フロー
 
 1. `addroid auth meta` を実行
-2. ブラウザが Meta OAuth ページに遷移し、許可後 `/api/oauth/meta/callback` で
-   AdDroid が token 交換
-3. `oauth_tokens` (provider="meta") に AES-256-GCM で暗号化保存
+2. Meta Access Token を貼り付ける
+3. AdDroid が `/me` と `/me/adaccounts` を呼び、取得できる Ad Account を表示
 4. CLI に表示された Ad Account 候補から既定アカウントを選択
-5. Web UI を使う場合は `/accounts` でも再認証・Business / Ad Account 同期・既定変更が可能
+5. `oauth_tokens` (provider="meta") に AES-256-GCM で暗号化保存
+6. Web UI を使う場合は `/accounts` で接続状態・Ad Account 同期・既定変更を確認可能
+
+OAuth callback を使う上級者向け経路は `addroid auth meta --oauth` です。HTTPS callback
+URL を Meta App に登録できる環境でのみ使ってください。
 
 ---
 

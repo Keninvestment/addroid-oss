@@ -51,13 +51,6 @@ import { InlineCode } from "../../components/ui/CodeBlock";
 
 export const dynamic = "force-dynamic";
 
-type ImprovementPrRunStatus =
-  | "succeeded"
-  | "skipped_no_proposal"
-  | "auto_blocked"
-  | "ai_failed"
-  | "pr_failed"
-  | "no_account";
 type ImprovementPrClassification = "safe" | "requires_approval" | "dangerous";
 type ImprovementPrAuditDecision =
   | "auto_approved"

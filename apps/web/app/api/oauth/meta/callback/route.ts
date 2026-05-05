@@ -2,7 +2,7 @@
 //
 // 1) adapter.completeOAuth(code, state) で short-lived → long-lived トークンを交換し、
 //    暗号化境界越しに oauth_tokens に upsert する。state 不一致は CSRF として弾く。
-// 2) 同時に Meta GraphQL から /me/businesses と /me/adaccounts を取得し、runtime cache
+// 2) 同時に Meta Graph API から /me/businesses と /me/adaccounts を取得し、runtime cache
 //    と (新規分のみ) ad_accounts テーブルに登録する。
 // 3) audit_logs に oauth.meta.connected イベントを 1 行残す。
 // 4) `/accounts` へ ?oauth=connected[&accounts=N] 付きで 302 リダイレクトし、UI 側で

@@ -146,7 +146,7 @@ export async function fetchAndSync(
   const selection = await buildPrismaMetaAdapterSelection({ prisma: prisma as never });
   if (selection.choice === "stub") {
     throw new Error(
-      `Meta OAuth is not configured: ${selection.reason}. Run \`addroid auth meta\` first.`
+      `Meta access token support is not configured: ${selection.reason}. Run \`addroid auth meta\` first.`
     );
   }
   try {

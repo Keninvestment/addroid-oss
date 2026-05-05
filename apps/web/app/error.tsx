@@ -11,7 +11,6 @@ export default function GlobalError({
 }) {
   useEffect(() => {
     // ローカル開発時の調査用にコンソール出力。Cloud のような外部 sink には送らない。
-    // eslint-disable-next-line no-console
     console.error("[addroid/web] route error:", error);
   }, [error]);
 

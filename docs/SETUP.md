@@ -173,8 +173,8 @@ npm run addroid -- init
 - `~/.addroid/config.yaml`、`secrets.local.yaml`、`storage` / `logs` / `run` の作成
 - ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
 - `npm run db:generate` と `npm run db:push` による Prisma schema 反映
-- 任意で Meta OAuth App ID / Secret を暗号化して `secrets.local.yaml` に保存し、`addroid auth meta`
-  でブラウザ認証後に Ad Account を選択
+- 実際の Meta 広告アカウント利用に必要な Meta Access Token の取得手順と必要権限を表示
+- `addroid auth meta` で Access Token を暗号化保存し、取得できる Ad Account から既定を選択
 
 既存の `.env` / `config.yaml` / `secrets.local.yaml` は破壊しません。既存値がある場合は保持し、
 `.env.example` 由来の placeholder だけを置き換えます。
@@ -211,6 +211,9 @@ npm run db:push
 ```bash
 npm install                 # JS dependencies + CLI postinstall の next-step 表示
 npm run addroid -- init     # 対話型 wizard: .env / DB / ~/.addroid / Prisma schema
+
+# 実際の Meta 広告アカウントを使う場合は必須:
+# Meta Access Token を貼り付けると、取得できる Ad Account が表示されます。
 npm run addroid -- auth meta
 npm run addroid -- accounts select
 npm run addroid -- up       # web (127.0.0.1:3000) + worker (pg-boss) を 1 プロセスで起動
@@ -244,7 +247,7 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 |---|---|
 | http://127.0.0.1:3000/ | Dashboard — config / DB / worker / GitHub / Meta / LLM / Slack / cron / audit の状態 |
 | http://127.0.0.1:3000/setup | Setup ガイド (UI 内) — config / DB / worker / GitHub / Meta / LLM Provider / Image Provider / Slack / Doctor / OSS Release Readiness / Documentation |
-| http://127.0.0.1:3000/accounts | Meta OAuth、Business / Ad Account 一覧、execution mode override |
+| http://127.0.0.1:3000/accounts | Meta Access Token 接続、Business / Ad Account 一覧、execution mode override |
 | http://127.0.0.1:3000/github | GitHub OAuth、ops repo、PR ポーリング状態 |
 | http://127.0.0.1:3000/approvals | 承認待ち PR 一覧と Web UI からの merge |
 | http://127.0.0.1:3000/plans | Apply 前の plan dry-run 結果 |
@@ -260,8 +263,9 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 | http://127.0.0.1:3000/logs | 細粒度実行ログ (sanitize-on-render) |
 | http://127.0.0.1:3000/api/health | サーバ JSON ヘルス |
 
-任意統合 (Slack / Meta / LLM / Image Provider) が未設定でも上記の全ルートは
-200 OK を返し、該当パネルは idle 表示になります。
+Slack / Meta / LLM / Image Provider が未設定でも上記の全ルートは 200 OK を返し、
+該当パネルは idle 表示になります。ただし実際の Meta 広告アカウントを利用するには
+Meta Access Token が必須です。Meta 未接続のままでは Apply / Activate / レポート取得はできません。
 
 ---
 
@@ -285,21 +289,22 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 最新結果を参照できます (DB 未到達でも CLI 自体は exit code 1 とせず、いずれかの
 check が error の場合のみ exit code 1 を返します)。
 
-任意統合 (GitHub / Meta / Slack / LLM Provider / Image Provider) は doctor の必須
+外部統合 (GitHub / Meta / Slack / LLM Provider / Image Provider) は doctor の必須
 checks には含まれません。これらは `/setup` の OSS Release Readiness カードと各
-専用パネル経由で接続状況を確認します。
+専用パネル経由で接続状況を確認します。Meta Access Token は core 起動チェックでは任意ですが、
+実ユーザーが Meta 広告アカウントを操作するには必須です。
 
 ---
 
-## 7. 任意統合のセットアップ
+## 7. 外部統合のセットアップ
 
 各統合は未設定でも core 動作 (Dashboard / DB / worker / cron / Doctor) を阻害しません。
-有効化したい統合のみ、対応するドキュメントに従って設定してください。
+実際の Meta 広告アカウントを利用する場合は、Meta Access Token を必ず登録してください。
 
 | 統合 | 役割 | 詳細 |
 |---|---|---|
 | GitHub | ops repo bootstrap、PR ポーリング、merge 検知 | [`docs/GITOPS.md`](./GITOPS.md) |
-| Meta | Apply / Activate、ad_accounts 同期、レポート取得 | [`docs/META.md`](./META.md) |
+| Meta | 実際の広告アカウント接続、Apply / Activate、ad_accounts 同期、レポート取得。実利用では必須 | [`docs/META.md`](./META.md) |
 | LLM Provider (Codex / OpenAI) | daily_report / budget_guard / improvement_pr workflow | [`docs/LLM_PROVIDER.md`](./LLM_PROVIDER.md) |
 | Image Provider | クリエイティブ画像生成 (任意) | [`docs/LLM_PROVIDER.md`](./LLM_PROVIDER.md) §Image Provider |
 | Slack | 通知 + `/adops` slash command (任意、Socket Mode のみ) | [`docs/SLACK.md`](./SLACK.md) |

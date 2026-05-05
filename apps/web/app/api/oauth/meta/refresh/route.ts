@@ -34,12 +34,12 @@ export async function POST() {
 
   try {
     const { adapter, choice } = await getActiveMetaAdapter();
-    if (choice === "stub") {
+    if (choice === "stub" || choice === "token") {
       return NextResponse.json(
         {
           ok: false,
           error:
-            "Meta OAuth is not configured. Set ADDROID_META_OAUTH_MOCK=1 or fill secrets.local.yaml.",
+            "Meta OAuth refresh is not configured for the active auth mode. Use `addroid auth meta` to replace a manual token, or configure OAuth client settings for `--oauth`.",
         },
         { status: 400 }
       );

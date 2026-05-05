@@ -35,7 +35,6 @@ import {
   formatBytes,
   formatDimensions,
   formatTimestamp,
-  parseCreativeMetadata,
   parseCreativeParameters,
   parseCreativeSpec,
   qaOutcomeToState,
@@ -54,16 +53,17 @@ const CREATIVE_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 export default async function CreativeDetailPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  if (!CREATIVE_ID_PATTERN.test(params.id)) {
+  const { id } = await params;
+  if (!CREATIVE_ID_PATTERN.test(id)) {
     notFound();
   }
 
   let row;
   try {
     row = await prisma.creative.findUnique({
-      where: { id: params.id },
+      where: { id },
       select: {
         id: true,
         accountId: true,

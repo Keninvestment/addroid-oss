@@ -64,9 +64,9 @@ function statusForOutcome(outcome: ActivateOutcomeStatus): number {
 
 export async function POST(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const hierarchyId = params.id;
+  const { id: hierarchyId } = await params;
   if (!hierarchyId || !HIERARCHY_ID_PATTERN.test(hierarchyId)) {
     return NextResponse.json(
       { ok: false, error: "Invalid ads_hierarchy id." },

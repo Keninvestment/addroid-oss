@@ -329,15 +329,21 @@ GitOps の全体像と承認境界は [`docs/GITOPS.md`](./GITOPS.md) を参照�
 
 ---
 
-## 8. Meta 連携 (OAuth / sandbox / mock)
+## 8. Meta 連携 (Access Token / OAuth / sandbox / mock)
 
-### 8.1 Meta OAuth で `state mismatch` または callback 失敗
+### 8.1 `addroid auth meta` で Ad Account が表示されない
+- 入力した Meta Access Token に `ads_read` または `ads_management` 権限があるか確認
+- Business Manager 側で、その token を発行したユーザーまたは System User に対象 Ad Account が割り当てられているか確認
+- `ENCRYPTION_KEY` と `DATABASE_URL` が `addroid init` 後の値から変わっていないか確認
+- 再発行した token で `addroid auth meta` を再実行する
+
+### 8.2 上級者向け OAuth で `state mismatch` または callback 失敗
 `/api/oauth/meta/begin` で発行した state は CLI / Web で異なるプロセスに渡しません。
-CLI の場合は `addroid auth meta` を再実行してください。Web UI の場合は `addroid up`
+CLI の場合は `addroid auth meta --oauth` を再実行してください。Web UI の場合は `addroid up`
 を再起動し、別タブの古い OAuth flow を破棄してから再度 `/accounts` の "Meta を接続"
 を押してください。
 
-### 8.2 開発で外部 `graph.facebook.com` を一切叩きたくない
+### 8.3 開発で外部 `graph.facebook.com` を一切叩きたくない
 ```bash
 ADDROID_META_OAUTH_MOCK=1 npm run addroid -- up
 ```
@@ -345,17 +351,16 @@ ADDROID_META_OAUTH_MOCK=1 npm run addroid -- up
 deterministic に実行されます。Apply / Activate も mock 経路で完結し、外部通信は
 発生しません。
 
-### 8.3 Meta execution mode が `unconfigured` のままになる
+### 8.4 Meta execution mode が `unconfigured` のままになる
 - `oauth_tokens` テーブルに provider="meta" のレコードがあるか確認
-- `ENCRYPTION_KEY` が変わっていないか確認 (変更後は OAuth client / token を復号できない)
+- `ENCRYPTION_KEY` が変わっていないか確認 (変更後は保存済み token を復号できない)
 - `apps/web/lib/meta-runtime.ts` の `selectMetaAdapter` が `StubMetaAdapter` を
-  返している場合は `~/.addroid/secrets.local.yaml` の `meta.oauth.appIdCiphertext` /
-  `meta.oauth.appSecretCiphertext` が不足している、または `ENCRYPTION_KEY` が変わっていて
-  Meta OAuth App ID / App Secret を復号できない
+  返している場合は `ENCRYPTION_KEY` が未設定、または mock / OAuth / token のいずれの経路も
+  利用できない状態
 - `addroid accounts list` で登録済み Ad Account と default を確認し、未設定なら
   `addroid accounts refresh --select-default` または `addroid accounts select` を実行する
 
-### 8.4 Apply で本番 Meta を誤って書き換えそう
+### 8.5 Apply で本番 Meta を誤って書き換えそう
 - Apply は新規オブジェクトをすべて **PAUSED** で作成します。Activate を別経路で
   人間が承認するまで予算は消費されません。
 - TopBar の Meta execution mode チップが `live` になっているのを確認したうえで

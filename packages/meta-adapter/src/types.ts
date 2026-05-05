@@ -119,7 +119,7 @@ export interface MetaAdapter {
 export class MetaAdapterNotImplementedError extends Error {
   constructor(method: string) {
     super(
-      `MetaAdapter.${method} is not configured. Provide Meta OAuth credentials in secrets.local.yaml or set ADDROID_META_OAUTH_MOCK=1 to use the mock adapter.`
+      `MetaAdapter.${method} is not configured for the active Meta auth mode. Use addroid auth meta for token mode, configure OAuth credentials for OAuth mode, or set ADDROID_META_OAUTH_MOCK=1 to use the mock adapter.`
     );
     this.name = "MetaAdapterNotImplementedError";
   }
@@ -135,7 +135,7 @@ export class MetaOAuthStateMismatchError extends Error {
 export class MetaAdapterUnauthenticatedError extends Error {
   constructor(operation: string) {
     super(
-      `MetaAdapter cannot ${operation}: no Meta OAuth token found. Connect Meta from /accounts first.`
+      `MetaAdapter cannot ${operation}: no Meta access token found. Run addroid auth meta first.`
     );
     this.name = "MetaAdapterUnauthenticatedError";
   }

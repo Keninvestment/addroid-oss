@@ -3,13 +3,15 @@
 // 実行環境に応じて MetaAdapter 実装を選択する。優先度:
 //   1. ADDROID_META_OAUTH_MOCK=1   → MockMetaAdapter
 //   2. OAuth client config が揃う + crypto → RealMetaAdapter
-//   3. それ以外                       → StubMetaAdapter
+//   3. crypto のみ揃う                    → StoredTokenMetaAdapter
+//   4. それ以外                           → StubMetaAdapter
 //
 // Meta App ID / Secret はこの関数の引数 / 環境変数からのみ流入し、
 // コード内に literal を残さない。
 
 import { MockMetaAdapter, type MockMetaAdapterOptions } from "./mock.js";
 import { RealMetaAdapter, type CryptoEncryptDecrypt } from "./real.js";
+import { StoredTokenMetaAdapter } from "./token-adapter.js";
 import { StubMetaAdapter } from "./stub.js";
 import type { MetaOAuthClientConfig } from "./oauth.js";
 import type { MetaOAuthTokenStore } from "./token-store.js";
@@ -24,7 +26,7 @@ export interface SelectMetaAdapterOptions {
   fetchImpl?: typeof fetch;
 }
 
-export type MetaAdapterChoice = "mock" | "real" | "stub";
+export type MetaAdapterChoice = "mock" | "real" | "token" | "stub";
 
 export interface MetaAdapterSelection {
   adapter: MetaAdapter;
@@ -53,6 +55,17 @@ export function selectMetaAdapter(opts: SelectMetaAdapterOptions): MetaAdapterSe
       reason: "Meta OAuth client + crypto boundary configured",
     };
   }
+  if (opts.crypto) {
+    return {
+      adapter: new StoredTokenMetaAdapter({
+        tokenStore: opts.tokenStore,
+        crypto: opts.crypto,
+        ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      }),
+      choice: "token",
+      reason: "Manual Meta access token + crypto boundary configured",
+    };
+  }
   return {
     adapter: new StubMetaAdapter(),
     choice: "stub",
@@ -62,7 +75,6 @@ export function selectMetaAdapter(opts: SelectMetaAdapterOptions): MetaAdapterSe
 
 function missingReason(opts: SelectMetaAdapterOptions): string {
   const missing: string[] = [];
-  if (!opts.oauthClient) missing.push("oauthClient");
   if (!opts.crypto) missing.push("crypto");
-  return `Meta OAuth not configured (missing: ${missing.join(", ") || "n/a"})`;
+  return `Meta access token support not configured (missing: ${missing.join(", ") || "n/a"})`;
 }

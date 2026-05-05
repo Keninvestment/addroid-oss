@@ -27,7 +27,6 @@ import {
 import { prisma } from "./prisma";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __addroidWebCodexProviderSelection__: LLMProviderSelection | undefined;
 }
 

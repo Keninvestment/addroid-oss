@@ -5,7 +5,7 @@
 // - MetaAdapter は `selectMetaAdapter` の結果を per-process でキャッシュする。
 //   beginOAuth で発行した state を completeOAuth で消費する都合上、両 API 呼び出しが
 //   同じ adapter インスタンスを参照する必要があるため、globalThis に保存する。
-// - Business 一覧は Meta GraphQL から取得する runtime cache (ホットリロードを跨ぐ
+// - Business 一覧は Meta Graph API から取得する runtime cache (ホットリロードを跨ぐ
 //   ため globalThis に持つ)。
 // - サニタイズ: 表示直前に access_token が万一含まれていても [REDACTED] に変換する
 //   ヘルパも本ファイルから export する。
@@ -32,9 +32,7 @@ import { ensureWorkspace } from "../../worker/src/lib/prisma-stores";
 import { prisma } from "./prisma";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __addroidWebMetaAdapterSelection__: MetaAdapterSelection | undefined;
-  // eslint-disable-next-line no-var
   var __addroidWebMetaBusinessCache__:
     | { businesses: MetaBusiness[]; adAccounts: MetaAdAccount[]; fetchedAt: Date; accountIdentifier: string }
     | undefined;

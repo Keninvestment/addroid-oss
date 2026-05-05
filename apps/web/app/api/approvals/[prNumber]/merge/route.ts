@@ -47,9 +47,10 @@ const VALID_MERGE_METHODS = new Set(["merge", "squash", "rebase"]);
 
 export async function POST(
   request: Request,
-  { params }: { params: { prNumber: string } }
+  { params }: { params: Promise<{ prNumber: string }> }
 ) {
-  const prNumber = Number.parseInt(params.prNumber, 10);
+  const { prNumber: prNumberRaw } = await params;
+  const prNumber = Number.parseInt(prNumberRaw, 10);
   if (!Number.isFinite(prNumber) || prNumber <= 0) {
     return NextResponse.json(
       { ok: false, error: "Invalid PR number." },

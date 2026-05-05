@@ -93,6 +93,44 @@ async function fetchGraph<T>(
   return json as T;
 }
 
+async function fetchGraphUrl<T>(
+  fetchImpl: typeof fetch,
+  url: string,
+  accessToken: string,
+  origin: string
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+  } catch (err) {
+    throw new MetaApiError(
+      `${origin}: Meta Graph fetch failed: ${(err as Error).message}`
+    );
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new MetaApiError(`${origin}: Meta Graph HTTP ${res.status}`, {
+      status: res.status,
+      payload: text,
+    });
+  }
+  const json = (await res.json().catch(() => null)) as { error?: { message?: string } } | T | null;
+  if (!json || typeof json !== "object") {
+    throw new MetaApiError(`${origin}: Meta Graph returned non-JSON body`);
+  }
+  if ((json as { error?: { message?: string } }).error) {
+    const msg = (json as { error?: { message?: string } }).error?.message ?? "unknown";
+    throw new MetaApiError(`${origin}: Meta Graph error: ${msg}`, { payload: json });
+  }
+  return json as T;
+}
+
 export async function fetchMeProfile(opts: {
   accessToken: string;
   fetchImpl?: typeof fetch;
@@ -112,25 +150,31 @@ export async function fetchBusinesses(opts: FetchAccountsOptions): Promise<MetaB
   const fetchImpl = opts.fetchImpl ?? fetch;
   const limit = opts.limit ?? 25;
   type RawBusiness = { id: string; name: string };
-  type Page = { data?: RawBusiness[] };
+type Page = { data?: RawBusiness[] };
+type Paging = { paging?: { next?: string } };
   const out: MetaBusiness[] = [];
-  let path = "me/businesses";
-  let params: Record<string, string> = {
+  const path = "me/businesses";
+  const params: Record<string, string> = {
     fields: BUSINESS_FIELDS,
     limit: String(limit),
   };
-  // 1 ページのみ取得 (個人開発者の Business 数は通常 1〜数件)。next ページは省略。
-  const page = await fetchGraph<Page>(
-    fetchImpl,
-    path,
-    params,
-    opts.accessToken,
-    "fetchBusinesses"
-  );
-  for (const b of page.data ?? []) {
-    if (!b?.id) continue;
-    out.push({ id: String(b.id), name: String(b.name ?? ""), role: null });
-  }
+  let nextUrl: string | null = null;
+  do {
+    const page: Page & Paging = nextUrl
+      ? await fetchGraphUrl(fetchImpl, nextUrl, opts.accessToken, "fetchBusinesses")
+      : await fetchGraph<Page & Paging>(
+          fetchImpl,
+          path,
+          params,
+          opts.accessToken,
+          "fetchBusinesses"
+        );
+    for (const b of page.data ?? []) {
+      if (!b?.id) continue;
+      out.push({ id: String(b.id), name: String(b.name ?? ""), role: null });
+    }
+    nextUrl = page.paging?.next ?? null;
+  } while (nextUrl);
   return out;
 }
 
@@ -146,33 +190,39 @@ export async function fetchAdAccounts(opts: FetchAccountsOptions): Promise<MetaA
     timezone_name?: string;
     business?: { id: string; name?: string };
   };
-  type Page = { data?: RawAdAccount[] };
+  type Page = { data?: RawAdAccount[]; paging?: { next?: string } };
   const params: Record<string, string> = {
     fields: ADACCOUNT_FIELDS,
     limit: String(limit),
   };
-  const page = await fetchGraph<Page>(
-    fetchImpl,
-    "me/adaccounts",
-    params,
-    opts.accessToken,
-    "fetchAdAccounts"
-  );
   const out: MetaAdAccount[] = [];
-  for (const a of page.data ?? []) {
-    if (!a?.account_id) continue;
-    const accountId = String(a.account_id);
-    out.push({
-      accountId,
-      metaAccountId: a.id ? String(a.id) : `act_${accountId}`,
-      name: String(a.name ?? ""),
-      currency: a.currency ?? null,
-      timezoneName: a.timezone_name ?? null,
-      businessId: a.business?.id ? String(a.business.id) : null,
-      businessName: a.business?.name ? String(a.business.name) : null,
-      accountStatus: typeof a.account_status === "number" ? a.account_status : null,
-    });
-  }
+  let nextUrl: string | null = null;
+  do {
+    const page: Page = nextUrl
+      ? await fetchGraphUrl(fetchImpl, nextUrl, opts.accessToken, "fetchAdAccounts")
+      : await fetchGraph<Page>(
+          fetchImpl,
+          "me/adaccounts",
+          params,
+          opts.accessToken,
+          "fetchAdAccounts"
+        );
+    for (const a of page.data ?? []) {
+      if (!a?.account_id) continue;
+      const accountId = String(a.account_id);
+      out.push({
+        accountId,
+        metaAccountId: a.id ? String(a.id) : `act_${accountId}`,
+        name: String(a.name ?? ""),
+        currency: a.currency ?? null,
+        timezoneName: a.timezone_name ?? null,
+        businessId: a.business?.id ? String(a.business.id) : null,
+        businessName: a.business?.name ? String(a.business.name) : null,
+        accountStatus: typeof a.account_status === "number" ? a.account_status : null,
+      });
+    }
+    nextUrl = page.paging?.next ?? null;
+  } while (nextUrl);
   return out;
 }
 

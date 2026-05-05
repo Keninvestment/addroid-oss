@@ -1,7 +1,7 @@
 // AdDroid OSS — Ad Account の手動登録エンドポイント。
 //
 // /accounts ページの "Add account" モーダルから呼ばれる。
-// Meta OAuth でフェッチした `me/adaccounts` に含まれないアカウントを、
+// Meta Access Token でフェッチした `me/adaccounts` に含まれないアカウントを、
 // ユーザーが明示的に登録するときに使う (例: 後から付与された権限のもの)。
 
 import { NextResponse } from "next/server";

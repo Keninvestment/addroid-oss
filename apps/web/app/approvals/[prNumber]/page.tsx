@@ -21,7 +21,7 @@ import { MergePrButton } from "./MergePrButton";
 export const dynamic = "force-dynamic";
 
 interface PageParams {
-  params: { prNumber: string };
+  params: Promise<{ prNumber: string }>;
 }
 
 interface ApprovalRow {
@@ -119,7 +119,8 @@ function readDecisionSource(metadata: unknown): string | null {
 }
 
 export default async function ApprovalDetailPage({ params }: PageParams) {
-  const prNumber = Number.parseInt(params.prNumber, 10);
+  const { prNumber: prNumberRaw } = await params;
+  const prNumber = Number.parseInt(prNumberRaw, 10);
   if (!Number.isFinite(prNumber) || prNumber <= 0) {
     notFound();
   }

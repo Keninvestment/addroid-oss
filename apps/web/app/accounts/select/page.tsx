@@ -1,4 +1,4 @@
-// AdDroid OSS — Meta OAuth 後の Ad Account 既定選択ページ。
+// AdDroid OSS — Meta 接続後の Ad Account 既定選択ページ。
 
 import Link from "next/link";
 import { prisma } from "../../../lib/prisma";
@@ -51,7 +51,7 @@ export default async function SelectAccountPage({
     <>
       <PageHeader
         title="Select Meta Ad Account"
-        subtitle="Meta OAuth で取得できた Ad Account から、実行時に使う既定アカウントを選択します。"
+        subtitle="Meta Access Token で取得できた Ad Account から、実行時に使う既定アカウントを選択します。"
       />
       <div className="page-body page-body--single">
         {oauth === "connected" ? (
@@ -79,7 +79,7 @@ export default async function SelectAccountPage({
           {accounts.length === 0 ? (
             <EmptyState
               title="選択できる Ad Account がありません。"
-              description="/accounts から Meta OAuth を再実行するか、手動で Ad Account を追加してください。"
+              description="CLI で `addroid auth meta` を再実行するか、手動で Ad Account を追加してください。"
               action={
                 <Link className="btn btn--primary" href="/accounts">
                   Accounts

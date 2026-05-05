@@ -1,7 +1,7 @@
 // AdDroid OSS — Meta Business / Ad Account の最新一覧を再取得し runtime cache に保存。
 //
 // `/accounts` の Refresh Businesses ボタンから POST される。
-// /me/businesses と /me/adaccounts を Meta GraphQL で再取得し、Ad Account を
+// /me/businesses と /me/adaccounts を Meta Graph API で再取得し、Ad Account を
 // ad_accounts テーブルに同期する。
 
 import { NextResponse } from "next/server";
@@ -22,7 +22,7 @@ export async function POST() {
     const { adapter, choice } = await getActiveMetaAdapter();
     if (choice === "stub") {
       return NextResponse.json(
-        { ok: false, error: "Meta OAuth is not configured." },
+        { ok: false, error: "Meta Access Token is not configured." },
         { status: 400 }
       );
     }

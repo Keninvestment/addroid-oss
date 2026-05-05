@@ -18,8 +18,7 @@
     "pg-boss": "^10.1.5"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
-    "@types/node": "^20.11.30",
-    "tsx": "^4.16.5"
+    "tsx": "^4.16.5",
+    "typescript": "^5.5.4"
   }
 }
