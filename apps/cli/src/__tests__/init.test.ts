@@ -424,10 +424,10 @@ test("init --non-interactive --yes は --install-deps なしでは依存イン�
             if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
               return { status: 0, stdout: "", stderr: "" };
             }
-            if (line.includes("uv python install 3.13")) {
+            if (line.includes("python install 3.13")) {
               return { status: 0, stdout: "", stderr: "" };
             }
-            if (line.includes("uv tool install meta-ads --python 3.13")) {
+            if (line.includes("tool install meta-ads --python 3.13")) {
               return { status: 0, stdout: "", stderr: "" };
             }
             if (line.includes("command -v meta")) {
@@ -443,7 +443,7 @@ test("init --non-interactive --yes は --install-deps なしでは依存イン�
     );
 
     assert.equal(code, 0, out.stdout + out.stderr);
-    assert.ok(!calls.some((c) => c.includes("uv tool install meta-ads --python 3.13")));
+    assert.ok(!calls.some((c) => c.includes("tool install meta-ads --python 3.13")));
     const envRaw = fs.readFileSync(envFile, "utf8");
     assert.doesNotMatch(envRaw, /ADDROID_META_CLI_BIN=/);
     assert.doesNotMatch(out.stdout, /Meta Ads CLI\s+: ok - Meta Ads CLI installed/);
@@ -485,10 +485,10 @@ test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ad
             if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
               return { status: 0, stdout: "", stderr: "" };
             }
-            if (line.includes("uv python install 3.13")) {
+            if (line.includes("python install 3.13")) {
               return { status: 0, stdout: "", stderr: "" };
             }
-            if (line.includes("uv tool install meta-ads --python 3.13")) {
+            if (line.includes("tool install meta-ads --python 3.13")) {
               return { status: 0, stdout: "", stderr: "" };
             }
             if (line.includes("command -v meta")) {
@@ -501,7 +501,10 @@ test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ad
     );
 
     assert.equal(code, 0, out.stdout + out.stderr);
-    assert.ok(calls.some((c) => c.includes("uv tool install meta-ads --python 3.13")));
+    const installCall = calls.find((c) => c.includes("tool install meta-ads --python 3.13"));
+    assert.ok(installCall);
+    assert.match(installCall, /uv_bin/);
+    assert.equal(installCall.includes('|| "$HOME/.local/bin/uv"'), false);
     assert.match(out.stdout, /Dependency setup:/);
     assert.match(out.stdout, /Meta Ads CLI\s+: ok - Meta Ads CLI installed/);
     assert.match(fs.readFileSync(envFile, "utf8"), /ADDROID_META_CLI_BIN=.*\/\.local\/bin\/meta/);

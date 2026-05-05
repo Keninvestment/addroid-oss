@@ -47,6 +47,11 @@ const DEFAULT_DATABASE_NAME = "addroid";
 const DEFAULT_DATABASE_HOST = "localhost";
 const DEFAULT_DATABASE_PORT = "5432";
 const META_ADS_CLI_PYTHON_VERSION = "3.13";
+const UV_SH = [
+  'uv_bin="$(command -v uv || true)"',
+  'if [ -z "$uv_bin" ]; then uv_bin="$HOME/.local/bin/uv"; fi',
+  'if [ ! -x "$uv_bin" ]; then echo "uv が見つかりません。先に uv のインストールを完了してください。" >&2; exit 127; fi',
+].join("; ");
 
 type PromptFn = (question: string, defaultValue?: string) => Promise<string>;
 type ConfirmFn = (question: string, defaultYes?: boolean) => Promise<boolean>;
@@ -806,7 +811,7 @@ async function installMissingDependencies(
         "sh",
         [
           "-c",
-          `uv python install ${META_ADS_CLI_PYTHON_VERSION} || "$HOME/.local/bin/uv" python install ${META_ADS_CLI_PYTHON_VERSION}`,
+          `${UV_SH}; "$uv_bin" python install ${META_ADS_CLI_PYTHON_VERSION}`,
         ],
         {
           env,
@@ -833,7 +838,7 @@ async function installMissingDependencies(
         "sh",
         [
           "-c",
-          `uv python install ${META_ADS_CLI_PYTHON_VERSION} && uv tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION} || "$HOME/.local/bin/uv" python install ${META_ADS_CLI_PYTHON_VERSION} && "$HOME/.local/bin/uv" tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION}`,
+          `${UV_SH}; "$uv_bin" python install ${META_ADS_CLI_PYTHON_VERSION} && "$uv_bin" tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION}`,
         ],
         {
           env,
