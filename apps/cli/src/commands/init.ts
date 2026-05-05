@@ -17,6 +17,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import * as readlineControl from "node:readline";
 import readline from "node:readline/promises";
 import {
   AddroidConfigSchema,
@@ -55,10 +56,21 @@ const UV_SH = [
 
 type PromptFn = (question: string, defaultValue?: string) => Promise<string>;
 type ConfirmFn = (question: string, defaultYes?: boolean) => Promise<boolean>;
+interface SelectOption {
+  value: string;
+  label: string;
+  description: string;
+}
+type SelectFn = (
+  question: string,
+  options: readonly SelectOption[],
+  defaultValue: string
+) => Promise<string>;
 
 export interface InitCommandOverrides {
   prompt?: PromptFn;
   confirm?: ConfirmFn;
+  selectOption?: SelectFn;
   runAuthCommand?: (args: string[]) => Promise<number>;
   runCommand?: CommandRunner;
   env?: NodeJS.ProcessEnv;
@@ -232,6 +244,9 @@ async function runInteractiveInit(
   const runner = overrides.runCommand ?? defaultRunCommand;
   const prompt = overrides.prompt ?? defaultPrompt;
   const confirm = overrides.confirm ?? defaultConfirm;
+  const selectOption =
+    overrides.selectOption ??
+    (overrides.prompt ? buildPromptSelect(prompt) : defaultSelectOption);
   const lines: string[] = [
     "[addroid init]",
     "",
@@ -367,6 +382,7 @@ async function runInteractiveInit(
     }
     const llmConfigured = await maybeConfigureLLMProvider({
       prompt,
+      selectOption,
       out,
       assumeYes: opts.yes,
       runAuthCommand: overrides.runAuthCommand,
@@ -419,6 +435,7 @@ async function maybeConfigureMetaAccessToken(opts: {
 
 async function maybeConfigureLLMProvider(opts: {
   prompt: PromptFn;
+  selectOption: SelectFn;
   out: string[];
   assumeYes: boolean;
   runAuthCommand?: (args: string[]) => Promise<number>;
@@ -436,8 +453,25 @@ async function maybeConfigureLLMProvider(opts: {
   process.stdout.write(opts.out.join("\n") + "\n");
   opts.out.length = 0;
   const choice = (
-    await opts.prompt(
-      "LLM Provider (openai-api-key / anthropic-api-key / codex-oauth)",
+    await opts.selectOption(
+      "LLM Provider",
+      [
+        {
+          value: "openai-api-key",
+          label: "OpenAI API key",
+          description: "OpenAI の API key を暗号化保存して使います",
+        },
+        {
+          value: "anthropic-api-key",
+          label: "Anthropic API key",
+          description: "Anthropic の API key を暗号化保存して使います",
+        },
+        {
+          value: "codex-oauth",
+          label: "Codex OAuth",
+          description: "後で Web UI /ai から Codex OAuth 接続します",
+        },
+      ],
       "openai-api-key"
     )
   )
@@ -1104,6 +1138,96 @@ function defaultPrompt(question: string, defaultValue = ""): Promise<string> {
     rl.close();
     const trimmed = answer.trim();
     return trimmed.length > 0 ? trimmed : defaultValue;
+  });
+}
+
+function buildPromptSelect(prompt: PromptFn): SelectFn {
+  return async (question, options, defaultValue) => {
+    const choices = options.map((o) => o.value).join(" / ");
+    return await prompt(`${question} (${choices})`, defaultValue);
+  };
+}
+
+function defaultSelectOption(
+  question: string,
+  options: readonly SelectOption[],
+  defaultValue: string
+): Promise<string> {
+  if (
+    !process.stdin.isTTY ||
+    !process.stdout.isTTY ||
+    typeof process.stdin.setRawMode !== "function"
+  ) {
+    return buildPromptSelect(defaultPrompt)(question, options, defaultValue);
+  }
+
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    const defaultIndex = Math.max(
+      0,
+      options.findIndex((o) => o.value === defaultValue)
+    );
+    let highlighted = defaultIndex;
+    let selected = defaultIndex;
+    let renderedLines = 0;
+
+    const render = () => {
+      if (renderedLines > 0) {
+        readlineControl.moveCursor(process.stdout, 0, -renderedLines);
+        readlineControl.cursorTo(process.stdout, 0);
+        readlineControl.clearScreenDown(process.stdout);
+      }
+      const lines = [
+        `? ${question} (↑/↓で移動、Spaceで選択、Enterで確定)`,
+        ...options.map((option, i) => {
+          const cursor = i === highlighted ? ">" : " ";
+          const checked = i === selected ? "[x]" : "[ ]";
+          return `${cursor} ${checked} ${option.label} - ${option.description}`;
+        }),
+      ];
+      process.stdout.write(lines.join("\n") + "\n");
+      renderedLines = lines.length;
+    };
+
+    const cleanup = () => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+    };
+
+    const onData = (chunk: Buffer) => {
+      const s = chunk.toString("utf8");
+      if (s === "\u0003") {
+        cleanup();
+        process.stdout.write("\n");
+        reject(new Error("interrupted"));
+        return;
+      }
+      if (s === "\r" || s === "\n") {
+        cleanup();
+        resolve(options[selected]?.value ?? defaultValue);
+        return;
+      }
+      if (s === " ") {
+        selected = highlighted;
+        render();
+        return;
+      }
+      if (s === "\u001b[A" || s === "k") {
+        highlighted = (highlighted - 1 + options.length) % options.length;
+        render();
+        return;
+      }
+      if (s === "\u001b[B" || s === "j") {
+        highlighted = (highlighted + 1) % options.length;
+        render();
+      }
+    };
+
+    render();
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
   });
 }
 
