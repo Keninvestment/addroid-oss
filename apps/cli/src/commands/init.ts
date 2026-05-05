@@ -59,6 +59,7 @@ type ConfirmFn = (question: string, defaultYes?: boolean) => Promise<boolean>;
 export interface InitCommandOverrides {
   prompt?: PromptFn;
   confirm?: ConfirmFn;
+  runAuthCommand?: (args: string[]) => Promise<number>;
   runCommand?: CommandRunner;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
@@ -348,30 +349,33 @@ async function runInteractiveInit(
 
   if (!opts.mockIntegrations) {
     const configured = await maybeConfigureMetaAccessToken({
-      confirm,
       out,
       assumeYes: opts.yes,
     });
-    const shouldConnect =
-      configured &&
-      !opts.yes &&
-      (await confirm("Meta Access Token を入力して Ad Account を選択しますか?", true));
-    if (shouldConnect) {
+    if (configured && !opts.yes) {
       process.stdout.write(out.join("\n") + "\n");
       out.length = 0;
-      const { runAuthCommand } = await import("./auth.js");
-      const code = await runAuthCommand(["meta"]);
+      const runAuthCommand =
+        overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+      const code = await withRuntimeEnv(env, () => runAuthCommand(["meta"]));
       out.push(`  Meta Token    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
       if (code !== 0) {
-        out.push("                  後で `addroid auth meta` を実行してください。");
+        out.push("                  Meta Access Token は実利用に必須です。token と DB 設定を確認し、`addroid auth meta` を再実行してください。");
+        process.stdout.write(out.join("\n") + "\n");
+        return 1;
       }
     }
-    await maybeConfigureLLMProvider({
+    const llmConfigured = await maybeConfigureLLMProvider({
       prompt,
-      confirm,
       out,
       assumeYes: opts.yes,
+      runAuthCommand: overrides.runAuthCommand,
+      env,
     });
+    if (!llmConfigured) {
+      process.stdout.write(out.join("\n") + "\n");
+      return 1;
+    }
   }
 
   out.push("");
@@ -387,7 +391,6 @@ async function runInteractiveInit(
 }
 
 async function maybeConfigureMetaAccessToken(opts: {
-  confirm: ConfirmFn;
   out: string[];
   assumeYes: boolean;
 }): Promise<boolean> {
@@ -400,6 +403,9 @@ async function maybeConfigureMetaAccessToken(opts: {
   opts.out.push("  必要な権限の目安: ads_read, ads_management, business_management。");
   opts.out.push("  token 入力後、AdDroid が取得できる Ad Account を表示し、利用するアカウントを選択します。");
   opts.out.push("  入力値は ENCRYPTION_KEY で暗号化し、平文では保存しません。");
+  if (!opts.assumeYes) {
+    opts.out.push("  このまま Meta Access Token の非表示入力に進みます。");
+  }
   process.stdout.write(opts.out.join("\n") + "\n");
   opts.out.length = 0;
 
@@ -408,33 +414,30 @@ async function maybeConfigureMetaAccessToken(opts: {
     opts.out.push("                  後で `addroid auth meta` を実行してください。");
     return false;
   }
-  const shouldConfigure = await opts.confirm("Meta Access Token を今ここで設定しますか? (実利用には必須)", true);
-  if (!shouldConfigure) {
-    opts.out.push("  Meta Token    : not configured");
-    opts.out.push("                  後で `addroid auth meta` を実行してください。");
-    return false;
-  }
   return true;
 }
 
 async function maybeConfigureLLMProvider(opts: {
   prompt: PromptFn;
-  confirm: ConfirmFn;
   out: string[];
   assumeYes: boolean;
-}): Promise<void> {
+  runAuthCommand?: (args: string[]) => Promise<number>;
+  env: NodeJS.ProcessEnv;
+}): Promise<boolean> {
   if (opts.assumeYes) {
-    opts.out.push("  LLM Provider  : not configured (run `addroid auth llm` after setup)");
-    return;
+    opts.out.push("  LLM Provider  : skipped (--yes では API key / OAuth 入力を省略)");
+    opts.out.push("                  実利用には LLM Provider が必須です。後で `addroid auth llm` を実行してください。");
+    return true;
   }
-  const shouldConfigure = await opts.confirm("LLM Provider を初期設定しますか?", true);
-  if (!shouldConfigure) {
-    opts.out.push("  LLM Provider  : not configured");
-    return;
-  }
+  opts.out.push("");
+  opts.out.push("LLM Provider setup:");
+  opts.out.push("  AI workflow / レポート生成 / 改善提案には LLM Provider が必須です。");
+  opts.out.push("  このまま provider 選択へ進みます。API key は ENCRYPTION_KEY で暗号化して保存します。");
+  process.stdout.write(opts.out.join("\n") + "\n");
+  opts.out.length = 0;
   const choice = (
     await opts.prompt(
-      "LLM Provider (openai-api-key / anthropic-api-key / codex-oauth / skip)",
+      "LLM Provider (openai-api-key / anthropic-api-key / codex-oauth)",
       "openai-api-key"
     )
   )
@@ -443,14 +446,15 @@ async function maybeConfigureLLMProvider(opts: {
 
   if (choice === "skip" || choice === "none") {
     opts.out.push("  LLM Provider  : skipped");
-    return;
+    opts.out.push("                  実利用には LLM Provider が必須です。provider を選び直してください。");
+    return false;
   }
   if (choice === "codex-oauth" || choice === "oauth" || choice === "codex") {
     opts.out.push("  LLM Provider  : Codex OAuth selected");
     opts.out.push(
       "                  ADDROID_CODEX_* と ENCRYPTION_KEY を設定後、`addroid up` → http://127.0.0.1:3000/ai から OAuth 接続してください。"
     );
-    return;
+    return true;
   }
 
   const provider =
@@ -460,8 +464,9 @@ async function maybeConfigureLLMProvider(opts: {
         ? "openai"
         : null;
   if (!provider) {
-    opts.out.push(`  LLM Provider  : skipped (unknown choice: ${choice})`);
-    return;
+    opts.out.push(`  LLM Provider  : unknown choice (${choice})`);
+    opts.out.push("                  openai-api-key / anthropic-api-key / codex-oauth のいずれかを選んでください。");
+    return false;
   }
   const defaultModel =
     provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1";
@@ -469,8 +474,11 @@ async function maybeConfigureLLMProvider(opts: {
   opts.out.push(`  LLM Provider  : configuring ${provider} API key`);
   process.stdout.write(opts.out.join("\n") + "\n");
   opts.out.length = 0;
-  const { runAuthCommand } = await import("./auth.js");
-  const code = await runAuthCommand(["llm", "--provider", provider, "--model", model]);
+  const runAuthCommand =
+    opts.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+  const code = await withRuntimeEnv(opts.env, () =>
+    runAuthCommand(["llm", "--provider", provider, "--model", model])
+  );
   opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
   if (code === 0 && provider === "openai") {
     opts.out.push("  Image Provider: OpenAI API key will also be used for GPT Image 2");
@@ -479,8 +487,10 @@ async function maybeConfigureLLMProvider(opts: {
     opts.out.push("  Image Provider: GPT Image 2 requires OpenAI API key or Codex app-server");
   }
   if (code !== 0) {
-    opts.out.push(`                  後で \`addroid auth llm --provider ${provider}\` を実行してください。`);
+    opts.out.push(`                  実利用には LLM Provider が必須です。API key を確認し、\`addroid auth llm --provider ${provider}\` を再実行してください。`);
+    return false;
   }
+  return true;
 }
 
 interface ScaffoldResult {
@@ -1066,9 +1076,30 @@ function summarizeCommandFailure(r: CommandResult): string {
   return `exit ${r.status ?? "unknown"}${detail ? `: ${detail.split(/\r?\n/).slice(-4).join(" ")}` : ""}`;
 }
 
+async function withRuntimeEnv<T>(
+  env: NodeJS.ProcessEnv,
+  fn: () => Promise<T>
+): Promise<T> {
+  if (env === process.env) return await fn();
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(env)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
 function defaultPrompt(question: string, defaultValue = ""): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const suffix = defaultValue ? ` [${defaultValue}]` : "";
+  const suffix = defaultValue ? ` [${defaultValue} / Enterで既定]` : "";
   return rl.question(`? ${question}${suffix}: `).then((answer) => {
     rl.close();
     const trimmed = answer.trim();

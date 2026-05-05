@@ -254,7 +254,8 @@ test("init --interactive は prompt の回答で .env / config を作る", async
     const prevKey = process.env.ENCRYPTION_KEY;
     delete process.env.DATABASE_URL;
     delete process.env.ENCRYPTION_KEY;
-    const answers = ["Agency Ops", "postgresql://addroid@localhost:5432/addroid"];
+    const answers = ["Agency Ops", "postgresql://addroid@localhost:5432/addroid", "codex-oauth"];
+    const authCalls: string[][] = [];
     try {
       const { code, out } = await capture(() =>
         runInit(
@@ -270,6 +271,10 @@ test("init --interactive は prompt の回答で .env / config を作る", async
             isTTY: true,
             prompt: async () => answers.shift() ?? "",
             confirm: async () => false,
+            runAuthCommand: async (args) => {
+              authCalls.push(args);
+              return 0;
+            },
             randomBytes: () => Buffer.alloc(32, 2),
           }
         )
@@ -287,6 +292,11 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       assert.match(out.stdout, /OAuth callback ではなく Access Token 入力方式/);
       assert.match(out.stdout, /HTTPS callback URL を用意する必要はありません/);
       assert.match(out.stdout, /token 入力後.*Ad Account.*選択/);
+      assert.deepEqual(authCalls, [["meta"]]);
+      assert.doesNotMatch(out.stdout, /Meta Access Token を今ここで設定しますか/);
+      assert.doesNotMatch(out.stdout, /Meta Access Token を入力して Ad Account を選択しますか/);
+      assert.match(out.stdout, /LLM Provider setup:/);
+      assert.doesNotMatch(out.stdout, /LLM Provider を初期設定しますか/);
       assert.match(out.stdout, /Ready\./);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
@@ -304,7 +314,7 @@ test("init --interactive はインスタンス名を空 Enter にすると addro
     const prevKey = process.env.ENCRYPTION_KEY;
     delete process.env.DATABASE_URL;
     delete process.env.ENCRYPTION_KEY;
-    const answers = ["", "postgresql://addroid@localhost:5432/addroid"];
+    const answers = ["", "postgresql://addroid@localhost:5432/addroid", "codex-oauth"];
     try {
       const { code, out } = await capture(() =>
         runInit(
@@ -323,6 +333,7 @@ test("init --interactive はインスタンス名を空 Enter にすると addro
               return answer.trim() ? answer : defaultValue;
             },
             confirm: async () => false,
+            runAuthCommand: async () => 0,
             randomBytes: () => Buffer.alloc(32, 7),
           }
         )
@@ -353,7 +364,9 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
     const answers = [
       "Agency Ops",
       "postgresql://addroid:secret@localhost:5432/addroid",
+      "codex-oauth",
     ];
+    const metaRuntimeEnv: Array<{ databaseUrl?: string; encryptionKey?: string }> = [];
 
     const { code, out } = await capture(() =>
       runInit(
@@ -370,6 +383,15 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
           isTTY: true,
           prompt: async () => answers.shift() ?? "",
           confirm: async () => false,
+          runAuthCommand: async (args) => {
+            if (args[0] === "meta") {
+              metaRuntimeEnv.push({
+                databaseUrl: process.env.DATABASE_URL,
+                encryptionKey: process.env.ENCRYPTION_KEY,
+              });
+            }
+            return 0;
+          },
           randomBytes: () => Buffer.alloc(32, 8),
         }
       )
@@ -383,6 +405,8 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
     assert.doesNotMatch(raw, /appSecretCiphertext:/);
     assert.match(out.stdout, /Meta Access Token setup:/);
     assert.match(out.stdout, /addroid auth meta/);
+    assert.equal(metaRuntimeEnv[0]?.databaseUrl, "postgresql://addroid:secret@localhost:5432/addroid");
+    assert.ok(metaRuntimeEnv[0]?.encryptionKey);
     assert.doesNotMatch(out.stdout, /Valid OAuth Redirect URIs/);
   });
 });
