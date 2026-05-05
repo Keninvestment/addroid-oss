@@ -332,7 +332,7 @@ GitOps の全体像と承認境界は [`docs/GITOPS.md`](./GITOPS.md) を参照�
 ## 8. Meta 連携 (Access Token / OAuth / sandbox / mock)
 
 ### 8.1 `addroid auth meta` で Ad Account が表示されない
-- 入力した Meta Access Token に `ads_read` または `ads_management` 権限があるか確認
+- 入力した Meta Access Token に `ads_read`, `ads_management`, `business_management` 権限があるか確認
 - Business Manager 側で、その token を発行したユーザーまたは System User に対象 Ad Account が割り当てられているか確認
 - `ENCRYPTION_KEY` と `DATABASE_URL` が `addroid init` 後の値から変わっていないか確認
 - 再発行した token で `addroid auth meta` を再実行する

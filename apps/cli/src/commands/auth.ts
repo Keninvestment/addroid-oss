@@ -661,7 +661,7 @@ async function runAuthMetaToken(
     ]);
     if (adAccounts.length === 0) {
       process.stderr.write(
-        "[addroid auth meta] この token で取得できる Ad Account がありません。ads_read / ads_management 権限と Business 側の割り当てを確認してください。\n"
+        "[addroid auth meta] この token で取得できる Ad Account がありません。ads_read / ads_management / business_management 権限と Business 側の割り当てを確認してください。\n"
       );
       return 1;
     }
@@ -893,7 +893,9 @@ function looksLikeMetaAccessToken(value: string): boolean {
 function requiredMetaScopesMissing(scopes: readonly string[]): string[] {
   if (scopes.length === 0) return [];
   const set = new Set(scopes);
-  return ["ads_read", "ads_management"].filter((scope) => !set.has(scope));
+  return ["ads_read", "ads_management", "business_management"].filter(
+    (scope) => !set.has(scope)
+  );
 }
 
 function resolveCliRedirectUri(): URL | null {

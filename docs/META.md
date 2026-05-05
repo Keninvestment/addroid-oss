@@ -33,8 +33,7 @@ insights をすべて in-memory で deterministic に再現します。`graph.fa
 
 1. [Meta for Developers](https://developers.facebook.com/) で Business App を作成
 2. Marketing API を有効化
-3. `ads_read`, `ads_management` を含む Access Token を発行
-4. Business 配下の資産取得が必要な場合は `business_management` も付与
+3. `ads_read`, `ads_management`, `business_management` を含む Access Token を発行
 5. System User token を使う場合は、Business Settings で System User に対象 Ad Account を割り当てる
 
 非エンジニア向けの標準手順では OAuth callback は使いません。ローカル利用のために

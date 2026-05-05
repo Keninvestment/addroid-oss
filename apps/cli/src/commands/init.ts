@@ -384,7 +384,7 @@ async function maybeConfigureMetaAccessToken(opts: {
   opts.out.push("  AdDroid の標準設定は OAuth callback ではなく Access Token 入力方式です。");
   opts.out.push("  ローカル利用で HTTPS callback URL を用意する必要はありません。");
   opts.out.push("  Meta Business Suite / Graph API Explorer 等で token を発行し、この後の入力欄に貼り付けます。");
-  opts.out.push("  必要な権限の目安: ads_read, ads_management。Business 配下の資産取得では business_management が必要になる場合があります。");
+  opts.out.push("  必要な権限の目安: ads_read, ads_management, business_management。");
   opts.out.push("  token 入力後、AdDroid が取得できる Ad Account を表示し、利用するアカウントを選択します。");
   opts.out.push("  入力値は ENCRYPTION_KEY で暗号化し、平文では保存しません。");
   process.stdout.write(opts.out.join("\n") + "\n");

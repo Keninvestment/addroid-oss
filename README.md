@@ -147,7 +147,7 @@ AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。
    - **Instagram Account**: Instagram 配信やInstagram連携creativeを使う場合に必要です。
    - **App**: 手順 2 で作成した Business App。token 発行時に選択します。
 6. System User を選んだ状態で **Generate New Token** を押し、手順 2 の Business App を選択します。
-7. Permission / scope は、まず `ads_read`, `ads_management` を選びます。Business 配下の資産取得で必要な場合は `business_management` も付与します。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
+7. Permission / scope は、`ads_read`, `ads_management`, `business_management` を選びます。AdDroid は広告アカウント一覧の取得、入稿操作、Business 配下の資産確認にこれらを使います。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
 8. 表示された token は、その画面を離れると再表示できない前提で安全な場所に一時保管します。AdDroid へ登録した後は、平文を共有・コミットしないでください。
 9. 初回セットアップ後、Meta アカウント連携は次で行います。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
