@@ -25,6 +25,7 @@
 
 import { spawnSync } from "node:child_process";
 import http from "node:http";
+import * as readlineControl from "node:readline";
 import readline from "node:readline/promises";
 import {
   buildSlackInstallationMetadata,
@@ -574,6 +575,11 @@ function promptSecret(question: string): Promise<string> {
   return new Promise((resolve, reject) => {
     let value = "";
     const stdin = process.stdin;
+    const renderMask = () => {
+      readlineControl.clearLine(process.stdout, 0);
+      readlineControl.cursorTo(process.stdout, 0);
+      process.stdout.write(`? ${question}: ${"*".repeat(value.length)}`);
+    };
     const onData = (chunk: Buffer) => {
       const s = chunk.toString("utf8");
       for (const ch of s) {
@@ -591,9 +597,13 @@ function promptSecret(question: string): Promise<string> {
         }
         if (ch === "\u007f" || ch === "\b") {
           value = value.slice(0, -1);
+          renderMask();
           continue;
         }
-        if (ch >= " ") value += ch;
+        if (ch >= " ") {
+          value += ch;
+          renderMask();
+        }
       }
     };
     const cleanup = () => {
@@ -601,7 +611,7 @@ function promptSecret(question: string): Promise<string> {
       stdin.setRawMode(false);
       stdin.pause();
     };
-    process.stdout.write(`? ${question}: `);
+    renderMask();
     stdin.setRawMode(true);
     stdin.resume();
     stdin.on("data", onData);
