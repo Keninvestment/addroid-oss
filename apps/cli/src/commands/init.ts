@@ -293,7 +293,7 @@ async function runInteractiveInit(
     opts.projectName ??
     (await prompt(
       "この AdDroid インスタンスの名前",
-      existing?.workspace.displayName ?? "my-ads"
+      existing?.workspace.displayName ?? "addroid"
     ));
   const databaseUrl =
     opts.databaseUrl ??

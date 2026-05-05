@@ -297,6 +297,50 @@ test("init --interactive は prompt の回答で .env / config を作る", async
   });
 });
 
+test("init --interactive はインスタンス名を空 Enter にすると addroid を使う", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    delete process.env.DATABASE_URL;
+    delete process.env.ENCRYPTION_KEY;
+    const answers = ["", "postgresql://addroid@localhost:5432/addroid"];
+    try {
+      const { code, out } = await capture(() =>
+        runInit(
+          [
+            "--interactive",
+            "--skip-deps",
+            "--skip-db-create",
+            "--skip-db-push",
+            "--env-file",
+            envFile,
+          ],
+          {
+            isTTY: true,
+            prompt: async (_question, defaultValue = "") => {
+              const answer = answers.shift() ?? "";
+              return answer.trim() ? answer : defaultValue;
+            },
+            confirm: async () => false,
+            randomBytes: () => Buffer.alloc(32, 7),
+          }
+        )
+      );
+      assert.equal(code, 0, out.stdout + out.stderr);
+
+      const configRaw = fs.readFileSync(path.join(home, "config.yaml"), "utf8");
+      assert.match(configRaw, /slug: addroid/);
+      assert.match(configRaw, /displayName: addroid/);
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
 test("init --interactive は Meta Access Token 入力方式を案内し OAuth secret を要求しない", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
