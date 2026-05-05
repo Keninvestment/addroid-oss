@@ -576,12 +576,15 @@ function promptSecret(question: string): Promise<string> {
     let value = "";
     const stdin = process.stdin;
     const renderMask = () => {
+      const visibleStars = Math.min(value.length, 24);
+      const suffix = value.length > visibleStars ? ` (${value.length} chars)` : "";
       readlineControl.clearLine(process.stdout, 0);
       readlineControl.cursorTo(process.stdout, 0);
-      process.stdout.write(`? ${question}: ${"*".repeat(value.length)}`);
+      process.stdout.write(`? ${question}: ${"*".repeat(visibleStars)}${suffix}`);
     };
     const onData = (chunk: Buffer) => {
       const s = chunk.toString("utf8");
+      let changed = false;
       for (const ch of s) {
         if (ch === "\u0003") {
           cleanup();
@@ -597,14 +600,15 @@ function promptSecret(question: string): Promise<string> {
         }
         if (ch === "\u007f" || ch === "\b") {
           value = value.slice(0, -1);
-          renderMask();
+          changed = true;
           continue;
         }
         if (ch >= " ") {
           value += ch;
-          renderMask();
+          changed = true;
         }
       }
+      if (changed) renderMask();
     };
     const cleanup = () => {
       stdin.off("data", onData);
