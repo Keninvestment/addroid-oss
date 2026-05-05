@@ -90,7 +90,13 @@ interface CommandResult {
 type CommandRunner = (
   cmd: string,
   args: string[],
-  opts?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeoutMs?: number }
+  opts?: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+    timeoutMs?: number;
+    streamOutput?: boolean;
+  }
 ) => CommandResult;
 
 export async function runInit(
@@ -151,6 +157,8 @@ async function runNonInteractiveSetup(
   const lines: string[] = ["[addroid init]", "", "Running non-interactive setup."];
 
   if (!opts.skipDeps && opts.installDeps) {
+    process.stdout.write(lines.join("\n") + "\n");
+    lines.length = 0;
     const dep = await setupDependencies({ opts, env, runner });
     lines.push(...dep.lines);
     if (!dep.ok) {
@@ -775,7 +783,7 @@ async function installMissingDependencies(
         out.push({ label: "uv", outcome: approval.outcome });
         return out;
       }
-      const r = runner("sh", ["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"], {
+      const r = runVisibleCommand("uv", command, runner, "sh", ["-c", command], {
         env,
         timeoutMs: 180_000,
       });
@@ -791,7 +799,10 @@ async function installMissingDependencies(
         out.push({ label: "Python 3.12+", outcome: approval.outcome });
         return out;
       }
-      const r = runner(
+      const r = runVisibleCommand(
+        "Python 3.12+",
+        command,
+        runner,
         "sh",
         [
           "-c",
@@ -815,7 +826,10 @@ async function installMissingDependencies(
         out.push({ label: "Meta Ads CLI", outcome: approval.outcome });
         return out;
       }
-      const r = runner(
+      const r = runVisibleCommand(
+        "Meta Ads CLI",
+        command,
+        runner,
         "sh",
         [
           "-c",
@@ -889,6 +903,8 @@ async function setupDependencies(opts: {
   if (failing.length === 0) {
     return { ok: true, lines };
   }
+  process.stdout.write(lines.join("\n") + "\n");
+  lines.length = 0;
   const installResults = await installMissingDependencies(failing, opts.runner, opts.env);
   for (const r of installResults) {
     lines.push(...formatCommandOutcome(r.label, r.outcome));
@@ -928,15 +944,32 @@ function installPostgres(
     if (brew.status !== 0) {
       return { ok: false, detail: "Homebrew が見つかりません。brew install postgresql@16 を手動実行してください。" };
     }
-    const install = runner("brew", ["install", "postgresql@16"], { env, timeoutMs: 300_000 });
+    const install = runVisibleCommand(
+      "PostgreSQL 16+",
+      "brew install postgresql@16",
+      runner,
+      "brew",
+      ["install", "postgresql@16"],
+      { env, timeoutMs: 300_000 }
+    );
     if (install.status !== 0) return { ok: false, detail: summarizeCommandFailure(install) };
-    const start = runner("brew", ["services", "start", "postgresql@16"], { env, timeoutMs: 60_000 });
+    const start = runVisibleCommand(
+      "PostgreSQL 16+",
+      "brew services start postgresql@16",
+      runner,
+      "brew",
+      ["services", "start", "postgresql@16"],
+      { env, timeoutMs: 60_000 }
+    );
     return commandOutcome(start, "PostgreSQL service started");
   }
   if (process.platform === "linux") {
     const apt = runner("sh", ["-c", "command -v apt-get >/dev/null 2>&1"], { env, timeoutMs: 10_000 });
     if (apt.status === 0) {
-      const install = runner(
+      const install = runVisibleCommand(
+        "PostgreSQL 16+",
+        "sudo apt-get update && sudo apt-get install -y postgresql-16 postgresql-client-16",
+        runner,
         "sh",
         ["-c", "sudo apt-get update && sudo apt-get install -y postgresql-16 postgresql-client-16"],
         { env, timeoutMs: 300_000 }
@@ -945,14 +978,47 @@ function installPostgres(
     }
     const dnf = runner("sh", ["-c", "command -v dnf >/dev/null 2>&1"], { env, timeoutMs: 10_000 });
     if (dnf.status === 0) {
-      const install = runner("sh", ["-c", "sudo dnf install -y postgresql-server postgresql"], {
-        env,
-        timeoutMs: 300_000,
-      });
+      const install = runVisibleCommand(
+        "PostgreSQL 16+",
+        "sudo dnf install -y postgresql-server postgresql",
+        runner,
+        "sh",
+        ["-c", "sudo dnf install -y postgresql-server postgresql"],
+        {
+          env,
+          timeoutMs: 300_000,
+        }
+      );
       return commandOutcome(install, "PostgreSQL packages installed");
     }
   }
   return { ok: false, detail: "このOSでは PostgreSQL の自動インストール手順を判定できませんでした。" };
+}
+
+function runVisibleCommand(
+  label: string,
+  commandForDisplay: string,
+  runner: CommandRunner,
+  cmd: string,
+  args: string[],
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeoutMs?: number }
+): CommandResult {
+  const startedAt = Date.now();
+  process.stdout.write(`  ${label}: running\n`);
+  process.stdout.write(`    $ ${commandForDisplay}\n`);
+  process.stdout.write("    インストール中です。数分かかる場合があります。コマンド出力をそのまま表示します。\n");
+  const result = runner(cmd, args, { ...opts, streamOutput: true });
+  const elapsed = formatElapsed(Date.now() - startedAt);
+  process.stdout.write(`  ${label}: finished (${elapsed})\n`);
+  return result;
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`;
 }
 
 function commandOutcome(r: CommandResult, success: string): { ok: boolean; detail: string } {
@@ -963,13 +1029,22 @@ function commandOutcome(r: CommandResult, success: string): { ok: boolean; detai
 function defaultRunCommand(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; timeoutMs?: number } = {}
+  opts: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+    timeoutMs?: number;
+    streamOutput?: boolean;
+  } = {}
 ): CommandResult {
   const r = spawnSync(cmd, args, {
     cwd: opts.cwd,
     env: opts.env,
     input: opts.input,
     encoding: "utf8",
+    ...(opts.streamOutput
+      ? { stdio: [opts.input === undefined ? "ignore" : "pipe", "inherit", "inherit"] as const }
+      : {}),
     timeout: opts.timeoutMs ?? 120_000,
   });
   return {
