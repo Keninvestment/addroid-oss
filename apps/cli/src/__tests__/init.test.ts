@@ -292,7 +292,10 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       assert.match(out.stdout, /OAuth callback ではなく Access Token 入力方式/);
       assert.match(out.stdout, /HTTPS callback URL を用意する必要はありません/);
       assert.match(out.stdout, /token 入力後.*Ad Account.*選択/);
-      assert.deepEqual(authCalls, [["meta"]]);
+      assert.deepEqual(authCalls, [
+        ["meta"],
+        ["llm", "--provider", "codex"],
+      ]);
       assert.doesNotMatch(out.stdout, /Meta Access Token を今ここで設定しますか/);
       assert.doesNotMatch(out.stdout, /Meta Access Token を入力して Ad Account を選択しますか/);
       assert.match(out.stdout, /LLM Provider setup:/);

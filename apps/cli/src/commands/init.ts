@@ -229,7 +229,7 @@ async function runNonInteractiveSetup(
   lines.push("  2. Meta Access Token を用意");
   lines.push("  3. addroid auth meta                    # token 入力 + Ad Account 選択");
   lines.push("  4. addroid accounts select");
-  lines.push("  5. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
+  lines.push("  5. addroid auth llm --provider openai   # または anthropic / codex");
   lines.push("  6. addroid up");
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -399,7 +399,7 @@ async function runInteractiveInit(
   out.push("  1. addroid doctor");
   out.push("  2. addroid auth meta                    # Meta Access Token 入力 + Ad Account 選択");
   out.push("  3. addroid accounts select");
-  out.push("  4. addroid auth llm --provider openai   # または anthropic / Codex OAuth は /ai から接続");
+  out.push("  4. addroid auth llm --provider openai   # または anthropic / codex");
   out.push("  5. addroid up");
   out.push("");
   process.stdout.write(out.join("\n"));
@@ -469,7 +469,7 @@ async function maybeConfigureLLMProvider(opts: {
         {
           value: "codex-oauth",
           label: "Codex OAuth",
-          description: "後で Web UI /ai から Codex OAuth 接続します",
+          description: "ブラウザを開いて Codex OAuth 認証します",
         },
       ],
       "openai-api-key"
@@ -484,10 +484,20 @@ async function maybeConfigureLLMProvider(opts: {
     return false;
   }
   if (choice === "codex-oauth" || choice === "oauth" || choice === "codex") {
-    opts.out.push("  LLM Provider  : Codex OAuth selected");
-    opts.out.push(
-      "                  ADDROID_CODEX_* と ENCRYPTION_KEY を設定後、`addroid up` → http://127.0.0.1:3000/ai から OAuth 接続してください。"
+    opts.out.push("  LLM Provider  : configuring Codex OAuth");
+    opts.out.push("                  ブラウザが開きます。自動検出できない場合は callback URL を貼り付けて続行できます。");
+    process.stdout.write(opts.out.join("\n") + "\n");
+    opts.out.length = 0;
+    const runAuthCommand =
+      opts.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+    const code = await withRuntimeEnv(opts.env, () =>
+      runAuthCommand(["llm", "--provider", "codex"])
     );
+    opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+    if (code !== 0) {
+      opts.out.push("                  実利用には LLM Provider が必須です。ADDROID_CODEX_* を確認し、`addroid auth llm --provider codex` を再実行してください。");
+      return false;
+    }
     return true;
   }
 
@@ -1431,7 +1441,7 @@ function printInitHelp(): void {
       "  `addroid auth meta` で token を暗号化保存し、Ad Account を選択します。",
       "  OAuth callback を使う上級者向け経路は `addroid auth meta --oauth` です。",
       "  LLM Provider は openai-api-key / anthropic-api-key / codex-oauth から選択できます。",
-      "  API key は `addroid auth llm` 経由で ENCRYPTION_KEY により暗号化保存されます。",
+      "  API key / Codex OAuth token は `addroid auth llm` 経由で ENCRYPTION_KEY により暗号化保存されます。",
       "",
     ].join("\n")
   );

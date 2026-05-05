@@ -171,6 +171,40 @@ test("auth llm は API key を暗号化して oauth_tokens に保存する", asy
   });
 });
 
+test("auth llm --provider codex は OAuth 設定不足を分かりやすく返す", async () => {
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert() {
+        return {};
+      },
+      async deleteMany() {
+        return { count: 0 };
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+      ADDROID_CODEX_CLIENT_ID: undefined,
+      ADDROID_CODEX_AUTHORIZATION_URL: undefined,
+      ADDROID_CODEX_TOKEN_URL: undefined,
+      ADDROID_CODEX_CHAT_COMPLETIONS_URL: undefined,
+      ADDROID_CODEX_DEFAULT_MODEL: undefined,
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(["llm", "--provider", "codex", "--no-open"], {
+          prismaOverride,
+        })
+      )
+  );
+  assert.equal(code, 2);
+  assert.match(out.stderr, /Codex OAuth が未設定です/);
+  assert.match(out.stderr, /ADDROID_CODEX_CLIENT_ID/);
+});
+
 test("auth slack はトークン未指定で 2 を返す", async () => {
   await withEnv(
     {

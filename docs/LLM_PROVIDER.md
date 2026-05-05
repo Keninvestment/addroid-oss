@@ -93,12 +93,25 @@ ADDROID_CODEX_CLIENT_SECRET=    # 設定すると Confidential Client、未設�
 
 ### 3.3 OAuth フロー
 
-1. `addroid up` で web を起動
-2. Web UI `/ai` の "Codex を接続" を押す
-3. ブラウザが OAuth ページに遷移し、許可後 `/api/oauth/codex/callback` で
-   AdDroid が token 交換 (PKCE 既定)
+対話型 `addroid init` で `Codex OAuth` を選ぶと、その場で
+`addroid auth llm --provider codex` が起動します。
+
+1. CLI がブラウザを開き、Codex / OpenAI OAuth の許可画面に遷移
+2. 許可後、`http://127.0.0.1:3000/api/oauth/codex/callback` を CLI が localhost で受信
+3. AdDroid が authorization code を token に交換 (PKCE 既定)
 4. `oauth_tokens` (provider="codex") に AES-256-GCM で暗号化保存
-5. `/ai` で provider status が `connected` になり、`default_model` が表示
+
+localhost callback を自動検出できない場合は、ブラウザに表示された callback URL 全体を
+CLI に貼り付けて Enter すると同じ処理で完了できます。
+
+後から接続し直す場合:
+
+```bash
+npm run addroid -- auth llm --provider codex
+```
+
+Web UI から接続する場合は、`addroid up` 後に `/ai` の "Codex を接続" を押しても同じ
+`oauth_tokens` に保存されます。
 
 ---
 

@@ -57,13 +57,21 @@ import {
 } from "@addroid/meta-adapter";
 import {
   defaultApiKeyChatUrl,
+  LLMNotImplementedError,
+  LLMOAuthStateMismatchError,
+  selectLLMProvider,
   type ApiKeyLLMProviderName,
+  type LLMConnectionMeta,
 } from "@addroid/llm-provider";
 import {
   buildPrismaMetaAdapterSelection,
   createPrismaMetaTokenStore,
   loadMetaOAuthClientFromEnv,
 } from "../../../worker/src/lib/meta-runtime.js";
+import {
+  createPrismaLLMProviderTokenStore,
+  loadCodexLLMClientFromEnv,
+} from "../../../worker/src/lib/llm-runtime.js";
 import {
   ensureCliWorkspace,
   formatAccountLine,
@@ -94,12 +102,14 @@ interface ParsedMetaArgs {
 
 interface ParsedLlmArgs {
   kind: "llm";
-  provider: ApiKeyLLMProviderName;
+  provider: ApiKeyLLMProviderName | "codex";
   apiKey?: string;
   model?: string;
   baseUrl?: string;
   disconnect: boolean;
   asJson: boolean;
+  openBrowser: boolean;
+  timeoutMs: number;
 }
 
 type ParsedAction =
@@ -135,6 +145,8 @@ export interface SlackAuthRunOptions {
   now?: () => Date;
   /** Meta Graph API 用 fetch 注入。テストでモックする。 */
   metaFetch?: typeof fetch;
+  /** Codex OAuth token exchange 用 fetch 注入。テストでモックする。 */
+  llmFetch?: typeof fetch;
 }
 
 export async function runAuthCommand(
@@ -253,12 +265,14 @@ function parseArgs(args: string[]): ParsedAction {
 
   if (provider === "llm") {
     const env = process.env;
-    let llmProvider: ApiKeyLLMProviderName | null = null;
+    let llmProvider: ApiKeyLLMProviderName | "codex" | null = null;
     let apiKey: string | undefined;
     let model: string | undefined;
     let baseUrl: string | undefined;
     let disconnect = false;
     let asJson = false;
+    let openBrowser = true;
+    let timeoutMs = 180_000;
 
     for (let i = 0; i < rest.length; i += 1) {
       const a = rest[i]!;
@@ -272,14 +286,18 @@ function parseArgs(args: string[]): ParsedAction {
         if (a === "--help" || a === "-h") return { kind: "help" };
         if (a === "--json") asJson = true;
         else if (a === "--disconnect") disconnect = true;
-        else if (a === "--provider") llmProvider = requireApiKeyProvider(take());
-        else if (a.startsWith("--provider=")) llmProvider = requireApiKeyProvider(a.slice("--provider=".length));
+        else if (a === "--provider") llmProvider = requireLLMAuthProvider(take());
+        else if (a.startsWith("--provider=")) llmProvider = requireLLMAuthProvider(a.slice("--provider=".length));
         else if (a === "--api-key") apiKey = take();
         else if (a.startsWith("--api-key=")) apiKey = a.slice("--api-key=".length);
         else if (a === "--model") model = take();
         else if (a.startsWith("--model=")) model = a.slice("--model=".length);
         else if (a === "--base-url") baseUrl = take();
         else if (a.startsWith("--base-url=")) baseUrl = a.slice("--base-url=".length);
+        else if (a === "--no-open") openBrowser = false;
+        else if (a === "--timeout-ms") {
+          timeoutMs = Number(take());
+        } else if (a.startsWith("--timeout-ms=")) timeoutMs = Number(a.slice("--timeout-ms=".length));
         else if (a.startsWith("--")) {
           return {
             kind: "error",
@@ -305,8 +323,17 @@ function parseArgs(args: string[]): ParsedAction {
       }
     }
 
-    llmProvider ??= parseApiKeyProvider(env.ADDROID_LLM_PROVIDER) ?? "openai";
-    if (!apiKey) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 10_000) {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: "[addroid auth llm] --timeout-ms は 10000 以上のミリ秒で指定してください\n",
+        stdoutHelp: true,
+      };
+    }
+
+    llmProvider ??= parseLLMAuthProvider(env.ADDROID_LLM_PROVIDER) ?? "openai";
+    if (!apiKey && llmProvider !== "codex") {
       apiKey =
         llmProvider === "anthropic"
           ? env.ANTHROPIC_API_KEY
@@ -320,6 +347,8 @@ function parseArgs(args: string[]): ParsedAction {
       ...(baseUrl ? { baseUrl } : {}),
       disconnect,
       asJson,
+      openBrowser,
+      timeoutMs,
     };
   }
 
@@ -404,9 +433,15 @@ function parseApiKeyProvider(value: string | undefined): ApiKeyLLMProviderName |
   return null;
 }
 
-function requireApiKeyProvider(value: string | undefined): ApiKeyLLMProviderName {
-  const parsed = parseApiKeyProvider(value);
-  if (!parsed) throw new Error("--provider は openai または anthropic を指定してください");
+function parseLLMAuthProvider(value: string | undefined): ApiKeyLLMProviderName | "codex" | null {
+  const v = value?.trim().toLowerCase();
+  if (v === "codex" || v === "codex-oauth") return "codex";
+  return parseApiKeyProvider(v);
+}
+
+function requireLLMAuthProvider(value: string | undefined): ApiKeyLLMProviderName | "codex" {
+  const parsed = parseLLMAuthProvider(value);
+  if (!parsed) throw new Error("--provider は openai / anthropic / codex を指定してください");
   return parsed;
 }
 
@@ -464,6 +499,14 @@ async function runAuthLlm(
         );
       }
       return 0;
+    }
+
+    if (parsed.provider === "codex") {
+      return await runAuthLlmCodexOAuth({ ...parsed, provider: "codex" }, {
+        prisma: prisma as never,
+        crypto,
+        fetchImpl: opts.llmFetch,
+      });
     }
 
     const apiKey = parsed.apiKey ?? (await promptSecret(`${parsed.provider} API key`));
@@ -556,6 +599,122 @@ async function runAuthLlm(
       await prisma.$disconnect().catch(() => undefined);
     }
   }
+}
+
+async function runAuthLlmCodexOAuth(
+  parsed: ParsedLlmArgs & { provider: "codex" },
+  opts: {
+    prisma: Parameters<typeof createPrismaLLMProviderTokenStore>[0];
+    crypto: ReturnType<typeof getCryptoBoundary>;
+    fetchImpl?: typeof fetch;
+  }
+): Promise<number> {
+  const redirectUri = resolveCodexCliRedirectUri();
+  if (!redirectUri) return 2;
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ADDROID_LLM_PROVIDER: "codex",
+    ADDROID_CODEX_OAUTH_REDIRECT_URI: redirectUri.toString(),
+  };
+  const codexClient = loadCodexLLMClientFromEnv(env);
+  const chatCompletionsUrl = env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || null;
+  const defaultModel = parsed.model?.trim() || env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || null;
+  const tokenStore = createPrismaLLMProviderTokenStore(opts.prisma);
+  const selection = selectLLMProvider({
+    env,
+    tokenStore,
+    crypto: opts.crypto,
+    codexClient,
+    chatCompletionsUrl,
+    defaultModel: defaultModel ?? undefined,
+    fetchImpl: opts.fetchImpl,
+    stubProvider: "codex",
+  });
+
+  if (selection.choice === "stub") {
+    process.stderr.write(
+      "[addroid auth llm] Codex OAuth が未設定です。\n" +
+        `  reason: ${selection.reason}\n` +
+        "  .env に ADDROID_CODEX_CLIENT_ID / ADDROID_CODEX_AUTHORIZATION_URL / ADDROID_CODEX_TOKEN_URL / ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL を設定してください。\n"
+    );
+    return 2;
+  }
+  if (selection.choice !== "codex") {
+    process.stderr.write(
+      `[addroid auth llm] Codex OAuth ではなく ${selection.choice} が選択されました。ADDROID_LLM_PROVIDER=codex で再実行してください。\n`
+    );
+    return 2;
+  }
+
+  let authorizationUrl: string;
+  try {
+    authorizationUrl = (await selection.provider.beginOAuth()).authorizationUrl;
+  } catch (err) {
+    if (err instanceof LLMNotImplementedError) {
+      process.stderr.write(`[addroid auth llm] ${err.message}\n`);
+      return 2;
+    }
+    throw err;
+  }
+
+  if (!parsed.asJson) {
+    process.stdout.write("[addroid auth llm]\n\n");
+    process.stdout.write("  provider      : codex\n");
+    process.stdout.write("  auth          : oauth\n");
+    process.stdout.write(`  OAuth URL     : ${authorizationUrl}\n`);
+    process.stdout.write(`  Callback      : ${redirectUri.toString()}\n`);
+    process.stdout.write("  ブラウザで Codex OAuth 認証を完了してください。\n");
+    process.stdout.write("  自動検出できない場合は、認証後の callback URL を端末に貼り付けて Enter してください。\n\n");
+  }
+
+  let callback: Awaited<ReturnType<typeof waitForLLMOAuthCallback>> | null = null;
+  let connection: LLMConnectionMeta;
+  try {
+    callback = await waitForLLMOAuthCallback({
+      redirectUri,
+      timeoutMs: parsed.timeoutMs,
+      complete: async (code, state) => selection.provider.completeOAuth({ code, state }),
+      manualPrompt: !parsed.asJson && Boolean(process.stdin.isTTY),
+    });
+    if (parsed.openBrowser) openUrl(authorizationUrl);
+    connection = await callback.connection;
+  } catch (err) {
+    if (err instanceof LLMOAuthStateMismatchError) {
+      process.stderr.write("[addroid auth llm] OAuth state mismatch (possible CSRF).\n");
+      return 1;
+    }
+    process.stderr.write(`[addroid auth llm] ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    callback?.server.close();
+  }
+
+  if (parsed.asJson) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: true,
+          provider: "codex",
+          authKind: "oauth",
+          accountIdentifier: connection.accountIdentifier,
+          scopes: connection.scopes,
+          connectedAt: connection.connectedAt,
+          expiresAt: connection.expiresAt,
+          defaultModel: connection.defaultModel,
+        },
+        null,
+        2
+      )}\n`
+    );
+  } else {
+    process.stdout.write(`  connected     : ${connection.accountIdentifier}\n`);
+    process.stdout.write(`  model         : ${connection.defaultModel}\n`);
+    process.stdout.write(`  scopes        : ${connection.scopes.join(", ") || "none"}\n`);
+    process.stdout.write(`  expires       : ${connection.expiresAt ?? "unknown"}\n`);
+    process.stdout.write("  token         : encrypted (oauth_tokens.accessTokenCiphertext)\n");
+  }
+  return 0;
 }
 
 function looksLikeApiKey(provider: ApiKeyLLMProviderName, apiKey: string): boolean {
@@ -1024,6 +1183,198 @@ function waitForMetaCallback(opts: {
   return { server, connection };
 }
 
+function resolveCodexCliRedirectUri(): URL | null {
+  const explicit = process.env.ADDROID_CODEX_OAUTH_REDIRECT_URI;
+  const binding = resolveWebBinding(process.env);
+  let uri: URL;
+  try {
+    uri = new URL(
+      explicit ??
+        `http://${binding.hostname}:${binding.port}/api/oauth/codex/callback`
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[addroid auth llm] Codex redirect URI が不正です: ${(err as Error).message}\n`
+    );
+    return null;
+  }
+  const hostname = uri.hostname.replace(/^\[(.*)\]$/, "$1");
+  const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  if (!localHosts.has(hostname)) {
+    process.stderr.write(
+      "[addroid auth llm] CLI Codex OAuth callback は localhost の redirect URI のみ利用できます。\n" +
+        "  ADDROID_CODEX_OAUTH_REDIRECT_URI を http://127.0.0.1:<port>/api/oauth/codex/callback に設定してください。\n"
+    );
+    return null;
+  }
+  if (uri.pathname !== "/api/oauth/codex/callback") {
+    process.stderr.write(
+      "[addroid auth llm] Codex redirect URI の path は /api/oauth/codex/callback にしてください。\n"
+    );
+    return null;
+  }
+  return uri;
+}
+
+function waitForLLMOAuthCallback(opts: {
+  redirectUri: URL;
+  timeoutMs: number;
+  complete: (code: string, state: string) => Promise<LLMConnectionMeta>;
+  manualPrompt: boolean;
+}): { server: http.Server; connection: Promise<LLMConnectionMeta> } {
+  let settled = false;
+  let manualPromptStarted = false;
+  let timeout: NodeJS.Timeout;
+  let resolveConnection: (v: LLMConnectionMeta) => void;
+  let rejectConnection: (err: unknown) => void;
+  const connection = new Promise<LLMConnectionMeta>((resolve, reject) => {
+    resolveConnection = resolve;
+    rejectConnection = reject;
+  });
+
+  const finishWithUrl = async (rawUrl: string) => {
+    const parsed = parseOAuthCallbackUrl(rawUrl, opts.redirectUri);
+    if ("error" in parsed) throw new Error(parsed.error);
+    return opts.complete(parsed.code, parsed.state);
+  };
+  const resolveOnce = (result: LLMConnectionMeta) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    resolveConnection(result);
+  };
+  const rejectOnce = (err: unknown) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    rejectConnection(err);
+  };
+  const askForCallbackUrl = (reason: string) => {
+    if (!opts.manualPrompt || manualPromptStarted || settled) return false;
+    manualPromptStarted = true;
+    process.stdout.write(`\n  ${reason}\n`);
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    void rl
+      .question("? Codex OAuth callback URL を貼り付けて Enter: ")
+      .then(async (answer) => {
+        rl.close();
+        if (settled) return;
+        if (!answer.trim()) {
+          rejectOnce(
+            new Error(
+              "Callback URL が未入力です。もう一度 `addroid auth llm --provider codex` を実行してください。"
+            )
+          );
+          return;
+        }
+        resolveOnce(await finishWithUrl(answer.trim()));
+      })
+      .catch((err) => {
+        rl.close();
+        rejectOnce(err);
+      });
+    return true;
+  };
+
+  const server = http.createServer(async (req, res) => {
+    const reqUrl = new URL(req.url ?? "/", opts.redirectUri.origin);
+    if (req.method !== "GET" || reqUrl.pathname !== opts.redirectUri.pathname) {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Not Found");
+      return;
+    }
+    const code = reqUrl.searchParams.get("code");
+    const state = reqUrl.searchParams.get("state");
+    const error =
+      reqUrl.searchParams.get("error_description") ?? reqUrl.searchParams.get("error");
+    if (!code || !state || error) {
+      const message = error ?? "Missing code or state in callback URL.";
+      res.writeHead(400, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Codex OAuth failed", message));
+      rejectOnce(new Error(message));
+      return;
+    }
+    try {
+      const result = await opts.complete(code, state);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Codex OAuth connected", "You can return to the terminal."));
+      resolveOnce(result);
+    } catch (err) {
+      res.writeHead(500, { "content-type": "text/html; charset=utf-8" });
+      res.end(renderOAuthHtml("Codex OAuth failed", (err as Error).message));
+      rejectOnce(err);
+    }
+  });
+
+  timeout = setTimeout(() => {
+    if (settled) return;
+    if (
+      askForCallbackUrl(
+        "localhost callback を時間内に検出できませんでした。ブラウザに表示された callback URL を貼り付けると続行できます。"
+      )
+    ) {
+      return;
+    }
+    rejectOnce(new Error("Timed out waiting for Codex OAuth callback."));
+    server.close();
+  }, opts.timeoutMs);
+  timeout.unref?.();
+
+  const port = Number(
+    opts.redirectUri.port || (opts.redirectUri.protocol === "https:" ? 443 : 80)
+  );
+  const host = opts.redirectUri.hostname.replace(/^\[(.*)\]$/, "$1");
+  server.listen(port, host);
+  server.on("error", (err) => {
+    if (settled) return;
+    if (
+      askForCallbackUrl(
+        `localhost callback server を開始できませんでした (${(err as Error).message})。手動貼り付けに切り替えます。`
+      )
+    ) {
+      return;
+    }
+    rejectOnce(
+      new Error(
+        `OAuth callback server failed on ${opts.redirectUri.origin}: ${(err as Error).message}`
+      )
+    );
+  });
+  return { server, connection };
+}
+
+function parseOAuthCallbackUrl(
+  rawUrl: string,
+  redirectUri: URL
+): { code: string; state: string } | { error: string } {
+  let url: URL;
+  try {
+    url = new URL(rawUrl.trim());
+  } catch {
+    return {
+      error:
+        "callback URL は code と state を含む完全な URL を貼り付けてください。",
+    };
+  }
+  if (url.pathname !== redirectUri.pathname) {
+    return {
+      error: `callback URL の path が違います。${redirectUri.pathname} を含む URL を貼り付けてください。`,
+    };
+  }
+  const providerError =
+    url.searchParams.get("error_description") ?? url.searchParams.get("error");
+  if (providerError) return { error: providerError };
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  if (!code || !state) {
+    return {
+      error:
+        "callback URL に code または state がありません。ブラウザのアドレスバーに表示された URL 全体を貼り付けてください。",
+    };
+  }
+  return { code, state };
+}
+
 function openUrl(url: string): void {
   const platform = process.platform;
   const cmd =
@@ -1352,7 +1703,8 @@ function printHelp() {
       "  addroid auth meta --oauth [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
       "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
       "  addroid auth llm --provider <openai|anthropic> [--api-key <key>] [--model <model>] [--base-url <url>] [--json]",
-      "  addroid auth llm --provider <openai|anthropic> --disconnect [--json]",
+      "  addroid auth llm --provider codex [--no-open] [--timeout-ms <ms>] [--json]",
+      "  addroid auth llm --provider <openai|anthropic|codex> --disconnect [--json]",
       "",
       "Options:",
       "  --token <token>    Meta Access Token。未指定時は非表示入力",
@@ -1360,11 +1712,11 @@ function printHelp() {
       "  --oauth            上級者向け: Meta OAuth callback 経路を使う",
       "  --no-open          Meta OAuth URL をブラウザで自動オープンしない (--oauth 時のみ)",
       "  --no-select-default Meta Ad Account 既定選択をスキップ",
-      "  --timeout-ms <ms>  Meta OAuth callback 待機時間 (既定 180000, --oauth 時のみ)",
+      "  --timeout-ms <ms>  OAuth callback 待機時間 (既定 180000, Meta --oauth / Codex OAuth 時)",
       "  --xoxb <token>     Slack Bot User OAuth Token (xoxb-*)",
       "  --xapp <token>     Slack App-Level Token (xapp-*, Socket Mode 用)",
       "  --channel <id>     通知先チャンネル ID (Cxxxx / Gxxxx / Dxxxx)",
-      "  --provider <name>  LLM API key provider (openai / anthropic)",
+      "  --provider <name>  LLM provider (openai / anthropic / codex)",
       "  --api-key <key>    LLM API key。未指定時は OPENAI_API_KEY / ANTHROPIC_API_KEY または非表示入力",
       "  --model <model>    LLM 既定 model",
       "  --base-url <url>   LLM endpoint override (https のみ)",
@@ -1380,6 +1732,7 @@ function printHelp() {
       "  - Meta の標準経路は Access Token 入力です。HTTPS callback URL は不要です。",
       "  - token 入力後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
       "  - OAuth callback は `addroid auth meta --oauth` の上級者向け経路として残しています。",
+      "  - Codex OAuth は `addroid auth llm --provider codex` でブラウザ認証を開始し、localhost callback または callback URL 貼り付けで完了します。",
       "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
       "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",
       "  - 平文トークンは ENCRYPTION_KEY (AES-256-GCM) で暗号化し oauth_tokens に保存します。",

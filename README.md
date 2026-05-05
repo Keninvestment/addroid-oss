@@ -355,9 +355,9 @@ addroid/
 - **任意統合のフェイルクローズ**: LLM Provider 未設定時は `StubLLMProvider` が fail-closed し、
   GitOps 状態を破壊しません。Slack / Image Provider 未設定時は通知 / 画像生成のみが
   skip され、Apply / Activate / レポート取得は通常通り動きます。
-- **LLM API key は暗号化保存**: `addroid auth llm --provider openai|anthropic` で登録した
-  API key は `ENCRYPTION_KEY` により `oauth_tokens.access_token_ciphertext` に保存され、
-  `.env` への恒久保存は不要です。
+- **LLM credential は暗号化保存**: `addroid auth llm --provider openai|anthropic` の
+  API key と `addroid auth llm --provider codex` の OAuth token は `ENCRYPTION_KEY` により
+  `oauth_tokens.access_token_ciphertext` に保存され、`.env` への恒久保存は不要です。
 - **画像生成キーも平文保存しない**: GPT Image 2 は登録済み OpenAI API key の暗号化済み
   credential を再利用します。Codex app-server 経路は localhost のみ許可し、外部 URL を
   ブラウザに露出しません。
