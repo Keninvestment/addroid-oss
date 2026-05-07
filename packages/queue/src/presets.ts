@@ -44,6 +44,12 @@ export const CRON_PRESETS = [
       "performance_snapshots の raw / 粒度 (adset/ad) を 90 日、集計 (account/campaign) を 1 年で掃くリテンション処理",
     enabledByDefault: true,
   },
+  {
+    name: "agent_tasks",
+    cron: "* * * * *",
+    description: "自然言語で保存された Agent task の due run を評価する",
+    enabledByDefault: true,
+  },
 ] as const;
 
 export type CronPreset = (typeof CRON_PRESETS)[number];

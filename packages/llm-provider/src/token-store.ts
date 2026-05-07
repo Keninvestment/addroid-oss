@@ -1,7 +1,8 @@
 // AdDroid OSS — LLM provider OAuth token persistence boundary.
 //
-// CodexLLMProvider は `oauth_tokens` テーブルを直接触らず、本 interface 越しに
-// 保存/取得する。暗号化は provider 側で実施し、Store には常に ciphertext を渡す。
+// OpenAI / Anthropic API key providers は `oauth_tokens` テーブルを直接触らず、
+// 本 interface 越しに保存/取得する。暗号化は provider 側で実施し、Store には常に
+// ciphertext を渡す。Codex は app-server route のため token store を使わない。
 //
 // 実装:
 //   - InMemoryLLMProviderTokenStore  (本ファイル) — テスト/ローカル simulation 用

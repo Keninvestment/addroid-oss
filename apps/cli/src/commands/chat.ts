@@ -1,6 +1,6 @@
 // `addroid chat` — local CLI chat shell backed by the configured LLM provider.
 //
-// init で保存済みの Codex OAuth / OpenAI / Anthropic credential を使い、
+// init で接続済みの Codex app-server / OpenAI / Anthropic credential を使い、
 // AdDroid 専用の tool agent として自然文の操作を実行する。任意 shell は実行しない。
 
 import readline from "node:readline/promises";
@@ -11,6 +11,11 @@ import type {
   LLMCompletionRequest,
   LLMProvider,
 } from "@addroid/llm-provider";
+import {
+  buildAgentContext,
+  runAgentTurn,
+  type AgentContext,
+} from "@addroid/agent-runtime";
 import { runDoctor } from "./doctor.js";
 import { runStatus } from "./status.js";
 import { runLogs } from "./logs.js";
@@ -24,11 +29,6 @@ import {
   runScheduleCommand,
   runSubmitCommand,
 } from "./public.js";
-import { buildAgentContext, type AgentContext } from "../lib/agent-context.js";
-import {
-  evaluateChatToolPolicy,
-  isDeniedUserRequest,
-} from "../lib/chat-policy.js";
 import { ensureWebUiStarted } from "../lib/web-service.js";
 
 type ChatCommandName =
@@ -285,41 +285,23 @@ async function handleChatInput(
     agentContext: AgentContext;
   }
 ): Promise<number> {
-  const requestPolicy = isDeniedUserRequest(input);
-  if (!requestPolicy.allowed) {
-    opts.out.write(
-      `その操作は安全ポリシーにより実行できません: ${requestPolicy.reason}\n` +
-        "AdDroid では validate / plan --dry-run / GitHub PR / worker apply の経路を使ってください。\n"
-    );
-    return 0;
-  }
-
-  const response = await buildAgentResponseWithLlm(
+  const response = await runAgentTurn({
     input,
-    opts.provider,
-    opts.agentContext,
-    opts.model
-  ).catch((err) => ({
-    message: `LLM による解釈に失敗しました: ${(err as Error).message}`,
-    tools: [],
-  }));
-
+    provider: opts.provider,
+    agentContext: opts.agentContext,
+    model: opts.model,
+    purpose: "cli:chat-agent",
+  });
   if (response.message) opts.out.write(`${response.message}\n`);
-  const tools = response.tools ?? [];
-  if (tools.length === 0) return 0;
-
+  if (response.toolResults.length === 0) return 0;
   let lastCode = 0;
-  for (const rawTool of tools) {
-    const normalized = normalizeToolCall(rawTool);
-    const policy = evaluateChatToolPolicy(normalized.name, normalized.args);
-    if (!policy.allowed) {
-      opts.out.write(
-        `denied: ${normalized.name} (${policy.reason ?? "policy denied"})\n`
-      );
+  for (const tool of response.toolResults) {
+    if (tool.status === "denied") {
+      opts.out.write(`denied: ${tool.toolName} (${tool.reason})\n`);
       continue;
     }
-    const tool = safeResolveTool(normalized, opts.out);
-    if (!tool) {
+    if (tool.status === "unsupported") {
+      opts.out.write(`unsupported tool: ${tool.toolName} (${tool.reason})\n`);
       continue;
     }
     opts.out.write(`> ${tool.display}${tool.why ? `  # ${tool.why}` : ""}\n`);
@@ -327,7 +309,7 @@ async function handleChatInput(
       opts.out.write(`${opts.agentContext.webUrl}\n`);
       continue;
     }
-    const code = await opts.runCommand(tool.command, tool.args);
+    const code = await opts.runCommand(tool.command as ChatCommandName, tool.args);
     if (code !== 0) {
       lastCode = code;
       break;
@@ -1034,11 +1016,11 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "  日次レポートを取得",
       "  入稿前チェックをして",
       "  GitHub を接続して ops repo を作って",
-      "  AI を Codex OAuth で再接続して",
+      "  AI を Codex app-server で再接続して",
       "  Web UI を開きたい",
       "",
       "Notes:",
-      "  - init で保存済みの Codex OAuth / OpenAI / Anthropic credential を使います。",
+      "  - init で接続済みの Codex app-server / OpenAI / Anthropic credential を使います。",
       "  - 入力欄で `/` を押すと利用できるコマンド候補を表示します。",
       "  - `/report`, `/submit`, `/connect github`, `/account`, `/schedule`, `/open`, `/status` を直接実行できます。",
       "  - LLM は AGENTS.md と主要 docs を参照して AdDroid tool を直接実行します。",

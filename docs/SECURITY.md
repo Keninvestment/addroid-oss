@@ -56,7 +56,7 @@ AdDroid は **localhost-only / outbound-only** で動作するセルフホスト
   - raw UTF-8 (>=32 byte) → SHA-256 で 32 byte に派生
 - ciphertext 形式: `v1.aes256gcm.<iv-b64>.<tag-b64>.<payload-b64>` (各 IV はランダム生成)
 - `oauth_tokens` の主要列:
-  - `provider` — `github` / `meta` / `codex` / `slack`
+  - `provider` — `github` / `meta` / `openai` / `anthropic` / `slack`
   - `accountIdentifier` — provider 内のテナント識別子 (例: GitHub login、Meta user id、Slack team_id)
   - `accessTokenCiphertext` / `refreshTokenCiphertext`
   - `scopes` / `expiresAt` / `connectedAt` / `lastRefreshedAt`
@@ -78,7 +78,8 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 |---|---|---|
 | GitHub | CLI `addroid connect github` の OAuth Device Flow / Web UI `/github` の OAuth Code Flow | `oauth_tokens` (provider="github") |
 | Meta | `addroid connect meta` または Web UI `/accounts` の OAuth Code Flow | `oauth_tokens` (provider="meta") |
-| Codex / OpenAI | OAuth (PKCE 既定、Confidential Client は `ADDROID_CODEX_CLIENT_SECRET`) | `oauth_tokens` (provider="codex") |
+| Codex | ローカル Codex CLI / `codex app-server` のログイン状態を利用 | AdDroid には保存しない |
+| OpenAI / Anthropic | CLI `addroid connect ai` の API key 登録 | `oauth_tokens` (provider="openai" / "anthropic") |
 | Slack | `addroid connect slack` で Bot/App トークンを暗号化保存 (Socket Mode 接続テスト後) | `oauth_tokens` (provider="slack") |
 
 トークンはすべて **平文をプロセス内変数のみで保持**し、ログ出力や `console.log` を
@@ -189,9 +190,9 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 - LLM Provider 未設定時は `StubLLMProvider` が **fail-closed** し、AI workflow は GitOps
   状態を破壊せずに失敗します。`improvement_pr` は提案を生成できないため `skipped` 扱いで
   PR は作成されません。
-- Codex / OpenAI トークンは OAuth (PKCE 既定) で取得し、`oauth_tokens` (provider="codex")
-  に暗号化保存します。
-- OpenAI / Anthropic API key 認証を使う場合も、API key は `oauth_tokens.access_token_ciphertext`
+- Codex はローカル Codex CLI / `codex app-server` のログイン状態を利用し、AdDroid DB には
+  Codex token を保存しません。
+- OpenAI / Anthropic API key 認証を使う場合、API key は `oauth_tokens.access_token_ciphertext`
   に AES-256-GCM で暗号化保存します。`.env` に恒久保存する必要はありません。
 - Image Provider 未設定時は creative 生成を skip し、improvement_pr は **テキストのみで PR
   を作成**します (UI は `succeeded_text_only` の benign idle 表示)。

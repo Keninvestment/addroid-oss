@@ -61,7 +61,7 @@ export interface SelectImageProviderOptions {
   crypto?: ApiKeyCryptoBoundary;
   /** 保存済み OpenAI key があることを呼び出し側が確認済みなら true。 */
   openaiCredentialAvailable?: boolean;
-  /** Codex OAuth / local mode などから Codex app-server を優先する場合 true。 */
+  /** Codex app-server / local mode などから Codex app-server を優先する場合 true。 */
   preferCodex?: boolean;
   openai?: Partial<Omit<OpenAIImageProviderOptions, "tokenStore" | "crypto">>;
   codex?: CodexAppServerImageProviderOptions;

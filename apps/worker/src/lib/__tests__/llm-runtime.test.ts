@@ -2,8 +2,8 @@
 //
 // 目的:
 //   - `createPrismaLLMProviderTokenStore` が `oauth_tokens` テーブルを upsert /
-//     findFirst / deleteMany で正しく扱い、Codex の `defaultModel` を `metadata`
-//     JSON 列に保存・復元できること (acceptance: provider/model metadata 永続化)。
+//     findFirst / deleteMany で正しく扱い、API key provider の `defaultModel` を
+//     `metadata` JSON 列に保存・復元できること (acceptance: provider/model metadata 永続化)。
 //   - 平文 token が **絶対に** Store / 戻り値経由で漏れないこと
 //     (constraint: encrypted boundary 経由のみ)。
 //   - metadata が壊れている / 欠落している行は `loadOAuthToken` で null を返す
@@ -17,11 +17,10 @@ import assert from "node:assert/strict";
 import type { PrismaClient } from "@addroid/db";
 import type { LLMProviderTokenRecord } from "@addroid/llm-provider";
 
-import { CodexLLMProvider } from "@addroid/llm-provider";
+import { CodexAppServerLLMProvider } from "@addroid/llm-provider";
 
 import {
   createPrismaLLMProviderTokenStore,
-  loadCodexLLMClientFromEnv,
   selectLLMProviderForWorker,
 } from "../llm-runtime.js";
 
@@ -29,16 +28,10 @@ import {
 // 本物の credential ではない。
 const TEST_ENCRYPTION_KEY = "Zm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyZm9vYmFyMA==";
 
-// production Codex 経路を有効化するための完全な env セット。
+// production Codex app-server 経路を有効化するための完全な env セット。
 function fullCodexEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     ENCRYPTION_KEY: TEST_ENCRYPTION_KEY,
-    ADDROID_CODEX_CLIENT_ID: "addroid-codex-cli",
-    ADDROID_CODEX_AUTHORIZATION_URL: "https://auth.example.test/oauth/authorize",
-    ADDROID_CODEX_TOKEN_URL: "https://auth.example.test/oauth/token",
-    ADDROID_CODEX_CHAT_COMPLETIONS_URL:
-      "https://api.example.test/v1/chat/completions",
-    ADDROID_CODEX_DEFAULT_MODEL: "gpt-4.1",
     ...extra,
   } as NodeJS.ProcessEnv;
 }
@@ -293,20 +286,19 @@ test("createPrismaLLMProviderTokenStore.deleteOAuthToken は該当行が無い�
 // selectLLMProviderForWorker — wiring
 // ---------------------------------------------------------------------
 
-test("selectLLMProviderForWorker: prisma 注入時は Prisma-backed store 経路 (reason に表記)", async () => {
+test("selectLLMProviderForWorker: prisma 注入時も Codex app-server 経路を返す", async () => {
   const { client } = makeFakePrisma();
   const sel = await selectLLMProviderForWorker(
     {} as NodeJS.ProcessEnv,
     { prisma: client }
   );
-  // 既定 OAuth 設定が無い → Stub に倒れるが、reason に "prisma" マーカーが入る。
-  assert.equal(sel.choice, "stub");
+  assert.equal(sel.choice, "codex");
   assert.match(sel.reason, /prisma/);
 });
 
 test("selectLLMProviderForWorker: prisma 未注入 (default) は InMemory 経路", async () => {
   const sel = await selectLLMProviderForWorker({} as NodeJS.ProcessEnv);
-  assert.equal(sel.choice, "stub");
+  assert.equal(sel.choice, "codex");
   assert.match(sel.reason, /in-memory/);
 });
 
@@ -351,7 +343,7 @@ test("selectLLMProviderForWorker: encrypted OpenAI API key row があれば API 
   assert.equal(sel.provider.authKind, "api_key");
 });
 
-test("selectLLMProviderForWorker: ADDROID_LLM_PROVIDER=codex は API key 行より Codex OAuth 設定を優先する", async () => {
+test("selectLLMProviderForWorker: ADDROID_LLM_PROVIDER=codex は API key 行より Codex app-server を優先する", async () => {
   const { client } = makeFakePrisma([
     {
       provider: "openai",
@@ -369,128 +361,40 @@ test("selectLLMProviderForWorker: ADDROID_LLM_PROVIDER=codex は API key 行よ�
     { prisma: client }
   );
   assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
-});
-
-// ---------------------------------------------------------------------
-// loadCodexLLMClientFromEnv — env-driven OAuth client config
-// ---------------------------------------------------------------------
-
-test("loadCodexLLMClientFromEnv: 必須 env 揃うと PKCE client config を返す", () => {
-  const cfg = loadCodexLLMClientFromEnv(fullCodexEnv());
-  assert.ok(cfg);
-  assert.equal(cfg!.clientId, "addroid-codex-cli");
-  assert.equal(cfg!.authorizationUrl, "https://auth.example.test/oauth/authorize");
-  assert.equal(cfg!.tokenUrl, "https://auth.example.test/oauth/token");
-  assert.equal(cfg!.tokenAuthMethod, "pkce_s256");
-  assert.equal(cfg!.clientSecret, undefined);
-  // redirectUri は web binding の既定値を採用する。
-  assert.match(cfg!.redirectUri, /\/api\/oauth\/codex\/callback$/);
-});
-
-test("loadCodexLLMClientFromEnv: CLIENT_SECRET があれば confidential client に切替", () => {
-  const cfg = loadCodexLLMClientFromEnv(
-    fullCodexEnv({ ADDROID_CODEX_CLIENT_SECRET: "shhh" })
-  );
-  assert.ok(cfg);
-  assert.equal(cfg!.tokenAuthMethod, "client_secret_post");
-  assert.equal(cfg!.clientSecret, "shhh");
-});
-
-test("loadCodexLLMClientFromEnv: SCOPES env をパースして scopes に渡す", () => {
-  const cfg = loadCodexLLMClientFromEnv(
-    fullCodexEnv({ ADDROID_CODEX_SCOPES: "openai, offline_access" })
-  );
-  assert.ok(cfg);
-  assert.deepEqual(Array.from(cfg!.scopes ?? []), ["openai", "offline_access"]);
-});
-
-test("loadCodexLLMClientFromEnv: REDIRECT_URI env が override される", () => {
-  const cfg = loadCodexLLMClientFromEnv(
-    fullCodexEnv({
-      ADDROID_CODEX_OAUTH_REDIRECT_URI: "http://127.0.0.1:9999/cb",
-    })
-  );
-  assert.ok(cfg);
-  assert.equal(cfg!.redirectUri, "http://127.0.0.1:9999/cb");
-});
-
-test("loadCodexLLMClientFromEnv: Codex OAuth の内蔵 client config を使える", () => {
-  const env = fullCodexEnv();
-  delete env.ADDROID_CODEX_CLIENT_ID;
-  delete env.ADDROID_CODEX_AUTHORIZATION_URL;
-  delete env.ADDROID_CODEX_TOKEN_URL;
-  delete env.ADDROID_CODEX_SCOPES;
-  const cfg = loadCodexLLMClientFromEnv(env);
-  assert.ok(cfg);
-  assert.equal(cfg!.clientId, "app_EMoamEEZ73f0CkXaXp7hrann");
-  assert.equal(cfg!.authorizationUrl, "https://auth.openai.com/oauth/authorize");
-  assert.equal(cfg!.tokenUrl, "https://auth.openai.com/oauth/token");
-  assert.deepEqual(Array.from(cfg!.scopes ?? []), [
-    "openid",
-    "profile",
-    "email",
-    "offline_access",
-  ]);
-  assert.deepEqual(cfg!.extraAuthorizeParams, {
-    id_token_add_organizations: "true",
-    codex_cli_simplified_flow: "true",
-    originator: "addroid",
-  });
+  assert.ok(sel.provider instanceof CodexAppServerLLMProvider);
 });
 
 // ---------------------------------------------------------------------
 // selectLLMProviderForWorker — production Codex wiring (regression fix)
 // ---------------------------------------------------------------------
 
-test("selectLLMProviderForWorker: 全 env + ENCRYPTION_KEY + prisma → CodexLLMProvider", async () => {
+test("selectLLMProviderForWorker: prisma → CodexAppServerLLMProvider", async () => {
   const { client } = makeFakePrisma();
   const sel = await selectLLMProviderForWorker(fullCodexEnv(), {
     prisma: client,
   });
   assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
-  assert.equal(sel.provider.defaultModel, "gpt-4.1");
+  assert.ok(sel.provider instanceof CodexAppServerLLMProvider);
+  assert.equal(sel.provider.defaultModel, "codex-app-server");
   assert.match(sel.reason, /prisma/);
 });
 
-test("selectLLMProviderForWorker: ENCRYPTION_KEY 未設定 → Stub (crypto 欠落理由)", async () => {
+test("selectLLMProviderForWorker: ENCRYPTION_KEY 未設定でも Codex app-server は利用できる", async () => {
   const { client } = makeFakePrisma();
   const env = fullCodexEnv();
   delete env.ENCRYPTION_KEY;
   const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "stub");
-  assert.match(sel.reason, /crypto/);
+  assert.equal(sel.choice, "codex");
+  assert.ok(sel.provider instanceof CodexAppServerLLMProvider);
 });
 
-test("selectLLMProviderForWorker: CHAT_COMPLETIONS_URL 未設定でも内蔵既定値で CodexLLMProvider", async () => {
+test("selectLLMProviderForWorker: app-server 既定値で Codex", async () => {
   const { client } = makeFakePrisma();
   const env = fullCodexEnv();
-  delete env.ADDROID_CODEX_CHAT_COMPLETIONS_URL;
   const sel = await selectLLMProviderForWorker(env, { prisma: client });
   assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
-});
-
-test("selectLLMProviderForWorker: DEFAULT_MODEL 未設定でも内蔵既定値で CodexLLMProvider", async () => {
-  const { client } = makeFakePrisma();
-  const env = fullCodexEnv();
-  delete env.ADDROID_CODEX_DEFAULT_MODEL;
-  const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
-  assert.equal(sel.provider.defaultModel, "gpt-4.1");
-});
-
-test("selectLLMProviderForWorker: CODEX OAuth client env なしでも内蔵設定で CodexLLMProvider", async () => {
-  const { client } = makeFakePrisma();
-  const env = fullCodexEnv();
-  delete env.ADDROID_CODEX_CLIENT_ID;
-  delete env.ADDROID_CODEX_AUTHORIZATION_URL;
-  delete env.ADDROID_CODEX_TOKEN_URL;
-  const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
+  assert.ok(sel.provider instanceof CodexAppServerLLMProvider);
+  assert.equal(sel.provider.defaultModel, "codex-app-server");
 });
 
 test("selectLLMProviderForWorker: ADDROID_LLM_MOCK=1 は Codex env が揃っていても Mock を優先", async () => {

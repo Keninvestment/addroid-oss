@@ -85,6 +85,7 @@ import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
 import { selectImageProviderForWorker } from "./lib/image-runtime.js";
 import { startSlackSocketRuntime } from "./lib/slack-socket-runtime.js";
 import type { SlackSocketReceiverHandle } from "@addroid/queue";
+import { runDueAgentTasks } from "./lib/agent-task-runtime.js";
 
 export interface StartWorkerOptions {
   /**
@@ -897,6 +898,40 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   ? { note: "no active ad_accounts in workspace" }
                   : {}),
               });
+            }
+          } else if (preset.name === "agent_tasks") {
+            const summary = await runDueAgentTasks({
+              prisma,
+              workspaceId: workspace.id,
+              provider: llmSelection.provider,
+              boss,
+            });
+            const level: "info" | "warn" | "error" =
+              summary.status === "succeeded"
+                ? "info"
+                : summary.status === "partial_failure"
+                  ? "warn"
+                  : "error";
+            await cronStore.recordExecutionLog({
+              cronRunId: handle.cronRunId,
+              workspaceId: workspace.id,
+              kind: "cron",
+              refType: "cron_run",
+              refId: handle.cronRunId,
+              level,
+              message:
+                `agent_tasks: ${summary.status} ` +
+                `(due=${summary.due}, succeeded=${summary.succeeded}, failed=${summary.failed})`,
+              payload: summary as unknown as JsonValue,
+            });
+            if (summary.status === "failed") {
+              await failCronRun(
+                cronStore,
+                handle,
+                `agent_tasks failed: ${summary.failed}/${summary.due}`
+              );
+            } else {
+              await finishCronRun(cronStore, handle, summary as unknown as JsonValue);
             }
           } else if (preset.name === "retention_sweep") {
             // Regression fix: performance_snapshots の保持期間

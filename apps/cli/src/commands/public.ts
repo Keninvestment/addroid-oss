@@ -231,7 +231,7 @@ function printConnectHelp(): void {
       "  addroid connect slack",
       "",
       "Notes:",
-      "  - ai は Codex OAuth / OpenAI API key / Claude API key の選択から開始します。",
+      "  - ai は Codex app-server / OpenAI API key / Claude API key の選択から開始します。",
       "",
     ].join("\n")
   );

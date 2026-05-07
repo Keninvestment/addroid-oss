@@ -8,10 +8,7 @@
 // 重要 — ハードコードされた token や API key は使わない。決定的な
 // completion 文字列を返し、tests から failureMode で切替えできる。
 
-import {
-  generateCodexOAuthState,
-  generatePkceCodeVerifier,
-} from "./oauth.js";
+import { randomBytes } from "node:crypto";
 import { estimateCostUsd } from "./pricing.js";
 import type {
   LLMProviderTokenRecord,
@@ -36,7 +33,7 @@ import {
   type LLMRefreshResult,
 } from "./types.js";
 
-const MOCK_AUTH_BASE = "https://addroid.invalid/mock-codex-oauth/authorize";
+const MOCK_AUTH_BASE = "https://addroid.invalid/mock-llm-auth/authorize";
 const MOCK_DEFAULT_MODEL = "mock-small";
 
 export interface MockLLMProviderOptions {
@@ -99,8 +96,8 @@ export class MockLLMProvider implements LLMProvider {
   }
 
   async beginOAuth(): Promise<LLMBeginOAuthResult> {
-    const state = generateCodexOAuthState();
-    const codeVerifier = generatePkceCodeVerifier();
+    const state = randomBytes(32).toString("base64url");
+    const codeVerifier = randomBytes(32).toString("base64url");
     this.pending = { state, codeVerifier };
     const params = new URLSearchParams({
       state,

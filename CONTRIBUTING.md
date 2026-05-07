@@ -122,7 +122,7 @@ hex を直接書きません。
 
 | 種別 | 追加場所 | 備考 |
 |---|---|---|
-| LLM Provider | `packages/llm-provider/src/factory.ts` | `CodexLLMProvider` を雛形に adapter pattern |
+| LLM Provider | `packages/llm-provider/src/factory.ts` | `CodexAppServerLLMProvider` を雛形に adapter pattern |
 | Image Provider | `packages/llm-provider/src/image-factory.ts` | mock / stub 経路を保持して fail-closed |
 | Storage backend | `packages/config/src/storage.ts` | `LocalDiskStorage` を雛形に adapter pattern |
 | Ad platform | 新規 `packages/<platform>-adapter/` | `meta-adapter` を雛形に Real / Mock / Stub の 3 形態を実装 |

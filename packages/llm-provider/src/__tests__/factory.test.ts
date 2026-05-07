@@ -1,24 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  CodexLLMProvider,
+  CodexAppServerLLMProvider,
   InMemoryLLMProviderTokenStore,
-  LLMProviderNotConfiguredError,
   MockLLMProvider,
-  StubLLMProvider,
   selectLLMProvider,
-  type CodexOAuthClientConfig,
-  type CryptoEncryptDecrypt,
+  type ApiKeyCryptoBoundary,
 } from "../index.js";
 
-const CLIENT: CodexOAuthClientConfig = {
-  clientId: "id",
-  redirectUri: "http://127.0.0.1:3000/api/oauth/codex/callback",
-  authorizationUrl: "https://auth.example.test/oauth/authorize",
-  tokenUrl: "https://auth.example.test/oauth/token",
-};
-
-const CRYPTO: CryptoEncryptDecrypt = {
+const CRYPTO: ApiKeyCryptoBoundary = {
   encrypt: (s) => `enc::${s}`,
   decrypt: (s) => s.replace(/^enc::/, ""),
 };
@@ -27,52 +17,40 @@ test("selectLLMProvider prefers MockLLMProvider when ADDROID_LLM_MOCK=1", () => 
   const sel = selectLLMProvider({
     env: { ADDROID_LLM_MOCK: "1" },
     tokenStore: new InMemoryLLMProviderTokenStore(),
-    codexClient: CLIENT,
     crypto: CRYPTO,
-    chatCompletionsUrl: "https://api.example.test/v1/chat/completions",
     defaultModel: "gpt-4.1",
   });
   assert.equal(sel.choice, "mock");
   assert.ok(sel.provider instanceof MockLLMProvider);
 });
 
-test("selectLLMProvider chooses CodexLLMProvider when all required deps are present", () => {
+test("selectLLMProvider chooses CodexAppServerLLMProvider for the codex route", () => {
   const sel = selectLLMProvider({
     env: {},
     tokenStore: new InMemoryLLMProviderTokenStore(),
-    codexClient: CLIENT,
-    crypto: CRYPTO,
-    chatCompletionsUrl: "https://api.example.test/v1/chat/completions",
-    defaultModel: "gpt-4.1",
   });
   assert.equal(sel.choice, "codex");
-  assert.ok(sel.provider instanceof CodexLLMProvider);
+  assert.ok(sel.provider instanceof CodexAppServerLLMProvider);
 });
 
-test("selectLLMProvider falls back to StubLLMProvider when codex client is missing", async () => {
+test("selectLLMProvider can still produce a stub for explicit non-codex missing routes", async () => {
   const sel = selectLLMProvider({
     env: {},
     tokenStore: new InMemoryLLMProviderTokenStore(),
-    crypto: CRYPTO,
-    chatCompletionsUrl: "https://api.example.test/v1/chat/completions",
-    defaultModel: "gpt-4.1",
+    stubProvider: "openai",
   });
   assert.equal(sel.choice, "stub");
-  assert.ok(sel.provider instanceof StubLLMProvider);
-  await assert.rejects(
-    () => sel.provider.complete({ messages: [{ role: "user", content: "x" }] }),
-    LLMProviderNotConfiguredError
-  );
+  assert.equal(sel.provider.name, "openai");
 });
 
-test("selectLLMProvider's stub falls back to a sensible default model when none provided", () => {
+test("selectLLMProvider's codex route falls back to a sensible default model", () => {
   const sel = selectLLMProvider({
     env: {},
     tokenStore: new InMemoryLLMProviderTokenStore(),
   });
-  assert.equal(sel.choice, "stub");
+  assert.equal(sel.choice, "codex");
   assert.equal(sel.provider.name, "codex");
-  assert.equal(sel.provider.defaultModel, "gpt-4.1");
+  assert.equal(sel.provider.defaultModel, "codex-app-server");
 });
 
 test("selectLLMProvider mock inherits options from `mock`", async () => {
@@ -95,10 +73,9 @@ test("selectLLMProvider stub records a reason that names every missing dep", () 
   const sel = selectLLMProvider({
     env: {},
     tokenStore: new InMemoryLLMProviderTokenStore(),
+    stubProvider: "openai",
   });
   assert.equal(sel.choice, "stub");
-  assert.match(sel.reason, /codexClient/);
   assert.match(sel.reason, /crypto/);
-  assert.match(sel.reason, /chatCompletionsUrl/);
   assert.match(sel.reason, /defaultModel/);
 });

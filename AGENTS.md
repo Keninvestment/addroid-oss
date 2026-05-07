@@ -19,8 +19,10 @@ AdDroid is a localhost-bound, outbound-only operator console for GitOps-driven M
 - Initial setup should already have collected Meta credentials, selected a Meta account, configured GitHub, and configured an LLM provider when available.
 - Actual ad submission is GitOps-based. The expected path is ops repo changes, validation, dry-run plan, GitHub PR review/merge, and worker apply. Do not bypass this path by directly mutating Meta from chat.
 - Submission checks must remain dry-run from chat. Use them to explain what would change before an apply path is taken.
-- Web UI and CLI chat share the same encrypted credential stores. Never reveal tokens, API keys, OAuth codes, refresh tokens, or decrypted secret values.
+- Web UI, CLI chat, and scheduled Agent tasks share the same encrypted credential stores and the same Agent runtime. Never reveal tokens, API keys, OAuth codes, refresh tokens, or decrypted secret values.
 - Prefer user-facing command names in explanations: `connect`, `account`, `report`, `submit`, `schedule`, `start`, `stop`, and `open`. Low-level commands are for CI or troubleshooting only.
+- Dashboard chat and scheduled Agent tasks should preserve LLM flexibility: understand the user's natural language, inspect current AdDroid state, and choose supported tools at runtime. Do not convert natural language into arbitrary shell commands.
+- Scheduled Agent tasks store the natural-language prompt and schedule. At each run, reinterpret the prompt with the current `AGENTS.md`, tool manifest, and runtime snapshot, then execute allowed AdDroid tools through the same deny policy as CLI chat.
 
 ## Safety Rules
 

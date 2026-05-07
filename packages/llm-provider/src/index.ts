@@ -1,6 +1,6 @@
 // AdDroid OSS — `@addroid/llm-provider` barrel.
 //
-// 各サブモジュール (types / oauth / token-store / codex / mock / stub / factory /
+// 各サブモジュール (types / token-store / codex-app-server / api-key / mock / stub / factory /
 // pricing) を集約し、apps/web / apps/worker / apps/cli から単一エントリで
 // 参照できるようにする。新しい I/O を追加する場合はサブモジュール側に閉じ込め、
 // 本ファイルからは re-export のみを行う。
@@ -30,24 +30,7 @@ export {
   type LLMUsage,
 } from "./types.js";
 
-export {
-  ADDROID_CODEX_DEFAULT_SCOPES,
-  CodexOAuthExchangeError,
-  buildCodexAuthorizationUrl,
-  deriveCodexExpiresAt,
-  deriveS256CodeChallenge,
-  exchangeCodexCodeForToken,
-  generateCodexOAuthState,
-  generatePkceCodeVerifier,
-  redactPayloadForError,
-  refreshCodexAccessToken,
-  type BuildCodexAuthorizationUrlOptions,
-  type BuiltCodexAuthorizationUrl,
-  type CodexExchangeCodeForTokenOptions,
-  type CodexExchangedToken,
-  type CodexOAuthClientConfig,
-  type CodexRefreshTokenOptions,
-} from "./oauth.js";
+export { redactPayloadForError } from "./redact.js";
 
 export {
   InMemoryLLMProviderTokenStore,
@@ -56,10 +39,13 @@ export {
 } from "./token-store.js";
 
 export {
-  CodexLLMProvider,
-  type CodexLLMProviderDeps,
-  type CryptoEncryptDecrypt,
-} from "./codex.js";
+  CodexAppServerLLMProvider,
+  type CodexLLMAppServerHandle,
+  type CodexAppServerLLMProviderOptions,
+  type CodexAppServerLoginOptions,
+  type CodexLLMAppServerRpcClient,
+  type CodexLLMAppServerRpcNotification,
+} from "./codex-app-server.js";
 
 export {
   ApiKeyLLMProvider,

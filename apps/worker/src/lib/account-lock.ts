@@ -137,7 +137,10 @@ async function acquirePostgresAdvisoryLock(
         try {
           // BigInt 引数は Prisma 5 の $queryRaw で安全にバインドされる。
           // 明示的な ::bigint cast は driver 側で必要な場合の保険。
-          await tx.$queryRaw`SELECT pg_advisory_xact_lock(${lockId}::bigint)`;
+          await tx.$queryRaw`
+            SELECT 1::int AS locked
+            FROM (SELECT pg_advisory_xact_lock(${lockId}::bigint)) AS acquired
+          `;
         } catch (err) {
           acquireReject(err);
           throw err;

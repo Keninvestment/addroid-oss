@@ -5,7 +5,7 @@
 // complete() のスコープ内だけで復号し、URL / Error.message / ai_runs には出さない。
 
 import { estimateCostUsd } from "./pricing.js";
-import { redactPayloadForError } from "./oauth.js";
+import { redactPayloadForError } from "./redact.js";
 import type {
   LLMProviderTokenRecord,
   LLMProviderTokenStore,
@@ -271,6 +271,19 @@ export class ApiKeyLLMProvider implements LLMProvider {
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       const safePayload = redactPayloadForError(text).replaceAll(apiKey, "[REDACTED]");
+      const providerError = parseProviderErrorPayload(safePayload);
+      if (providerError) {
+        const opts: { status: number; payload: unknown; code?: string } = {
+          status: res.status,
+          payload: safePayload,
+        };
+        if (providerError.code) opts.code = providerError.code;
+        throw new LLMProviderError(
+          this.name,
+          `chat completions error: ${providerError.message}`,
+          opts
+        );
+      }
       throw new LLMProviderError(
         this.name,
         `LLM endpoint returned HTTP ${res.status}`,
@@ -296,6 +309,31 @@ function mapFinishReason(raw: string | undefined): LLMCompletionResult["finishRe
     default:
       return "other";
   }
+}
+
+function parseProviderErrorPayload(text: string): { message: string; code?: string } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isObjectRecord(parsed) || !isObjectRecord(parsed.error)) return null;
+  const rawMessage = parsed.error.message;
+  const message =
+    typeof rawMessage === "string" && rawMessage.trim()
+      ? redactPayloadForError(rawMessage.trim())
+      : "unknown";
+  const rawCode = parsed.error.code;
+  const code =
+    typeof rawCode === "string" && rawCode.trim()
+      ? redactPayloadForError(rawCode.trim())
+      : undefined;
+  return code ? { message, code } : { message };
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function defaultApiKeyChatUrl(provider: ApiKeyLLMProviderName): string {

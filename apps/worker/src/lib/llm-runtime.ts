@@ -9,8 +9,8 @@
 //      ローカル開発で daily_report の完全パイプラインを試せるようにする)。
 //   2. それ以外:
 //        - prisma が渡されていれば Prisma-backed store を使う (production 経路)。
-//          Codex OAuth コールバックで保存された ciphertext + metadata を
-//          `oauth_tokens` テーブルから読み出し、CodexLLMProvider に注入する。
+//          OpenAI / Anthropic API key は `oauth_tokens` から読み出す。
+//          Codex は local app-server 経由で、Codex CLI の認証状態を読む。
 //        - prisma が無ければ InMemoryLLMProviderTokenStore に倒し、Stub に落ちる
 //          (CLI 単体実行や test bootstrap 用)。
 //
@@ -28,22 +28,17 @@ import {
   defaultApiKeyChatUrl,
   selectLLMProvider,
   type ApiKeyLLMProviderName,
-  type CodexOAuthClientConfig,
   type LLMProvider,
   type LLMProviderChoice,
   type LLMProviderTokenRecord,
   type LLMProviderTokenStore,
 } from "@addroid/llm-provider";
-import { getCryptoBoundary, resolveWebBinding } from "@addroid/config";
+import { getCryptoBoundary } from "@addroid/config";
 import type { CryptoBoundary } from "@addroid/config";
 import type { Prisma, PrismaClient } from "@addroid/db";
 
-const DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_CODEX_AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize";
-const DEFAULT_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
-const DEFAULT_CODEX_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_CODEX_MODEL = "gpt-4.1";
-const DEFAULT_CODEX_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
+const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
 
 /**
  * Prisma の `oauth_tokens` テーブルを裏に持つ `LLMProviderTokenStore`。
@@ -165,65 +160,6 @@ export function normalizeLLMProviderName(value: string | undefined | null): ApiK
 }
 
 /**
- * `ADDROID_CODEX_*` 系の env から `CodexOAuthClientConfig` を組み立てる。
- *
- * Codex CLI 互換 PKCE フロー (`tokenAuthMethod="pkce_s256"`) を既定とし、
- * `ADDROID_CODEX_CLIENT_SECRET` が与えられた場合は confidential client
- * (`tokenAuthMethod="client_secret_post"`) に切り替える。
- *
- * `clientId` / `authorizationUrl` / `tokenUrl` は Codex CLI 互換の内蔵既定値を使う。
- * `ADDROID_CODEX_*` は自前 OAuth client を使う場合の override として扱う。
- *
- * `redirectUri` は web binding から既定値を組み立てる (Meta runtime と同じ規約)。
- * Worker 自身は redirect を消費しないが、`CodexOAuthClientConfig` の必須項目で
- * あり、web 側の `/api/oauth/codex/callback` が完了後に worker が読む同じ
- * `oauth_tokens` 行に書き戻す。
- */
-export function loadCodexLLMClientFromEnv(
-  env: NodeJS.ProcessEnv = process.env
-): CodexOAuthClientConfig | null {
-  const clientId = env.ADDROID_CODEX_CLIENT_ID?.trim() || DEFAULT_CODEX_CLIENT_ID;
-  const authorizationUrl =
-    env.ADDROID_CODEX_AUTHORIZATION_URL?.trim() || DEFAULT_CODEX_AUTHORIZATION_URL;
-  const tokenUrl = env.ADDROID_CODEX_TOKEN_URL?.trim() || DEFAULT_CODEX_TOKEN_URL;
-  if (!clientId || !authorizationUrl || !tokenUrl) return null;
-
-  const binding = resolveWebBinding(env);
-  const redirectUri =
-    env.ADDROID_CODEX_OAUTH_REDIRECT_URI?.trim() ||
-    `http://${binding.hostname}:${binding.port}/api/oauth/codex/callback`;
-
-  const clientSecret = env.ADDROID_CODEX_CLIENT_SECRET?.trim();
-  const tokenAuthMethod: CodexOAuthClientConfig["tokenAuthMethod"] = clientSecret
-    ? "client_secret_post"
-    : "pkce_s256";
-
-  const scopesRaw = env.ADDROID_CODEX_SCOPES?.trim();
-  const scopes = scopesRaw
-    ? scopesRaw
-        .split(/[\s,]+/)
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0)
-    : undefined;
-
-  const out: CodexOAuthClientConfig = {
-    clientId,
-    redirectUri,
-    authorizationUrl,
-    tokenUrl,
-    tokenAuthMethod,
-    extraAuthorizeParams: {
-      id_token_add_organizations: "true",
-      codex_cli_simplified_flow: "true",
-      originator: env.ADDROID_CODEX_ORIGINATOR?.trim() || "addroid",
-    },
-  };
-  if (clientSecret) out.clientSecret = clientSecret;
-  out.scopes = scopes && scopes.length > 0 ? scopes : Array.from(DEFAULT_CODEX_SCOPES);
-  return out;
-}
-
-/**
  * `ENCRYPTION_KEY` が設定されていれば AES-256-GCM 暗号境界を返す。
  * 未設定 / 短すぎる場合は `null` を返し、呼び出し側は Stub に倒す。
  *
@@ -292,26 +228,33 @@ export async function selectLLMProviderForWorker(
       };
     }
   }
-  // Codex/OpenAI/Anthropic を production で使う場合、Prisma-backed token store が
-  // 必須 (web の OAuth callback で保存された ciphertext + metadata を読む)。
-  // regression fix: factory には codexClient + crypto + chatCompletionsUrl +
-  //   defaultModel を全て渡す必要がある (どれか欠ければ Stub に倒れる)。
-  //   web 側の `/api/oauth/codex/callback` が同じ env / `oauth_tokens` 行を共有
-  //   する前提で、worker と web は同じ env から OAuth client config を組み立てる。
-  // OAuth client config / chatCompletionsUrl / defaultModel が揃っていない間は
-  // factory が StubLLMProvider に倒し、analyst runner が `status="failed"` の
-  // ai_run を返す (snapshot は保存される — GitOps state は腐らない)。
-  const codexClient = loadCodexLLMClientFromEnv(env);
-  const chatCompletionsUrl =
-    env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || DEFAULT_CODEX_CHAT_COMPLETIONS_URL;
-  const defaultModel = env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || DEFAULT_CODEX_MODEL;
+  if (requested === "openai" || requested === "anthropic") {
+    const defaultModel =
+      env[`ADDROID_${requested.toUpperCase()}_DEFAULT_MODEL`]?.trim() ||
+      (requested === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL);
+    const selection = selectLLMProvider({
+      env,
+      tokenStore,
+      defaultModel,
+      stubProvider: requested,
+    });
+    return {
+      provider: selection.provider,
+      choice: selection.choice,
+      reason: `${selection.reason}${opts.prisma ? " (token store: prisma)" : " (token store: in-memory)"}`,
+    };
+  }
   const selection = selectLLMProvider({
     env,
     tokenStore,
-    codexClient,
-    chatCompletionsUrl,
-    ...(crypto ? { crypto } : {}),
-    ...(defaultModel ? { defaultModel } : {}),
+    codexAppServer: {
+      externalServerUrl:
+        env.ADDROID_CODEX_APP_SERVER_URL?.trim() ||
+        env.CODEX_APP_SERVER_URL?.trim() ||
+        null,
+      codexBin: env.CODEX_BIN?.trim() || "codex",
+      cwd: env.ADDROID_CODEX_CWD?.trim() || process.cwd(),
+    },
   });
   const reason = opts.prisma
     ? `${selection.reason} (token store: prisma)`

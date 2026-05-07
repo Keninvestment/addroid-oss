@@ -17,7 +17,7 @@ Image Provider はクリエイティブ画像生成のための独立した任�
 |---|---|---|
 | `ADDROID_LLM_MOCK=1` | `MockLLMProvider` | E2E / smoke-test / 開発 (deterministic fixture) |
 | `oauth_tokens` に OpenAI / Anthropic API key credential がある | `ApiKeyLLMProvider` | 初回セットアップ推奨 |
-| Codex / OpenAI OAuth client config 完備 + `ENCRYPTION_KEY` 設定済 | `CodexLLMProvider` | 本番 |
+| Codex CLI にログイン済み、または `codex app-server` が利用可能 | `CodexAppServerLLMProvider` | 非エンジニア向けの既定経路 |
 | 上記以外 | `StubLLMProvider` (fail-closed) | 未連携状態 |
 
 `StubLLMProvider` は `ai_runs` に `failed: provider not configured` を残して終了し、
@@ -27,9 +27,9 @@ Image Provider はクリエイティブ画像生成のための独立した任�
 
 ## 2. API key 認証 (`ApiKeyLLMProvider`)
 
-初心者向けの推奨経路です。`addroid init` の対話セットアップで
+OpenAI / Claude API key を直接使うユーザー向けの経路です。`addroid init` の対話セットアップで
 `openai-api-key` または `anthropic-api-key` を選ぶか、後から CLI で登録します。
-`addroid connect ai` を provider 未指定で実行すると、Codex OAuth / OpenAI API key /
+`addroid connect ai` を provider 未指定で実行すると、Codex app-server / OpenAI API key /
 Claude (Anthropic) API key の選択から開始できます。
 
 ```bash
@@ -44,9 +44,19 @@ npm run addroid -- connect ai --provider anthropic
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` を一時的な環境変数として渡せます。
 
 ```bash
-npm run addroid -- connect ai --provider openai --model gpt-4.1
-npm run addroid -- connect ai --provider anthropic --model claude-3-5-sonnet-latest
+npm run addroid -- connect ai --provider openai --model gpt-5.5
+npm run addroid -- connect ai --provider anthropic --model claude-opus-4-7
 ```
+
+CLI / init の既定値は次の方針です。
+
+- OpenAI API: `gpt-5.5`
+- Anthropic API: `claude-opus-4-7`
+- Codex app-server: model は指定しない。ローカル Codex の選択状態をそのまま使う
+
+Anthropic の最新 API ID は `claude-opus-4-7` / `claude-sonnet-4-6` です。
+AdDroid の既定値は最新・高性能優先で `claude-opus-4-7` にします。
+速度とコストを優先する場合は `--model claude-sonnet-4-6` を指定してください。
 
 保存先は `oauth_tokens` です。
 
@@ -65,64 +75,63 @@ npm run addroid -- connect ai --provider openai --disconnect
 ```
 
 `ADDROID_LLM_PROVIDER=openai|anthropic|codex` を設定すると provider 優先度を明示できます。
-未指定時は mock → 保存済み API key → Codex OAuth → stub の順に選択します。
+未指定時は mock → 保存済み API key → Codex app-server → stub の順に選択します。
 
 ---
 
-## 3. Codex / OpenAI OAuth (`CodexLLMProvider`)
+## 3. Codex app-server (`CodexAppServerLLMProvider`)
 
-### 3.1 必須環境変数
+Codex は AdDroid の既定 LLM 経路です。AdDroid 独自の認証 client や
+HTTP LLM endpoint は持たず、ローカルの Codex CLI / `codex app-server` にログイン状態と
+モデル実行を委譲します。AdDroid は Codex の access token / refresh token を保存しません。
 
-Codex OAuth の OAuth client は OpenAI Codex 互換の内蔵 public client を既定で使います。
-`ADDROID_CODEX_CLIENT_ID` の入力は不要です。
-
-通常は `addroid init` で `Codex OAuth` を選ぶだけで、次の runtime 設定が `.env` に
-補完されます (`ENCRYPTION_KEY` と `DATABASE_URL` も別途必要):
+### 3.1 必須条件
 
 ```bash
-ADDROID_CODEX_CHAT_COMPLETIONS_URL=https://api.openai.com/v1/chat/completions
-ADDROID_CODEX_DEFAULT_MODEL=gpt-4.1
+codex --version
+```
+
+未インストールの場合は `npm install -g @openai/codex` でインストールします。
+Codex CLI は Codex app-server を選ぶ場合だけ必要なため、通常の `init` dependency check には含めません。
+通常は `addroid init` で `Codex app-server` を選ぶだけで、次の runtime 設定が `.env` に
+補完されます。
+
+```bash
+ADDROID_LLM_PROVIDER=codex
 ```
 
 ### 3.2 任意の上書き
 
 ```bash
-ADDROID_CODEX_CLIENT_ID=...
-ADDROID_CODEX_AUTHORIZATION_URL=https://auth.openai.com/oauth/authorize
-ADDROID_CODEX_TOKEN_URL=https://auth.openai.com/oauth/token
-ADDROID_CODEX_OAUTH_REDIRECT_URI=http://127.0.0.1:3000/api/oauth/codex/callback
-ADDROID_CODEX_SCOPES=openid,profile,email,offline_access
-ADDROID_CODEX_CLIENT_SECRET=    # 設定すると Confidential Client、未設定なら PKCE
+ADDROID_CODEX_APP_SERVER_URL=ws://127.0.0.1:4455
+CODEX_BIN=/opt/homebrew/bin/codex
+ADDROID_CODEX_CWD=/Users/example/addroid
 ```
 
-`offline_access` を含めないと refresh token が発行されず、access token expire 後に
-再 OAuth が必要になります。長期運用では含めることを推奨します。
+`ADDROID_CODEX_APP_SERVER_URL` は既存の app-server を使う場合だけ指定します。
+URL は localhost / loopback のみ許可されます。
 
-### 3.3 OAuth フロー
+### 3.3 接続フロー
 
-対話型 `addroid init` で `Codex OAuth` を選ぶと、その場で
+対話型 `addroid init` で `Codex app-server` を選ぶと、その場で
 `addroid connect ai --provider codex` が起動します。
-内蔵 OAuth client と `.env` の既定 runtime 設定を使うため、client id の入力はありません。
 
-1. CLI がブラウザを開き、Codex / OpenAI OAuth の許可画面に遷移
-2. 許可後、`http://localhost:1455/auth/callback` を CLI が localhost で受信
-3. AdDroid が authorization code を token に交換 (PKCE 既定)
-4. `oauth_tokens` (provider="codex") に AES-256-GCM で暗号化保存
-
-localhost callback を自動検出できない場合は、ブラウザに表示された callback URL 全体を
-CLI に貼り付けて Enter すると同じ処理で完了できます。
+1. AdDroid が `codex app-server` を起動
+2. 既に Codex CLI にログイン済みなら、そのまま接続完了
+3. 未ログインなら app-server が返す URL をブラウザで開いて認証
+4. 認証完了後、AdDroid は接続状態だけ確認して終了
 
 後から接続し直す場合:
 
 ```bash
 npm run addroid -- init --interactive --reauth-llm
 
-# Codex OAuth だけを直接再認証したい場合
+# Codex app-server だけを直接再接続したい場合
 npm run addroid -- connect ai --provider codex
 ```
 
-Web UI から接続する場合は、`addroid start` 後に `/ai` の "Codex を接続" を押しても同じ
-`oauth_tokens` に保存されます。
+Web UI から接続する場合は、`addroid start` 後に `/ai` の "Codex を接続" を押します。
+この場合も Codex token は AdDroid には保存されません。
 
 ---
 
@@ -196,9 +205,9 @@ Anthropic API key は LLM 用には使えますが、GPT Image 2 の画像生成
 Anthropic を LLM に選ぶ場合、画像生成には OpenAI API key または Codex app-server 経路が
 別途必要です。
 
-### 6.3 Codex OAuth / app-server で画像生成する
+### 6.3 Codex app-server で画像生成する
 
-Codex OAuth を使う場合は、OpenAI Images API を直接叩かず、ローカルの
+Codex を使う場合は、OpenAI Images API を直接叩かず、ローカルの
 `codex app-server` 経由で画像生成します。AdDroid は `ws://127.0.0.1:<port>` の
 app-server を起動し、JSON-RPC で生成依頼を送り、保存された PNG を bytes として読み込みます。
 

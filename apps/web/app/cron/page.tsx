@@ -8,6 +8,7 @@ import { PageHeader } from "../../components/ui/PageHeader";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { CronControls } from "./CronControls";
 import { CronRateLimitSummary } from "./CronRateLimitSummary";
+import { AgentTaskForm, type AgentTaskRow } from "./AgentTaskForm";
 
 export const dynamic = "force-dynamic";
 
@@ -30,10 +31,30 @@ export default async function CronSchedulesPage() {
     nextRunAt: Date | null;
   }[] = [];
   let dbReady = true;
+  let agentTasks: AgentTaskRow[] = [];
   try {
     registered = await prisma.cronSchedule.findMany({
       select: { name: true, cron: true, enabled: true, lastRunState: true, nextRunAt: true },
     });
+    const taskRows = await prisma.agentTask.findMany({
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: {
+        id: true,
+        title: true,
+        prompt: true,
+        cron: true,
+        enabled: true,
+        nextRunAt: true,
+        lastRunAt: true,
+        lastState: true,
+      },
+    });
+    agentTasks = taskRows.map((task) => ({
+      ...task,
+      nextRunAt: task.nextRunAt ? task.nextRunAt.toISOString() : null,
+      lastRunAt: task.lastRunAt ? task.lastRunAt.toISOString() : null,
+    }));
   } catch {
     dbReady = false;
   }
@@ -77,6 +98,13 @@ export default async function CronSchedulesPage() {
 
       <div className="page-body page-body--single">
         <CronRateLimitSummary />
+
+        <Panel
+          title="Natural Language Agent Tasks"
+          subtitle="OpenClaw と同様に自然言語のまま保存し、実行時に Dashboard chat と同じ LLM agent runtime で tool call を選びます。"
+        >
+          <AgentTaskForm tasks={agentTasks} />
+        </Panel>
 
         <Panel
           title="Registered Schedules"

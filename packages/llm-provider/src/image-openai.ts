@@ -7,7 +7,7 @@
 
 import { createHash } from "node:crypto";
 
-import { redactPayloadForError } from "./oauth.js";
+import { redactPayloadForError } from "./redact.js";
 import type { ApiKeyCryptoBoundary } from "./api-key.js";
 import type { LLMProviderTokenStore } from "./token-store.js";
 import {

@@ -23,7 +23,7 @@ export interface WorkerImageProviderSelection extends ImageProviderSelection {
 
 export interface SelectImageProviderForWorkerOptions {
   prisma?: PrismaClient;
-  /** true when the selected LLM route is Codex OAuth/app-server compatible. */
+  /** true when the selected LLM route is Codex app-server compatible. */
   preferCodex?: boolean;
 }
 

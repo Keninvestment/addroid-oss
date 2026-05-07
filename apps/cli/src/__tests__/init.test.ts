@@ -239,7 +239,7 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
   });
 });
 
-test("init --reauth-llm は既存 LLM があっても provider 選択から Codex OAuth を再認証できる", async () => {
+test("init --reauth-llm は既存 LLM があっても provider 選択から Codex app-server を再接続できる", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
     const prevDb = process.env.DATABASE_URL;
@@ -262,7 +262,7 @@ test("init --reauth-llm は既存 LLM があっても provider 選択から Code
           {
             isTTY: true,
             prompt: async (_question, defaultValue = "") => defaultValue,
-            selectOption: async () => "codex-oauth",
+            selectOption: async () => "codex-app-server",
             runAuthCommand: async (args) => {
               authCalls.push(args);
               return 0;
@@ -280,11 +280,11 @@ test("init --reauth-llm は既存 LLM があっても provider 選択から Code
       assert.match(out.stdout, /Meta Token\s+: already configured/);
       assert.match(out.stdout, /Codex config\s+:/);
       assert.match(out.stdout, /LLM Provider setup:/);
-      assert.match(out.stdout, /configuring Codex OAuth/);
+      assert.match(out.stdout, /configuring Codex app-server/);
       assert.deepEqual(authCalls, [["llm", "--provider", "codex"]]);
       const envRaw = fs.readFileSync(envFile, "utf8");
-      assert.match(envRaw, /ADDROID_CODEX_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann/);
-      assert.match(envRaw, /ADDROID_CODEX_AUTHORIZATION_URL=https:\/\/auth\.openai\.com\/oauth\/authorize/);
+      assert.match(envRaw, /ADDROID_LLM_PROVIDER=codex/);
+      assert.doesNotMatch(envRaw, /ADDROID_CODEX_DEFAULT_MODEL/);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = prevDb;
@@ -364,7 +364,7 @@ test("init --interactive は prompt の回答で .env / config を作る", async
     const answers = [
       "Agency Ops",
       "postgresql://addroid@localhost:5432/addroid",
-      "codex-oauth",
+      "codex-app-server",
       "Iv1.client123",
     ];
     const authCalls: string[][] = [];
@@ -401,7 +401,7 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       const envRaw = fs.readFileSync(envFile, "utf8");
       assert.match(envRaw, /DATABASE_URL=postgresql:\/\/addroid@localhost:5432\/addroid/);
       assert.match(envRaw, /ENCRYPTION_KEY=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=/);
-      assert.match(envRaw, /ADDROID_CODEX_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann/);
+      assert.match(envRaw, /ADDROID_LLM_PROVIDER=codex/);
       const configRaw = fs.readFileSync(path.join(home, "config.yaml"), "utf8");
       assert.match(configRaw, /slug: agency-ops/);
       assert.match(configRaw, /displayName: Agency Ops/);
@@ -443,7 +443,7 @@ test("init --interactive は初期画面に Integration check を表示する", 
     const answers = [
       "Agency Ops",
       "postgresql://addroid@localhost:5432/addroid",
-      "codex-oauth",
+      "codex-app-server",
       "Iv1.client123",
     ];
     try {
@@ -477,7 +477,7 @@ test("init --interactive は初期画面に Integration check を表示する", 
       assert.equal(code, 0, out.stdout + out.stderr);
       assert.match(out.stdout, /Integration check:/);
       assert.match(out.stdout, /\[pending\] Meta Token\s+\.env \/ DB 作成後に init 内で token 入力 \+ Ad Account 選択を行います/);
-      assert.match(out.stdout, /\[pending\] LLM Provider\s+\.env \/ DB 作成後に Codex OAuth \/ OpenAI \/ Anthropic を選択して認証します/);
+      assert.match(out.stdout, /\[pending\] LLM Provider\s+\.env \/ DB 作成後に Codex app-server \/ OpenAI \/ Anthropic を選択して認証します/);
       assert.match(out.stdout, /\[pending\] GitHub \/ Ops Repo\s+\.env \/ DB 作成後に GitHub 認証 \+ ops repo 自動作成を行います/);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
@@ -604,7 +604,7 @@ test("init --interactive はインスタンス名を空 Enter にすると addro
     const answers = [
       "",
       "postgresql://addroid@localhost:5432/addroid",
-      "codex-oauth",
+      "codex-app-server",
     ];
     try {
       const { code, out } = await capture(() =>
@@ -660,7 +660,7 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
     const answers = [
       "Agency Ops",
       "postgresql://addroid:secret@localhost:5432/addroid",
-      "codex-oauth",
+      "codex-app-server",
     ];
     const metaRuntimeEnv: Array<{ databaseUrl?: string; encryptionKey?: string }> = [];
 

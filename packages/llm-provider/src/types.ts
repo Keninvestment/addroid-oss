@@ -17,8 +17,8 @@
 
 export type LLMProviderName = "codex" | "openai" | "anthropic" | "mock";
 
-/** Provider 認証方式。`oauth` のみ OAuth フロー (begin/complete/refresh) を持つ。 */
-export type LLMAuthKind = "oauth" | "api_key" | "none";
+/** Provider 認証方式。`app_server` は provider 側が login/token を管理し、AdDroid には保存しない。 */
+export type LLMAuthKind = "oauth" | "api_key" | "app_server" | "none";
 
 export type LLMRole = "system" | "user" | "assistant";
 
@@ -28,7 +28,7 @@ export interface LLMMessage {
 }
 
 export interface LLMCompletionRequest {
-  /** Model identifier (e.g. "gpt-4.1", "gpt-4o-mini"). 既定は provider の defaultModel。 */
+  /** Model identifier (e.g. "gpt-5.5", "claude-opus-4-7"). 既定は provider の defaultModel。 */
   model?: string;
   messages: LLMMessage[];
   /** 上限トークン数 (応答)。指定が無ければ provider 既定。 */
@@ -141,10 +141,10 @@ export interface LLMProvider {
   readonly authKind: LLMAuthKind;
   readonly defaultModel: string;
 
-  /** OAuth フロー開始 (authKind="oauth" のみ)。それ以外は LLMNotImplementedError。 */
+  /** 認証フロー開始 (authKind="oauth" / "app_server" のみ)。それ以外は LLMNotImplementedError。 */
   beginOAuth(): Promise<LLMBeginOAuthResult>;
 
-  /** OAuth callback 完了 (authKind="oauth" のみ)。token は暗号化境界で永続化する。 */
+  /** OAuth callback 完了 (authKind="oauth" のみ)。app_server provider は token を永続化しない。 */
   completeOAuth(params: {
     code: string;
     state: string;

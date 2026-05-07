@@ -21,6 +21,9 @@ export interface ModelPricing {
  */
 const PRICE_TABLE: Record<string, ModelPricing> = {
   // OpenAI / Codex 経由で利用される代表 model
+  "openai:gpt-5.5": { inputPer1k: 0.005, outputPer1k: 0.03 },
+  "openai:gpt-5.4": { inputPer1k: 0.0025, outputPer1k: 0.015 },
+  "openai:gpt-5.4-mini": { inputPer1k: 0.00075, outputPer1k: 0.0045 },
   "openai:gpt-4.1": { inputPer1k: 0.005, outputPer1k: 0.015 },
   "openai:gpt-4.1-mini": { inputPer1k: 0.0004, outputPer1k: 0.0016 },
   "openai:gpt-4o": { inputPer1k: 0.005, outputPer1k: 0.015 },
@@ -30,6 +33,10 @@ const PRICE_TABLE: Record<string, ModelPricing> = {
   "codex:gpt-4.1-mini": { inputPer1k: 0.0004, outputPer1k: 0.0016 },
   "codex:gpt-4o": { inputPer1k: 0.005, outputPer1k: 0.015 },
   "codex:gpt-4o-mini": { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+  "anthropic:claude-opus-4-7": { inputPer1k: 0.005, outputPer1k: 0.025 },
+  "anthropic:claude-sonnet-4-6": { inputPer1k: 0.003, outputPer1k: 0.015 },
+  "anthropic:claude-sonnet-4-20250514": { inputPer1k: 0.003, outputPer1k: 0.015 },
+  "anthropic:claude-opus-4-1-20250805": { inputPer1k: 0.015, outputPer1k: 0.075 },
   "anthropic:claude-3-5-sonnet-latest": { inputPer1k: 0.003, outputPer1k: 0.015 },
   "anthropic:claude-3-5-haiku-latest": { inputPer1k: 0.0008, outputPer1k: 0.004 },
   "anthropic:claude-3-7-sonnet-latest": { inputPer1k: 0.003, outputPer1k: 0.015 },

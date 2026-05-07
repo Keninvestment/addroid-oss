@@ -8,6 +8,7 @@ import { KeyValueList } from "../components/ui/KeyValueList";
 import { DataTable } from "../components/ui/DataTable";
 import { InlineCode } from "../components/ui/CodeBlock";
 import { PageHeader } from "../components/ui/PageHeader";
+import { DashboardChatPanel } from "./DashboardChatPanel";
 
 export const dynamic = "force-dynamic";
 
@@ -112,6 +113,10 @@ export default async function DashboardPage() {
       />
 
       <div className="page-body">
+        <div className="col-span-12">
+          <DashboardChatPanel />
+        </div>
+
         <div className="col-span-6">
           <Panel
             title="Config & Environment"

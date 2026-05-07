@@ -53,6 +53,7 @@
   },
   "devDependencies": {
     "@addroid/config": "*",
+    "@addroid/agent-runtime": "*",
     "@addroid/db": "*",
     "@addroid/github-adapter": "*",
     "@addroid/llm-provider": "*",

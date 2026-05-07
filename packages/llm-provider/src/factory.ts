@@ -2,36 +2,31 @@
 //
 // 実行環境に応じて LLMProvider 実装を選択する。優先度:
 //   1. ADDROID_LLM_MOCK=1                    → MockLLMProvider
-//   2. Codex OAuth client + crypto + tokenStore が揃う → CodexLLMProvider
-//   3. それ以外                                → StubLLMProvider
-//
-// Codex OAuth client / chat completions URL は本関数の引数 / 環境変数からのみ
-// 流入し、コード内に literal を残さない。
+//   2. OpenAI / Anthropic API key credential → ApiKeyLLMProvider
+//   3. Codex app-server route                → CodexAppServerLLMProvider
+//   4. それ以外                                → StubLLMProvider
 
 import {
-  CodexLLMProvider,
-  type CodexLLMProviderDeps,
-  type CryptoEncryptDecrypt,
-} from "./codex.js";
+  CodexAppServerLLMProvider,
+  type CodexAppServerLLMProviderOptions,
+} from "./codex-app-server.js";
 import {
   ApiKeyLLMProvider,
   type ApiKeyLLMProviderName,
+  type ApiKeyCryptoBoundary,
 } from "./api-key.js";
 import { MockLLMProvider, type MockLLMProviderOptions } from "./mock.js";
 import { StubLLMProvider } from "./stub.js";
-import type { CodexOAuthClientConfig } from "./oauth.js";
 import type { LLMProviderTokenStore } from "./token-store.js";
 import type { LLMProvider, LLMProviderName } from "./types.js";
 
 export interface SelectLLMProviderOptions {
   env?: NodeJS.ProcessEnv;
   tokenStore: LLMProviderTokenStore;
-  crypto?: CryptoEncryptDecrypt;
-  codexClient?: CodexOAuthClientConfig | null;
-  /** Codex chat completions endpoint (e.g., "https://api.openai.com/v1/chat/completions"). */
-  chatCompletionsUrl?: string | null;
-  /** Codex 既定 model。 */
+  crypto?: ApiKeyCryptoBoundary;
+  /** API key provider の既定 model。Codex app-server は local 設定を使う。 */
   defaultModel?: string;
+  codexAppServer?: CodexAppServerLLMProviderOptions;
   /** API key provider を明示採用する場合。 */
   apiKeyProvider?: ApiKeyLLMProviderName | null;
   apiKeyChatCompletionsUrl?: string | null;
@@ -80,28 +75,17 @@ export function selectLLMProvider(
       reason: `${opts.apiKeyProvider} API key credential + crypto boundary configured`,
     };
   }
-  if (
-    opts.codexClient &&
-    opts.crypto &&
-    opts.chatCompletionsUrl &&
-    opts.defaultModel
-  ) {
-    const deps: CodexLLMProviderDeps = {
-      oauthClient: opts.codexClient,
-      tokenStore: opts.tokenStore,
-      crypto: opts.crypto,
-      chatCompletionsUrl: opts.chatCompletionsUrl,
-      defaultModel: opts.defaultModel,
-    };
-    if (opts.fetchImpl) deps.fetchImpl = opts.fetchImpl;
+  if (opts.stubProvider !== "openai" && opts.stubProvider !== "anthropic") {
     return {
-      provider: new CodexLLMProvider(deps),
+      provider: new CodexAppServerLLMProvider({
+        ...(opts.codexAppServer ?? {}),
+      }),
       choice: "codex",
-      reason: "Codex OAuth client + crypto boundary + chatCompletionsUrl configured",
+      reason: "Codex app-server route configured",
     };
   }
   return {
-    provider: new StubLLMProvider(opts.stubProvider ?? "codex", opts.defaultModel ?? "gpt-4.1"),
+    provider: new StubLLMProvider(opts.stubProvider ?? "codex", opts.defaultModel ?? "gpt-5.5"),
     choice: "stub",
     reason: missingReason(opts),
   };
@@ -109,9 +93,7 @@ export function selectLLMProvider(
 
 function missingReason(opts: SelectLLMProviderOptions): string {
   const missing: string[] = [];
-  if (!opts.codexClient) missing.push("codexClient");
   if (!opts.crypto) missing.push("crypto");
-  if (!opts.chatCompletionsUrl) missing.push("chatCompletionsUrl");
   if (!opts.defaultModel) missing.push("defaultModel");
-  return `Codex OAuth not configured (missing: ${missing.join(", ") || "n/a"})`;
+  return `LLM provider not configured (missing: ${missing.join(", ") || "n/a"})`;
 }

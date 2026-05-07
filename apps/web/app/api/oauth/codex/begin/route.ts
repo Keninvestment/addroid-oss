@@ -1,11 +1,11 @@
-// AdDroid OSS — Codex OAuth begin endpoint.
+// AdDroid OSS — Codex app-server login begin endpoint.
 //
 // `/ai` ページの "Connect Codex" 導線から GET される。
 // 採用された LLMProvider 実装 (mock / codex / stub) によって挙動を切り替える:
 //   - mock : `addroid.invalid` の URL は実在しないので、内部 callback に
 //            code=mock-<state> でループバックさせ、ローカルだけで OAuth が完結する。
-//   - codex: Codex / OpenAI 互換 OAuth provider の authorize URL に 302 する。
-//   - stub : runtime 設定 / 暗号化境界が未設定。`/ai` へ理由付きで戻す。
+//   - codex: local app-server の ChatGPT login URL に 302 する。
+//     callback は Codex app-server が受けるため、AdDroid は token を保存しない。
 
 import { NextResponse } from "next/server";
 import { getActiveCodexProviderSelection } from "../../../../../lib/codex-runtime";
@@ -20,7 +20,7 @@ export async function GET(request: Request) {
       return NextResponse.redirect(
         new URL(
           `/ai?oauth=error&reason=${encodeURIComponent(
-            "Codex OAuth runtime is not configured. Set ADDROID_LLM_MOCK=1, or set ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL and ENCRYPTION_KEY in the environment. ADDROID_CODEX_CLIENT_ID / ADDROID_CODEX_AUTHORIZATION_URL / ADDROID_CODEX_TOKEN_URL are optional overrides."
+            "Codex app-server is not configured. Install Codex CLI or set CODEX_APP_SERVER_URL to a local app-server."
           )}`,
           url
         ),
@@ -29,10 +29,11 @@ export async function GET(request: Request) {
     }
     const { authorizationUrl, state } = await provider.beginOAuth();
     if (choice === "mock") {
-      const callback = new URL(`/api/oauth/codex/callback`, url);
-      callback.searchParams.set("code", `mock-${state}`);
-      callback.searchParams.set("state", state);
-      return NextResponse.redirect(callback, { status: 302 });
+      await provider.completeOAuth({ code: `mock-${state}`, state });
+      const next = new URL("/ai", url);
+      next.searchParams.set("oauth", "connected");
+      next.searchParams.set("provider", "mock");
+      return NextResponse.redirect(next, { status: 302 });
     }
     return NextResponse.redirect(authorizationUrl, { status: 302 });
   } catch (err) {

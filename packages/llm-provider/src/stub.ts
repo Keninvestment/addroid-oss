@@ -26,7 +26,7 @@ export class StubLLMProvider implements LLMProvider {
   readonly authKind: LLMAuthKind = "none";
   readonly defaultModel: string;
 
-  constructor(name: LLMProviderName = "codex", defaultModel = "gpt-4.1") {
+  constructor(name: LLMProviderName = "codex", defaultModel = "gpt-5.5") {
     this.name = name;
     this.defaultModel = defaultModel;
   }

@@ -30,6 +30,7 @@ import {
   type AddroidConfig,
 } from "@addroid/config";
 import {
+  checkCodexCli,
   checkGithubCli,
   checkMetaAdsCli,
   checkPlatform,
@@ -55,12 +56,8 @@ const DEFAULT_DATABASE_NAME = "addroid";
 const DEFAULT_DATABASE_HOST = "localhost";
 const DEFAULT_DATABASE_PORT = "5432";
 const META_ADS_CLI_PYTHON_VERSION = "3.13";
-const DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const DEFAULT_CODEX_AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize";
-const DEFAULT_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
-const DEFAULT_CODEX_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_CODEX_MODEL = "gpt-4.1";
-const DEFAULT_CODEX_SCOPES = "openid,profile,email,offline_access";
+const DEFAULT_OPENAI_MODEL = "gpt-5.5";
+const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
 const UV_SH = [
   'uv_bin="$(command -v uv || true)"',
   'if [ -z "$uv_bin" ]; then uv_bin="$HOME/.local/bin/uv"; fi',
@@ -328,7 +325,7 @@ async function runNonInteractiveSetup(
   lines.push("  1. addroid status");
   lines.push("  2. Meta Access Token を用意");
   lines.push("  3. addroid connect meta                 # token 入力 + Ad Account 選択");
-  lines.push("  4. addroid connect ai                   # Codex OAuth / OpenAI / Claude を選択");
+  lines.push("  4. addroid connect ai                   # Codex app-server / OpenAI / Claude を選択");
   lines.push("  5. addroid connect github               # GitHub 認証 + ops repo 作成");
   lines.push("  6. addroid start");
   lines.push("");
@@ -626,7 +623,7 @@ function formatReadySteps(opts: {
     steps.push("addroid connect meta                 # Meta Access Token 入力 + Ad Account 選択");
   }
   if (!opts.llmCredentialReady) {
-    steps.push("addroid connect ai                   # Codex OAuth / OpenAI / Claude を選択");
+    steps.push("addroid connect ai                   # Codex app-server / OpenAI / Claude を選択");
   }
   if (!opts.githubCredentialReady || !opts.opsRepoReady) {
     steps.push("addroid connect github               # GitHub 認証 + ops repo 作成");
@@ -753,7 +750,7 @@ async function maybeConfigureLLMProvider(opts: {
   opts.out.push("");
   opts.out.push("LLM Provider setup:");
   opts.out.push("  AI workflow / レポート生成 / 改善提案には LLM Provider が必須です。");
-  opts.out.push("  このまま provider 選択へ進みます。API key は ENCRYPTION_KEY で暗号化して保存します。");
+  opts.out.push("  Codex は local app-server を使います。OpenAI / Claude API key は ENCRYPTION_KEY で暗号化保存します。");
   process.stdout.write(opts.out.join("\n") + "\n");
   opts.out.length = 0;
   const choice = (
@@ -771,9 +768,9 @@ async function maybeConfigureLLMProvider(opts: {
           description: "Anthropic の API key を暗号化保存して使います",
         },
         {
-          value: "codex-oauth",
-          label: "Codex OAuth",
-          description: "ブラウザを開いて Codex OAuth 認証します",
+          value: "codex-app-server",
+          label: "Codex app-server",
+          description: "Codex CLI / ChatGPT の認証状態を使います",
         },
       ],
       "openai-api-key"
@@ -787,15 +784,22 @@ async function maybeConfigureLLMProvider(opts: {
     opts.out.push("                  実利用には LLM Provider が必須です。provider を選び直してください。");
     return false;
   }
-  if (choice === "codex-oauth" || choice === "oauth" || choice === "codex") {
-    const codexEnv = await ensureCodexOAuthEnvConfig({
+  if (choice === "codex-app-server" || choice === "codex") {
+    const codexCheck = checkCodexCli();
+    opts.out.push(`  ${formatCheck(codexCheck).trim()}`);
+    if (codexCheck.state === "error") {
+      if (codexCheck.hint) opts.out.push(`                  ${codexCheck.hint}`);
+      opts.out.push("                  Codex app-server を使う場合だけ Codex CLI が必要です。");
+      return false;
+    }
+    const codexEnv = await ensureCodexAppServerEnvConfig({
       env: opts.env,
       envFile: opts.envFile,
       out: opts.out,
     });
     if (!codexEnv) return false;
-    opts.out.push("  LLM Provider  : configuring Codex OAuth");
-    opts.out.push("                  ブラウザが開きます。自動検出できない場合は callback URL を貼り付けて続行できます。");
+    opts.out.push("  LLM Provider  : configuring Codex app-server");
+    opts.out.push("                  Codex CLI のログイン状態を確認します。未ログインの場合はブラウザが開きます。");
     process.stdout.write(opts.out.join("\n") + "\n");
     opts.out.length = 0;
     const runAuthCommand =
@@ -805,7 +809,7 @@ async function maybeConfigureLLMProvider(opts: {
     );
     opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
     if (code !== 0) {
-      opts.out.push("                  実利用には LLM Provider が必須です。ADDROID_CODEX_* を確認し、`addroid connect ai --provider codex` を再実行してください。");
+      opts.out.push("                  実利用には LLM Provider が必須です。Codex CLI のログイン状態を確認し、`addroid connect ai --provider codex` を再実行してください。");
       return false;
     }
     return true;
@@ -819,11 +823,11 @@ async function maybeConfigureLLMProvider(opts: {
         : null;
   if (!provider) {
     opts.out.push(`  LLM Provider  : unknown choice (${choice})`);
-    opts.out.push("                  openai-api-key / anthropic-api-key / codex-oauth のいずれかを選んでください。");
+    opts.out.push("                  openai-api-key / anthropic-api-key / codex-app-server のいずれかを選んでください。");
     return false;
   }
   const defaultModel =
-    provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1";
+    provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL;
   const model = (await opts.prompt(`${provider} default model`, defaultModel)).trim() || defaultModel;
   opts.out.push(`  LLM Provider  : configuring ${provider} API key`);
   process.stdout.write(opts.out.join("\n") + "\n");
@@ -872,22 +876,14 @@ async function resolveGithubClientIdForInit(env: NodeJS.ProcessEnv): Promise<{
   };
 }
 
-async function ensureCodexOAuthEnvConfig(opts: {
+async function ensureCodexAppServerEnvConfig(opts: {
   env: NodeJS.ProcessEnv;
   envFile?: string;
   out: string[];
 }): Promise<boolean> {
   const requiredDefaults: Record<string, string> = {
-    ADDROID_CODEX_CLIENT_ID: DEFAULT_CODEX_CLIENT_ID,
-    ADDROID_CODEX_AUTHORIZATION_URL: DEFAULT_CODEX_AUTHORIZATION_URL,
-    ADDROID_CODEX_TOKEN_URL: DEFAULT_CODEX_TOKEN_URL,
-    ADDROID_CODEX_CHAT_COMPLETIONS_URL: DEFAULT_CODEX_CHAT_COMPLETIONS_URL,
-    ADDROID_CODEX_DEFAULT_MODEL: DEFAULT_CODEX_MODEL,
-    ADDROID_CODEX_SCOPES: DEFAULT_CODEX_SCOPES,
+    ADDROID_LLM_PROVIDER: "codex",
   };
-  if (opts.env.ADDROID_CODEX_CLIENT_ID?.trim()) {
-    requiredDefaults.ADDROID_CODEX_CLIENT_ID = opts.env.ADDROID_CODEX_CLIENT_ID.trim();
-  }
   const result = await ensureAdditionalEnvValues({
     env: opts.env,
     envFile: opts.envFile,
@@ -1220,7 +1216,7 @@ async function readInitAuthState(
     const opsRepoWs =
       currentWs?.opsRepoId ? currentWs : fallbackOpsRepoWs ?? fallbackLatestWs;
     const providers = Array.from(new Set(rows.map((r) => r.provider)));
-    const llmProviders = Array.from(
+    const dbLlmProviders = Array.from(
       new Set(
         rows
           .filter((r) => r.provider === "codex" || r.provider === "openai" || r.provider === "anthropic")
@@ -1228,6 +1224,10 @@ async function readInitAuthState(
           .map((r) => r.provider)
       )
     );
+    const codexAppServerConnected = await detectCodexAppServerConnection(env);
+    const llmProviders = codexAppServerConnected
+      ? Array.from(new Set(["codex", ...dbLlmProviders]))
+      : dbLlmProviders;
     return {
       checked: true,
       metaConnected: providers.includes("meta"),
@@ -1254,6 +1254,30 @@ function hasLLMDefaultModel(metadata: unknown): boolean {
   if (!metadata || typeof metadata !== "object") return false;
   const value = (metadata as Record<string, unknown>)["defaultModel"];
   return typeof value === "string" && value.trim().length > 0;
+}
+
+async function detectCodexAppServerConnection(env: NodeJS.ProcessEnv): Promise<boolean> {
+  if (env.ADDROID_LLM_PROVIDER && env.ADDROID_LLM_PROVIDER.trim().toLowerCase() !== "codex") {
+    return false;
+  }
+  try {
+    const { CodexAppServerLLMProvider } = await import("@addroid/llm-provider");
+    const provider = new CodexAppServerLLMProvider({
+      externalServerUrl:
+        env.ADDROID_CODEX_APP_SERVER_URL?.trim() ||
+        env.CODEX_APP_SERVER_URL?.trim() ||
+        null,
+      codexBin: env.CODEX_BIN?.trim() || "codex",
+      timeoutMs: 30_000,
+    });
+    try {
+      return Boolean(await provider.getConnection());
+    } finally {
+      provider.close();
+    }
+  } catch {
+    return false;
+  }
 }
 
 function resolveDefaultEnvFile(): string {
@@ -1460,6 +1484,24 @@ async function installMissingDependencies(
       out.push({ label: "GitHub CLI", outcome });
       if (!outcome.ok) return out;
     }
+    if (check.name === "codex-cli") {
+      const command = "npm install -g @openai/codex";
+      const approval = await confirmInstallCommand(opts, "Codex CLI", command, true);
+      if (!approval.ok) {
+        out.push({ label: "Codex CLI", outcome: approval.outcome });
+        return out;
+      }
+      const r = runVisibleCommand(
+        "Codex CLI",
+        command,
+        runner,
+        "npm",
+        ["install", "-g", "@openai/codex"],
+        { env, timeoutMs: 300_000 }
+      );
+      out.push({ label: "Codex CLI", outcome: commandOutcome(r, "Codex CLI installed") });
+      if (!out[out.length - 1]!.outcome.ok) return out;
+    }
     if (check.name === "postgres-16") {
       const command =
         process.platform === "darwin"
@@ -1499,10 +1541,10 @@ async function setupDependencies(opts: {
   const checks = [
     checkPlatform(),
     checkUv(),
-    checkPython312(),
-    checkMetaAdsCli(opts.env),
-    checkGithubCli(),
-    checkPostgresVersion(),
+      checkPython312(),
+      checkMetaAdsCli(opts.env),
+      checkGithubCli(),
+      checkPostgresVersion(),
   ];
   const lines = ["", "Dependency setup:"];
   for (const c of checks) lines.push(formatCheck(c));
@@ -1920,14 +1962,14 @@ function printScaffoldResult(result: ScaffoldResult): void {
     lines.push("  3. Meta Access Token を用意");
     lines.push("  4. addroid connect meta          # token 入力 + Ad Account 選択");
     lines.push("  5. addroid connect github        # GitHub 認証 + ops repo 作成");
-    lines.push("  6. addroid connect ai            # Codex OAuth / OpenAI / Claude を選択");
+    lines.push("  6. addroid connect ai            # Codex app-server / OpenAI / Claude を選択");
     lines.push("  7. addroid start");
   } else {
     lines.push("  1. addroid status");
     lines.push("  2. Meta Access Token を用意");
     lines.push("  3. addroid connect meta          # token 入力 + Ad Account 選択");
     lines.push("  4. addroid connect github        # GitHub 認証 + ops repo 作成");
-    lines.push("  5. addroid connect ai            # Codex OAuth / OpenAI / Claude を選択");
+    lines.push("  5. addroid connect ai            # Codex app-server / OpenAI / Claude を選択");
     lines.push("  6. addroid start");
   }
   lines.push("");
@@ -2011,7 +2053,7 @@ function formatIntegrationCheck(auth: InitAuthState, opts: InitOptions): string[
       formatIntegrationLine(
         "pending",
         "LLM Provider",
-        ".env / DB 作成後に Codex OAuth / OpenAI / Anthropic を選択して認証します"
+        ".env / DB 作成後に Codex app-server / OpenAI / Anthropic を選択して認証します"
       ),
       formatIntegrationLine(
         "pending",
@@ -2037,7 +2079,7 @@ function formatIntegrationCheck(auth: InitAuthState, opts: InitOptions): string[
       "LLM Provider",
       auth.llmProviders.length > 0
         ? auth.llmProviders.join(", ")
-        : "init 内で Codex OAuth / OpenAI / Anthropic を選択して認証します"
+        : "init 内で Codex app-server / OpenAI / Anthropic を選択して認証します"
     ),
     formatIntegrationLine(
       githubReady ? "ok" : "missing",
@@ -2156,8 +2198,8 @@ function printInitHelp(): void {
       "  標準設定では OAuth callback を使わず、token 入力後に取得可能な Ad Account を表示します。",
       "  `addroid connect meta` で token を暗号化保存し、Ad Account を選択します。",
       "  OAuth callback を使う上級者向け経路は詳細コマンド `addroid auth meta --oauth` です。",
-      "  LLM Provider は openai-api-key / anthropic-api-key / codex-oauth から選択できます。",
-      "  API key / Codex OAuth token は `addroid connect ai` 経由で ENCRYPTION_KEY により暗号化保存されます。",
+      "  LLM Provider は openai-api-key / anthropic-api-key / codex-app-server から選択できます。",
+      "  OpenAI / Anthropic API key は `addroid connect ai` 経由で ENCRYPTION_KEY により暗号化保存されます。Codex token は AdDroid には保存しません。",
       "",
     ].join("\n")
   );

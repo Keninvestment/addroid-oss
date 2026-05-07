@@ -154,7 +154,7 @@ export interface DailyReportSnapshotStore {
 
 // ---------------------------------------------------------------------
 // Analyst runner — llm-provider への直接依存を queue に持ち込まないための
-//   薄いラッパ。apps/worker が CodexLLMProvider 等を埋め込んだ runner を注入する。
+//   薄いラッパ。apps/worker が LLMProvider 等を埋め込んだ runner を注入する。
 // ---------------------------------------------------------------------
 
 export interface DailyReportAnalystInput {

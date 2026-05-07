@@ -5,8 +5,7 @@
 // 空状態」「provider/model メタの表示」が見えることを期待している。
 // このページは UI 設計のサブルート (`/ai/providers`, `/ai/runs`) を 1 画面に
 // 集約した minimal landing。データソースは `oauth_tokens` と `ai_runs`、
-// および `ADDROID_LLM_MOCK` / `ADDROID_CODEX_*` env のみで、外部ネットワーク
-// アクセスは行わない (localhost-only / outbound-only 原則)。
+// および `ADDROID_LLM_MOCK` / Codex app-server 状態を集約する。
 
 import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
@@ -17,6 +16,7 @@ import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
 import { CodeBlock, InlineCode } from "../../components/ui/CodeBlock";
 import { PageHeader } from "../../components/ui/PageHeader";
+import { getActiveCodexProviderSelection } from "../../lib/codex-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -145,10 +145,10 @@ export default async function AiPage() {
 
   const env = process.env;
   const llmMockEnabled = env.ADDROID_LLM_MOCK === "1";
-  const codexClientConfigured = Boolean(
-    env.ADDROID_CODEX_CHAT_COMPLETIONS_URL &&
-      env.ADDROID_CODEX_DEFAULT_MODEL
-  );
+  const codexRuntimeConfigured = true;
+  const codexConnection = await getActiveCodexProviderSelection()
+    .provider.getConnection()
+    .catch(() => null);
   const encryptionKeySet = Boolean((env.ENCRYPTION_KEY ?? "").trim());
 
   const apiKeyConnected = providers.some(
@@ -158,11 +158,11 @@ export default async function AiPage() {
     ? "mock"
     : apiKeyConnected
       ? "api_key"
-    : codexClientConfigured && encryptionKeySet
+    : codexRuntimeConfigured
       ? "codex"
       : "stub";
 
-  const codexConnected = providers.some((p) => p.provider === "codex");
+  const codexConnected = Boolean(codexConnection);
   const providerState: StatusState = !dbReady
     ? "warn"
     : activeChoice === "stub" && !codexConnected && !apiKeyConnected
@@ -178,10 +178,10 @@ export default async function AiPage() {
       : activeChoice === "api_key"
         ? "LLM API key が暗号化保存されています。worker は保存済み provider を使用します。"
       : activeChoice === "codex" && codexConnected
-        ? `Codex OAuth 連携済み (${providers.filter((p) => p.provider === "codex").length} 件)。`
+        ? `Codex app-server 接続済み (${codexConnection?.accountIdentifier})。`
         : activeChoice === "codex"
-          ? "Codex OAuth の runtime 設定はありますが、まだ接続されていません。"
-          : "LLM provider 未設定。ADDROID_LLM_MOCK=1 か ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL / ENCRYPTION_KEY を設定してください。";
+          ? "Codex app-server は利用できますが、Codex CLI / ChatGPT にまだログインしていません。"
+          : "LLM provider 未設定。ADDROID_LLM_MOCK=1、Codex app-server、または API key を設定してください。";
 
   const setupItems = [
     { label: "Active provider choice", value: <InlineCode>{activeChoice}</InlineCode> },
@@ -190,8 +190,8 @@ export default async function AiPage() {
       value: llmMockEnabled ? "1 (mock 有効)" : "未設定",
     },
     {
-      label: "Codex OAuth runtime",
-      value: codexClientConfigured ? "設定済み" : "未設定",
+      label: "Codex app-server",
+      value: codexConnected ? `接続済み (${codexConnection?.accountIdentifier})` : "未ログイン",
     },
     {
       label: "API key credential",
@@ -219,7 +219,7 @@ export default async function AiPage() {
     },
     {
       header: "Auth",
-      cell: (row) => <InlineCode>{row.authKind ?? (row.provider === "codex" ? "oauth" : "unknown")}</InlineCode>,
+      cell: (row) => <InlineCode>{row.authKind ?? (row.provider === "codex" ? "app_server" : "unknown")}</InlineCode>,
     },
     {
       header: "Scopes",
@@ -324,7 +324,7 @@ export default async function AiPage() {
         <div className="col-span-12">
           <Panel
             title="LLM Provider"
-            subtitle="Codex OAuth / OpenAI / Anthropic / Mock の接続と setup 状態"
+            subtitle="Codex app-server / OpenAI / Anthropic / Mock の接続と setup 状態"
             status={<StatusDot state={providerState}>{providerState}</StatusDot>}
           >
             <div style={{ display: "grid", gap: "1rem" }}>
@@ -336,7 +336,7 @@ export default async function AiPage() {
                   description={
                     activeChoice === "mock"
                       ? "ADDROID_LLM_MOCK=1 のため mock provider が選択されています。実 OAuth 連携は不要ですが、本番では Codex を接続してください。"
-                      : "OpenAI / Anthropic API key を CLI で暗号化保存するか、Codex OAuth を接続してください。"
+                      : "Codex app-server にログインするか、OpenAI / Anthropic API key を CLI で暗号化保存してください。"
                   }
                 />
               ) : (

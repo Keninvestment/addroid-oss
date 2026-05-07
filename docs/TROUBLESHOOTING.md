@@ -411,13 +411,14 @@ Slack に貼り付ければ Socket Mode の App が作成されます。
 ADDROID_LLM_MOCK=1 npm run addroid -- up
 ```
 
-### 10.2 Codex OAuth を有効にしたが `expired` のまま
-- `ADDROID_CODEX_TOKEN_URL` が正しいか確認
-- refresh token がない (PKCE flow で `offline_access` scope を要求していない) と
-  expire 後に再取得できません。`ADDROID_CODEX_SCOPES` に `offline_access` を含めて
-  再 OAuth してください。
-- `ENCRYPTION_KEY` を回した場合は既存トークンを復号できません。`oauth_tokens` の
-  該当行を削除し、再 OAuth してください。
+### 10.2 Codex app-server に接続できない
+- `codex --version` が成功するか確認してください。未インストールの場合は
+  `addroid init --install-deps` を実行します。
+- `addroid connect ai --provider codex` を再実行し、表示された URL で Codex にログインしてください。
+- 既存の app-server を指定している場合、`ADDROID_CODEX_APP_SERVER_URL` は
+  `ws://127.0.0.1:<port>` または `ws://localhost:<port>` のみ利用できます。
+- Codex token は AdDroid の DB に保存しません。`ENCRYPTION_KEY` を変更しても
+  Codex の接続状態には影響しません。
 
 ### 10.3 Image Provider 未設定で improvement_pr が画像なしで PR を作る
 **設計通りの挙動**です。Image Provider 未設定時は creative 生成を skip し、

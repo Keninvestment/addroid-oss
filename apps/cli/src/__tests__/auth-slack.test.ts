@@ -341,7 +341,7 @@ test("auth llm は provider 未指定時に選択結果を使って API key を�
           prismaOverride,
           llmSelectProvider: async () => ({
             provider: "anthropic",
-            model: "claude-3-5-sonnet-latest",
+            model: "claude-opus-4-7",
           }),
         })
       )
@@ -355,7 +355,7 @@ test("auth llm は provider 未指定時に選択結果を使って API key を�
   assert.equal(arg.create.provider, "anthropic");
   assert.deepEqual(arg.create.metadata, {
     authKind: "api_key",
-    defaultModel: "claude-3-5-sonnet-latest",
+    defaultModel: "claude-opus-4-7",
     apiBaseUrl: "https://api.anthropic.com/v1/messages",
   });
 });
@@ -364,40 +364,6 @@ test("auth llm --disconnect は provider 未指定なら失敗する", async () 
   const { code, out } = await capture(() => runAuthCommand(["llm", "--disconnect"]));
   assert.equal(code, 2);
   assert.match(out.stderr, /--disconnect には --provider/);
-});
-
-test("auth llm --provider codex は redirect URI 不正を分かりやすく返す", async () => {
-  const prismaOverride = {
-    oAuthToken: {
-      async upsert() {
-        return {};
-      },
-      async deleteMany() {
-        return { count: 0 };
-      },
-    },
-    async $disconnect() {},
-  };
-  const { code, out } = await withEnv(
-    {
-      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
-      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-      ADDROID_CODEX_CLIENT_ID: undefined,
-      ADDROID_CODEX_AUTHORIZATION_URL: undefined,
-      ADDROID_CODEX_TOKEN_URL: undefined,
-      ADDROID_CODEX_CHAT_COMPLETIONS_URL: undefined,
-      ADDROID_CODEX_DEFAULT_MODEL: undefined,
-      ADDROID_CODEX_OAUTH_REDIRECT_URI: "https://example.com/auth/callback",
-    },
-    () =>
-      capture(() =>
-        runAuthCommand(["llm", "--provider", "codex", "--no-open"], {
-          prismaOverride,
-        })
-      )
-  );
-  assert.equal(code, 2);
-  assert.match(out.stderr, /localhost の redirect URI/);
 });
 
 test("auth slack はトークン未指定で 2 を返す", async () => {

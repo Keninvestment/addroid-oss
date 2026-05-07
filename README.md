@@ -110,10 +110,10 @@ shell で起動する worker / web プロセス) で動作するため、以下�
   も使う場合は `~/.addroid/secrets.local.yaml` に `clientId` / `clientSecret` を追加します
 - Meta Access Token — 実際の Meta 広告アカウント接続、Apply / Activate、レポート取得に必須
 - LLM Provider — AI workflow 実行に必要。初回セットアップまたは `addroid connect ai` で
-  Codex OAuth / OpenAI API key / Claude (Anthropic) API key を選択できます
+  Codex app-server / OpenAI API key / Claude (Anthropic) API key を選択できます
   (未設定時は StubLLMProvider で fail-closed)
 - Image Provider — クリエイティブ画像生成に必要。OpenAI API key は GPT Image 2 に再利用でき、
-  Codex OAuth は localhost の Codex app-server 経路で生成できます
+  Codex は localhost の app-server 経路で生成できます
 - Slack Bot / App-level token — 通知と `/adops` slash command に必要 (任意)
 
 ---
@@ -199,7 +199,7 @@ addroid start
 `addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
 コマンドを見せた上で個別に確認します。Meta token / GitHub / LLM Provider が未設定の場合は、
 Meta Access Token 入力、GitHub Device Flow 認証と ops repository 作成、
-OpenAI / Anthropic API key / Codex OAuth の選択まで案内します。
+Codex app-server / OpenAI / Anthropic API key の選択まで案内します。
 リポジトリ checkout で `addroid` コマンドが未リンクの場合は、init 中に確認して
 `npm link --workspace apps/cli` を実行し、以後 `addroid status` の形で使えるようにします。
 初期設定済みの状態で再実行した場合は、既存の config / secrets / credential を保持し、
@@ -218,17 +218,19 @@ OpenAI / Anthropic API key / Codex OAuth の選択まで案内します。
 - GitHub OAuth: 実際の入稿には必須。CLI は GitHub CLI のブラウザ認証または Device Flow、
   Web UI は既存の OAuth Code Flow を使い、token を `oauth_tokens` に暗号化保存。
   未連携なら private ops repository を自動作成
-- LLM Provider: OpenAI / Anthropic API key または Codex OAuth を選択し、
-  `oauth_tokens` に暗号化保存
-- Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex OAuth の場合は
+- LLM Provider: Codex app-server または OpenAI / Anthropic API key を選択。Codex token は
+  AdDroid に保存せず、API key のみ `oauth_tokens` に暗号化保存
+- Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex の場合は
   localhost の `codex app-server` 経由で画像生成
 
-Codex OAuth を選ぶ場合、`init` は OpenAI Codex 互換の public OAuth client と
-既定 endpoint / model を `.env` に補完します。client id の入力は不要です。
-選択後はブラウザが自動で開き、認証完了後に CLI が続行します。localhost callback を
-自動検出できない場合は、ブラウザの callback URL 全体を CLI に貼り付ければ続行できます。
+Codex を選ぶ場合、`init` は local `codex app-server` を起動し、Codex CLI / ChatGPT の
+ログイン状態を確認します。未ログインの場合はブラウザ認証へ進みます。AdDroid は
+Codex token を保持しません。
 初期セットアップ完了後、実 TTY ではそのまま `addroid chat` が起動します。
 自動起動したくない場合は `addroid init --interactive --no-chat` を使います。
+Web UI の Dashboard 最上部にも同じ Agent runtime を使うチャット欄があります。
+CLI chat / Web chat / 自然言語 Agent task は同じ `AGENTS.md`、tool manifest、
+deny policy、暗号化済み LLM credential を共有します。
 
 初期設定済みの credential を更新したい場合は、明示的に再認証します。
 
@@ -239,7 +241,7 @@ addroid init --interactive --reauth-meta
 # GitHub token / ops repo を再設定
 addroid init --interactive --reauth-github
 
-# LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth)
+# LLM Provider を選び直して再接続 (Codex app-server / OpenAI / Anthropic)
 addroid init --interactive --reauth-llm
 ```
 
@@ -346,7 +348,7 @@ addroid/
 | `addroid status` | 接続・起動状態を確認 |
 | `addroid connect meta` | Meta Access Token を登録し、広告アカウントを選択 |
 | `addroid connect github` | GitHub 認証と ops repo 作成 |
-| `addroid connect ai` | Codex OAuth / OpenAI API key / Claude API key を選択して接続 |
+| `addroid connect ai` | Codex app-server / OpenAI API key / Claude API key を選択して接続 |
 | `addroid account` | 利用する広告アカウントを確認・選択 |
 | `addroid report` | 日次レポートや予算チェックを今すぐ実行 |
 | `addroid submit` | 入稿前チェックと dry-run 変更予定の確認 |
@@ -401,8 +403,8 @@ addroid/
   GitOps 状態を破壊しません。Slack / Image Provider 未設定時は通知 / 画像生成のみが
   skip され、Apply / Activate / レポート取得は通常通り動きます。
 - **LLM credential は暗号化保存**: `addroid connect ai --provider openai|anthropic` の
-  API key と `addroid connect ai --provider codex` の OAuth token は `ENCRYPTION_KEY` により
-  `oauth_tokens.access_token_ciphertext` に保存され、`.env` への恒久保存は不要です。
+  API key は `ENCRYPTION_KEY` により `oauth_tokens.access_token_ciphertext` に保存されます。
+  Codex は local app-server の認証状態を使い、AdDroid は Codex token を保存しません。
 - **画像生成キーも平文保存しない**: GPT Image 2 は登録済み OpenAI API key の暗号化済み
   credential を再利用します。Codex app-server 経路は localhost のみ許可し、外部 URL を
   ブラウザに露出しません。

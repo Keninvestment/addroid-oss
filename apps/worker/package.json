@@ -13,12 +13,14 @@
   },
   "dependencies": {
     "@addroid/config": "*",
+    "@addroid/agent-runtime": "*",
     "@addroid/db": "*",
     "@addroid/github-adapter": "*",
     "@addroid/llm-provider": "*",
     "@addroid/meta-adapter": "*",
     "@addroid/queue": "*",
-    "@addroid/yaml-schemas": "*"
+    "@addroid/yaml-schemas": "*",
+    "cron-parser": "^4.9.0"
   },
   "devDependencies": {
     "tsx": "^4.16.5",

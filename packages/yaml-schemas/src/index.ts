@@ -173,6 +173,8 @@ export const CronEntrySchema = z
       "daily_report",
       "budget_guard",
       "improvement_pr",
+      "retention_sweep",
+      "agent_tasks",
     ]),
     cron: CronExpressionSchema,
     enabled: z.boolean().default(false),

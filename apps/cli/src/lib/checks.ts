@@ -243,6 +243,32 @@ export function checkGithubCli(): CheckResult {
   };
 }
 
+export function checkCodexCli(): CheckResult {
+  const r = runVersion("codex", ["--version"]);
+  if (!r.found) {
+    return {
+      name: "codex-cli",
+      state: "error",
+      message: "Codex CLI (`codex`) が見つかりません。",
+      hint:
+        "Codex app-server を使う場合は `npm install -g @openai/codex` を実行してください。",
+    };
+  }
+  if (r.status !== 0) {
+    return {
+      name: "codex-cli",
+      state: "error",
+      message: `Codex CLI の実行に失敗しました: ${r.stderr || r.stdout || `exit ${r.status}`}`,
+      hint: "Codex CLI (`codex`) を再インストールしてください。",
+    };
+  }
+  return {
+    name: "codex-cli",
+    state: "ok",
+    message: r.stdout || r.stderr || "codex detected",
+  };
+}
+
 export function checkPostgresVersion(): CheckResult {
   const r = runVersion("psql", ["--version"]);
   if (!r.found) {
