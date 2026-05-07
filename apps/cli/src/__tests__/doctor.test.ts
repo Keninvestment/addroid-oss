@@ -60,6 +60,7 @@ async function withCleanEnv<T>(
     "DATABASE_URL",
     "ENCRYPTION_KEY",
     "ADDROID_META_ADS_CLI_MOCK",
+    "ADDROID_META_CLI_BIN",
     ...Object.keys(overrides),
   ];
   const prev: Record<string, string | undefined> = {};
@@ -69,6 +70,7 @@ async function withCleanEnv<T>(
   delete process.env.DATABASE_URL;
   delete process.env.ENCRYPTION_KEY;
   delete process.env.ADDROID_META_ADS_CLI_MOCK;
+  delete process.env.ADDROID_META_CLI_BIN;
   for (const [k, v] of Object.entries(overrides)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -86,7 +88,7 @@ async function withCleanEnv<T>(
 }
 
 describe("addroid doctor", () => {
-  it("clean smoke env (DATABASE_URL 未設定 + Meta CLI mock + 32-byte key) で 10 件の check 行と overall を出力する", async () => {
+  it("clean smoke env (DATABASE_URL 未設定 + Meta CLI mock + 32-byte key) で check 行と overall を出力する", async () => {
     await withCleanEnv(
       {
         ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
@@ -96,16 +98,17 @@ describe("addroid doctor", () => {
         const { code, out } = await capture(() => runDoctor([]));
         // DATABASE_URL 未設定 → checkDatabaseUrl が error → exit 1。
         // CI smoke では DATABASE_URL の有無は本テストの観点ではなく、
-        // 「doctor が落ちずに 10 件の check を並べた上で overall を返す」ことが本旨。
+        // 「doctor が落ちずに check を並べた上で overall を返す」ことが本旨。
         assert.ok([0, 1].includes(code), `unexpected exit code ${code}`);
 
         assert.match(out.stdout, /\[addroid doctor\]/);
-        // 10 個の check 名が並ぶことを assert (state が ok か error かは環境依存)。
+        // check 名が並ぶことを assert (state が ok か error かは環境依存)。
         for (const name of [
           "platform",
           "uv",
           "python3.12",
           "meta-ads-cli",
+          "github-cli",
           "DATABASE_URL",
           "ENCRYPTION_KEY",
           "config",

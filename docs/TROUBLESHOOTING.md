@@ -20,7 +20,7 @@ AdDroid OSS は **macOS / Linux / WSL2 (Windows Subsystem for Linux 2)** のみ�
 
 - `secrets.local.yaml` を `0600` パーミッションで保護する POSIX 前提
 - `pg_dump` / `pg_restore` の dynamic-link / dlopen 前提
-- `addroid up` が起動する web/worker プロセスの shell / signal 前提 (`SIGINT` / `SIGTERM`)
+- `addroid start` が起動する web/worker プロセスの shell / signal 前提 (`SIGINT` / `SIGTERM`)
 
 ### 0.1 `addroid doctor` が `[error] platform` を返す
 
@@ -184,7 +184,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 復号できなくなります。現在の実装では:
 
 1. 旧鍵を一時的に戻して `oauth_tokens` を空にする (DELETE FROM oauth_tokens)
-2. 新鍵で `addroid up` を再起動し、OAuth 連携をやり直す
+2. 新鍵で `addroid start` を再起動し、OAuth 連携をやり直す
 
 を推奨します。鍵ローテーションの本格対応は後続コントラクトで扱います。
 
@@ -259,7 +259,7 @@ ADDROID_META_ADS_CLI_MOCK=1 addroid doctor
 
 ---
 
-## 6. `addroid up` 関連
+## 6. `addroid start` 関連
 
 ### 6.1 `EADDRINUSE: address already in use 127.0.0.1:3000`
 
@@ -279,7 +279,7 @@ ADDROID_WEB_PORT=3100 npm run addroid -- up
 `ADDROID_WEB_HOSTNAME` を `0.0.0.0` 等に変更してはいけません。outbound-only /
 localhost-only 設計の前提が崩れます。
 
-### 6.2 `addroid down` が「pid file 無し」と返す
+### 6.2 `addroid stop` が「pid file 無し」と返す
 
 `~/.addroid/run/up.json` が存在しないか、すでに失効しています。
 
@@ -291,13 +291,13 @@ ps -ef | grep -E "next dev|apps/worker" | grep -v grep
 rm -f ~/.addroid/run/up.json
 ```
 
-`addroid up` の中断 (kill -9 等) で pid file が残ることがあります。
-ファイルを消した上で再度 `addroid up` を実行してください。
+`addroid start` の中断 (kill -9 等) で pid file が残ることがあります。
+ファイルを消した上で再度 `addroid start` を実行してください。
 
 ### 6.3 `addroid status` が `[stopped]` を表示し続ける
 
-`addroid up` 起動中の親プロセスが終了した可能性があります。
-`~/.addroid/run/up.json` を削除し、`addroid up` を再実行してください。
+`addroid start` 起動中の親プロセスが終了した可能性があります。
+`~/.addroid/run/up.json` を削除し、`addroid start` を再実行してください。
 
 ---
 
@@ -323,7 +323,7 @@ ADDROID_GITHUB_OAUTH_MOCK=1 npm run addroid -- up
 - `oauth_tokens` テーブルにレコードがあるか確認 (`/github` パネル)
 - ops repo (`workspaces.ops_repo_*`) が bootstrap 済みか確認
 - `cron_runs` テーブルに `github_poll` の最新行があるか確認
-- `addroid up` の出力に worker のエラーが出ていないか確認
+- `addroid start` の出力に worker のエラーが出ていないか確認
 
 GitOps の全体像と承認境界は [`docs/GITOPS.md`](./GITOPS.md) を参照してください。
 
@@ -331,15 +331,15 @@ GitOps の全体像と承認境界は [`docs/GITOPS.md`](./GITOPS.md) を参照�
 
 ## 8. Meta 連携 (Access Token / OAuth / sandbox / mock)
 
-### 8.1 `addroid auth meta` で Ad Account が表示されない
+### 8.1 `addroid connect meta` で Ad Account が表示されない
 - 入力した Meta Access Token に `ads_read`, `ads_management`, `business_management` 権限があるか確認
 - Business Manager 側で、その token を発行したユーザーまたは System User に対象 Ad Account が割り当てられているか確認
 - `ENCRYPTION_KEY` と `DATABASE_URL` が `addroid init` 後の値から変わっていないか確認
-- 再発行した token で `addroid auth meta` を再実行する
+- 再発行した token で `addroid connect meta` を再実行する
 
 ### 8.2 上級者向け OAuth で `state mismatch` または callback 失敗
 `/api/oauth/meta/begin` で発行した state は CLI / Web で異なるプロセスに渡しません。
-CLI の場合は `addroid auth meta --oauth` を再実行してください。Web UI の場合は `addroid up`
+CLI の場合は詳細コマンド `addroid auth meta --oauth` を再実行してください。Web UI の場合は `addroid start`
 を再起動し、別タブの古い OAuth flow を破棄してから再度 `/accounts` の "Meta を接続"
 を押してください。
 
@@ -357,8 +357,8 @@ deterministic に実行されます。Apply / Activate も mock 経路で完結�
 - `apps/web/lib/meta-runtime.ts` の `selectMetaAdapter` が `StubMetaAdapter` を
   返している場合は `ENCRYPTION_KEY` が未設定、または mock / OAuth / token のいずれの経路も
   利用できない状態
-- `addroid accounts list` で登録済み Ad Account と default を確認し、未設定なら
-  `addroid accounts refresh --select-default` または `addroid accounts select` を実行する
+- `addroid account` で登録済み Ad Account と default を確認し、未設定なら
+  `addroid account sync --select-default` または `addroid account choose` を実行する
 
 ### 8.5 Apply で本番 Meta を誤って書き換えそう
 - Apply は新規オブジェクトをすべて **PAUSED** で作成します。Activate を別経路で
@@ -378,7 +378,7 @@ deterministic に実行されます。Apply / Activate も mock 経路で完結�
 となり、cron / Apply / Activate / レポートは通常通り動きます。Slack 関連 env を
 何も設定しなくても問題ありません。
 
-### 9.2 `addroid auth slack` が "socket-connect-failed" で失敗
+### 9.2 `addroid connect slack` が "socket-connect-failed" で失敗
 - Bot Token (`xoxb-*`) と App-Level Token (`xapp-*`、`connections:write` scope) の
   両方が登録されているか確認
 - App-Level Token の scope に `connections:write` が含まれているか
@@ -391,7 +391,7 @@ URL / event URL を要求しません。`templates/slack-app-manifest.yaml` を�
 Slack に貼り付ければ Socket Mode の App が作成されます。
 
 ### 9.4 `/adops` slash command が timeout する
-- `addroid up` の worker が起動しているか確認
+- `addroid start` の worker が起動しているか確認
 - `cron_runs` / `execution_logs` に `slack` 由来のジョブが記録されているか確認
 - `pg-boss` で job が ack されてから 3 秒以内に `response_url` で reply される契約
   なので、worker が遅延すると Slack 側で timeout になります
@@ -472,12 +472,12 @@ AdDroid は PostgreSQL 16+ 必須なので、クライアントも 16 以上に�
 ### 12.3 `pg_restore: error: relation "..." already exists`
 
 `--clean --if-exists` で既存テーブルを drop しているはずなのに発生する場合、
-`addroid up` が並行して走っていてスキーマを再作成している可能性があります。
-`addroid down` で停止してから再度 `addroid restore` を実行してください。
+`addroid start` が並行して走っていてスキーマを再作成している可能性があります。
+`addroid stop` で停止してから再度 `addroid restore` を実行してください。
 
-### 12.4 `addroid restore` が `addroid up が起動中です` で停止する
+### 12.4 `addroid restore` が `addroid start が起動中です` 相当で停止する
 
-設計通りの挙動です。`addroid down` で worker / web を停止してから再実行して
+設計通りの挙動です。`addroid stop` で worker / web を停止してから再実行して
 ください。CI 等で起動中に強制実行する必要がある場合のみ `--force-while-up` を
 指定してください (pg-boss スキーマが破損するリスクあり)。
 

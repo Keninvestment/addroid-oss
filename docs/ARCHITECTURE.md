@@ -3,16 +3,15 @@
 ## 1. プロセスモデル
 
 AdDroid OSS の既定モデルは **1 プロセスで web + worker** を併走させる構成です。
-将来の `addroid up --separate-worker` で水平スケールできるよう、コードベースは
+将来の `addroid start --separate-worker` で水平スケールできるよう、コードベースは
 最初から分離可能な境界に保ちます。
 
 ```
 +----------------------------------------------------+
 | addroid CLI                                        |
 |  ├── init   ── ~/.addroid/{config.yaml, storage}   |
-|  ├── doctor ── 7 checks (uv / py / meta-ads-cli /  |
-|  │             postgres-16 / DATABASE_URL /        |
-|  │             ENCRYPTION_KEY / config)            |
+|  ├── doctor ── env checks (uv / py / meta-ads-cli /|
+|  │             github-cli / postgres / DB / config)|
 |  ├── up     ── web + worker を 1 プロセスで起動     |
 |  ├── down / status / logs                          |
 |  ├── validate / plan / activate                    |
@@ -137,7 +136,7 @@ AdDroid は「Meta に書き込む」操作を 2 段階に分けます。
                                         audit_logs (apply.enqueued)
 
 +-------------------+                  +--------------------+
-| addroid activate  | ──or web/slack─▶ | activate handler   | ──▶  Meta (ACTIVE)
+| audited activation | ──web/slack/CLI─▶ | activate handler   | ──▶  Meta (ACTIVE)
 +-------------------+                  +--------------------+
                                                 │
                                                 ▼
@@ -147,7 +146,7 @@ AdDroid は「Meta に書き込む」操作を 2 段階に分けます。
 
 - **Apply** は ops repo の PR が merge されたときにのみ発火し、新規 Meta オブジェクトを
   すべて `PAUSED` で作成します。Apply 自身は予算を消費しません。
-- **Activate** は `addroid activate <act_id>` / Web UI `/campaigns` / Slack `/adops activate`
+- **Activate** は Web UI `/campaigns` / Slack `/adops activate` / 詳細 CLI 経路
   のいずれかで明示的に呼び出された場合のみ実行され、PAUSED → ACTIVE に遷移します。
   実予算消費はこの段階で初めて発生します。
 - Apply / Activate それぞれが独立した承認境界を持ち、`approval_records` の
@@ -208,7 +207,7 @@ UI は `apps/web/components` の小さな in-house primitives と
 
 | 想定要件 | 対応 |
 |---|---|
-| ワーカー水平スケール | `addroid up --separate-worker` で `apps/worker` を別プロセスとして spawn (web は引き続き CLI 内、worker のみ別プロセス化) |
+| ワーカー水平スケール | `addroid start --separate-worker` で `apps/worker` を別プロセスとして spawn (web は引き続き CLI 内、worker のみ別プロセス化) |
 | 多人数運用 | the current implementation の範囲外。SSO 等は将来の独立コントラクト |
 | 多テナント | 当面 1 ワークスペース 1 ホスト。多テナントは別契約で扱う |
 | Meta sandbox / mock harness | `ADDROID_META_OAUTH_MOCK=1` で `MockMetaAdapter` に固定 (E2E / smoke-test 用) |

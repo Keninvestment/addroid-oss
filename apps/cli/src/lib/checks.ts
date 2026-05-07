@@ -217,6 +217,32 @@ export function checkMetaAdsCli(env: NodeJS.ProcessEnv = process.env): CheckResu
   };
 }
 
+export function checkGithubCli(): CheckResult {
+  const r = runVersion("gh", ["--version"]);
+  if (!r.found) {
+    return {
+      name: "github-cli",
+      state: "error",
+      message: "GitHub CLI (`gh`) が見つかりません。",
+      hint:
+        "`addroid init --install-deps` を実行してください。手動の場合は macOS: `brew install gh`、Linux: `sudo apt-get install gh` または GitHub CLI 公式手順を参照してください。",
+    };
+  }
+  if (r.status !== 0) {
+    return {
+      name: "github-cli",
+      state: "error",
+      message: `GitHub CLI の実行に失敗しました: ${r.stderr || r.stdout || `exit ${r.status}`}`,
+      hint: "GitHub CLI (`gh`) を再インストールしてください。",
+    };
+  }
+  return {
+    name: "github-cli",
+    state: "ok",
+    message: r.stdout || r.stderr || "gh detected",
+  };
+}
+
 export function checkPostgresVersion(): CheckResult {
   const r = runVersion("psql", ["--version"]);
   if (!r.found) {

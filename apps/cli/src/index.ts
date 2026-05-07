@@ -32,6 +32,14 @@ import { runAuthCommand } from "./commands/auth.js";
 import { runAccountsCommand } from "./commands/accounts.js";
 import { runBackupCommand, runRestoreCommand } from "./commands/backup.js";
 import { runChatCommand } from "./commands/chat.js";
+import {
+  runAccountCommand,
+  runConnectCommand,
+  runOpenCommand,
+  runReportCommand,
+  runScheduleCommand,
+  runSubmitCommand,
+} from "./commands/public.js";
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
@@ -47,20 +55,44 @@ async function main(argv: string[]): Promise<number> {
     case "-v":
       printVersion();
       return 0;
-    case "doctor":
-      return runDoctor(rest);
     case "init":
       return runInit(rest);
+    case "start":
+      return runUp(rest);
+    case "stop":
+      return runDown(rest);
+    case "open":
+      return runOpenCommand(rest);
+    case "status":
+      return runStatus(rest);
+    case "connect":
+      return runConnectCommand(rest);
+    case "account":
+      return runAccountCommand(rest);
+    case "report":
+      return runReportCommand(rest);
+    case "submit":
+      return runSubmitCommand(rest);
+    case "schedule":
+      return runScheduleCommand(rest);
+    case "chat":
+      return runChatCommand(rest);
+    case "backup":
+      return runBackupCommand(rest);
+
+    // Detailed / CI-oriented commands. They intentionally stay out of the top help.
+    case "doctor":
+      return runDoctor(rest);
+    case "logs":
+      return runLogs(rest);
+    case "restore":
+      return runRestoreCommand(rest);
+    case "validate":
+      return runValidate(rest);
     case "up":
       return runUp(rest);
     case "down":
       return runDown(rest);
-    case "logs":
-      return runLogs(rest);
-    case "status":
-      return runStatus(rest);
-    case "validate":
-      return runValidate(rest);
     case "plan":
       return runPlan(rest);
     case "activate":
@@ -69,14 +101,8 @@ async function main(argv: string[]): Promise<number> {
       return runCronCommand(rest);
     case "auth":
       return runAuthCommand(rest);
-    case "chat":
-      return runChatCommand(rest);
     case "accounts":
       return runAccountsCommand(rest);
-    case "backup":
-      return runBackupCommand(rest);
-    case "restore":
-      return runRestoreCommand(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n`);
       printHelp();
@@ -93,24 +119,22 @@ function printHelp() {
       "  addroid <command> [...args]",
       "",
       "Commands:",
-      "  init      対話型初期セットアップ (.env / DB / ~/.addroid / Meta / GitHub / LLM) と状態表示",
-      "  doctor    uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断",
-      "  up        web (127.0.0.1:3000) と worker (pg-boss) を 1 プロセスで併走起動 (--separate-worker で worker 別プロセス)",
-      "  down      `addroid up` で起動したプロセスを停止 (pid file 経由)",
-      "  logs      ~/.addroid/logs/{up,web,worker}.log の末尾を表示",
-      "  status    config / プロセス / 直近 doctor 結果のスナップショット",
-      "  validate  ops repo の Ads YAML / cron.yaml / project.yaml を Zod で検証 (CI で `npx addroid-cli validate`)",
-      "  plan      ops repo から apply 案を simulate (--dry-run 必須)",
-      "  activate  PAUSED 状態の Meta オブジェクトを ACTIVE に遷移 (Apply と別経路で監査)",
-      "  cron      cron プリセットの list / enable / disable / set / run / logs (pg-boss + cron_schedules)",
-      "  auth      provider 別の認証・トークン登録 (Meta / GitHub ops repo / LLM / Slack)",
-      "  chat      LLM を使った対話型 command chat (自然文で status / report / auth / cron などを実行)",
-      "  accounts  Meta Ad Account の取得・登録・デフォルト確認/選択",
-      "  backup    DATABASE_URL の DB を pg_dump で ~/.addroid/backups に保存 (Prisma + pg-boss を含む)",
-      "  restore   pg_restore --clean --if-exists でダンプを復元 (実行前に `addroid down` を推奨)",
+      "  chat      自然文で操作する対話型 agent chat",
+      "  init      初期設定・不足設定の案内",
+      "  start     Web UI と自動処理を起動",
+      "  stop      起動中の Web UI と自動処理を停止",
+      "  open      Web UI を開く / URL を表示",
+      "  status    接続・起動状態を確認",
+      "  connect   Meta / GitHub / AI / Slack を接続・再接続",
+      "  account   利用する広告アカウントを確認・選択",
+      "  report    レポート・改善チェックを今すぐ実行",
+      "  submit    入稿前チェックと変更予定の確認",
+      "  schedule  自動実行の確認・変更",
+      "  backup    データベースをバックアップ",
       "  version   CLI バージョン",
       "  help      このヘルプ",
       "",
+      "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, restore.",
       "All operations are localhost-bound and outbound-only.",
       "",
     ].join("\n")

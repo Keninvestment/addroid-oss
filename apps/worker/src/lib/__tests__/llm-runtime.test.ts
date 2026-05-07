@@ -463,22 +463,23 @@ test("selectLLMProviderForWorker: ENCRYPTION_KEY 未設定 → Stub (crypto 欠�
   assert.match(sel.reason, /crypto/);
 });
 
-test("selectLLMProviderForWorker: CHAT_COMPLETIONS_URL 未設定 → Stub", async () => {
+test("selectLLMProviderForWorker: CHAT_COMPLETIONS_URL 未設定でも内蔵既定値で CodexLLMProvider", async () => {
   const { client } = makeFakePrisma();
   const env = fullCodexEnv();
   delete env.ADDROID_CODEX_CHAT_COMPLETIONS_URL;
   const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "stub");
-  assert.match(sel.reason, /chatCompletionsUrl/);
+  assert.equal(sel.choice, "codex");
+  assert.ok(sel.provider instanceof CodexLLMProvider);
 });
 
-test("selectLLMProviderForWorker: DEFAULT_MODEL 未設定 → Stub", async () => {
+test("selectLLMProviderForWorker: DEFAULT_MODEL 未設定でも内蔵既定値で CodexLLMProvider", async () => {
   const { client } = makeFakePrisma();
   const env = fullCodexEnv();
   delete env.ADDROID_CODEX_DEFAULT_MODEL;
   const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "stub");
-  assert.match(sel.reason, /defaultModel/);
+  assert.equal(sel.choice, "codex");
+  assert.ok(sel.provider instanceof CodexLLMProvider);
+  assert.equal(sel.provider.defaultModel, "gpt-4.1");
 });
 
 test("selectLLMProviderForWorker: CODEX OAuth client env なしでも内蔵設定で CodexLLMProvider", async () => {

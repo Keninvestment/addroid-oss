@@ -119,7 +119,7 @@ test("auth は未対応プロバイダで 2 を返す", async () => {
   assert.match(out.stdout, /addroid auth slack/);
 });
 
-test("auth github は client id 未設定で 2 を返す", async () => {
+test("auth github は client id 未設定かつ GitHub CLI 不在で 2 を返す", async () => {
   const prismaOverride = {
     oAuthToken: {
       async upsert() {
@@ -140,11 +140,85 @@ test("auth github は client id 未設定で 2 を返す", async () => {
       capture(() =>
         runAuthCommand(["github", "--no-open", "--no-bootstrap"], {
           prismaOverride,
+          githubGhRunner: () => ({
+            status: 127,
+            stdout: "",
+            stderr: "gh: command not found",
+          }),
         })
       )
   );
   assert.equal(code, 2);
-  assert.match(out.stderr, /GitHub OAuth client id/);
+  assert.match(out.stderr, /GitHub CLI/);
+});
+
+test("auth github は client id 未設定なら GitHub CLI の token を暗号化保存できる", async () => {
+  const calls: unknown[] = [];
+  const ghCalls: string[][] = [];
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert(args: unknown) {
+        calls.push(args);
+        return {};
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+      ADDROID_GITHUB_CLIENT_ID: undefined,
+      ADDROID_GITHUB_OAUTH_CLIENT_ID: undefined,
+      ADDROID_GITHUB_OAUTH_MOCK: undefined,
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(["github", "--no-bootstrap", "--json"], {
+          prismaOverride,
+          githubGhRunner: (args) => {
+            ghCalls.push(args);
+            if (args.join(" ") === "--version") {
+              return { status: 0, stdout: "gh version 2.0.0\n", stderr: "" };
+            }
+            if (args.join(" ") === "auth status --hostname github.com") {
+              return { status: 0, stdout: "Logged in\n", stderr: "" };
+            }
+            if (args.join(" ") === "auth token --hostname github.com") {
+              return { status: 0, stdout: "gho_mock_token\n", stderr: "" };
+            }
+            if (args.join(" ") === "api user --jq .login") {
+              return { status: 0, stdout: "octocat\n", stderr: "" };
+            }
+            return { status: 1, stdout: "", stderr: `unexpected gh ${args.join(" ")}` };
+          },
+        })
+      )
+  );
+  assert.equal(code, 0, out.stdout + out.stderr);
+  const parsed = JSON.parse(out.stdout.slice(out.stdout.indexOf("{"))) as {
+    ok: boolean;
+    provider: string;
+    accountIdentifier: string;
+    bootstrap: { status: string; reason: string };
+  };
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.provider, "github");
+  assert.equal(parsed.accountIdentifier, "octocat");
+  assert.deepEqual(parsed.bootstrap, { status: "skipped", reason: "--no-bootstrap" });
+  assert.deepEqual(ghCalls, [
+    ["--version"],
+    ["auth", "status", "--hostname", "github.com"],
+    ["auth", "token", "--hostname", "github.com"],
+    ["api", "user", "--jq", ".login"],
+  ]);
+  const arg = calls[0] as {
+    create: { provider: string; accountIdentifier: string; accessTokenCiphertext: string };
+  };
+  assert.equal(arg.create.provider, "github");
+  assert.equal(arg.create.accountIdentifier, "octocat");
+  assert.ok(arg.create.accessTokenCiphertext.length > 20);
+  assert.notEqual(arg.create.accessTokenCiphertext, "gho_mock_token");
 });
 
 test("auth github mock は token を保存し bootstrap をスキップできる", async () => {
@@ -240,6 +314,56 @@ test("auth llm は API key を暗号化して oauth_tokens に保存する", asy
     defaultModel: "gpt-4.1",
     apiBaseUrl: "https://api.openai.com/v1/chat/completions",
   });
+});
+
+test("auth llm は provider 未指定時に選択結果を使って API key を保存する", async () => {
+  const calls: unknown[] = [];
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert(args: unknown) {
+        calls.push(args);
+        return {};
+      },
+      async deleteMany() {
+        return { count: 0 };
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(["llm", "--api-key", "sk-ant-test-anthropic-key-123456"], {
+          prismaOverride,
+          llmSelectProvider: async () => ({
+            provider: "anthropic",
+            model: "claude-3-5-sonnet-latest",
+          }),
+        })
+      )
+  );
+  assert.equal(code, 0);
+  assert.match(out.stdout, /provider\s+: anthropic/);
+  assert.equal(calls.length, 1);
+  const arg = calls[0] as {
+    create: { provider: string; metadata: Record<string, unknown> };
+  };
+  assert.equal(arg.create.provider, "anthropic");
+  assert.deepEqual(arg.create.metadata, {
+    authKind: "api_key",
+    defaultModel: "claude-3-5-sonnet-latest",
+    apiBaseUrl: "https://api.anthropic.com/v1/messages",
+  });
+});
+
+test("auth llm --disconnect は provider 未指定なら失敗する", async () => {
+  const { code, out } = await capture(() => runAuthCommand(["llm", "--disconnect"]));
+  assert.equal(code, 2);
+  assert.match(out.stderr, /--disconnect には --provider/);
 });
 
 test("auth llm --provider codex は redirect URI 不正を分かりやすく返す", async () => {

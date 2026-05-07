@@ -76,10 +76,10 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 
 | provider | 取得経路 | 保存場所 |
 |---|---|---|
-| GitHub | CLI `addroid auth github` の OAuth Device Flow / Web UI `/github` の OAuth Code Flow | `oauth_tokens` (provider="github") |
-| Meta | `addroid auth meta` または Web UI `/accounts` の OAuth Code Flow | `oauth_tokens` (provider="meta") |
+| GitHub | CLI `addroid connect github` の OAuth Device Flow / Web UI `/github` の OAuth Code Flow | `oauth_tokens` (provider="github") |
+| Meta | `addroid connect meta` または Web UI `/accounts` の OAuth Code Flow | `oauth_tokens` (provider="meta") |
 | Codex / OpenAI | OAuth (PKCE 既定、Confidential Client は `ADDROID_CODEX_CLIENT_SECRET`) | `oauth_tokens` (provider="codex") |
-| Slack | `addroid auth slack` で Bot/App トークンを暗号化保存 (Socket Mode 接続テスト後) | `oauth_tokens` (provider="slack") |
+| Slack | `addroid connect slack` で Bot/App トークンを暗号化保存 (Socket Mode 接続テスト後) | `oauth_tokens` (provider="slack") |
 
 トークンはすべて **平文をプロセス内変数のみで保持**し、ログ出力や `console.log` を
 行わない契約です。Web UI / CLI / Slack の sanitize-on-render により、表示直前に
@@ -172,7 +172,7 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 
 - Slack 連携は **任意**。トークンを設定しなくても AdDroid OSS は通常通り稼働し、
   `/setup#slack` および Dashboard の Slack カードは benign idle を表示します。
-- 連携時は `addroid auth slack` で Bot Token (`xoxb-*`) と App-Level Token (`xapp-*`、
+- 連携時は `addroid connect slack` で Bot Token (`xoxb-*`) と App-Level Token (`xapp-*`、
   `connections:write` scope) を暗号化保存します。コマンドは Socket Mode 接続テストを
   実行し、成功時のみトークンを永続化します。
 - Slack は **Socket Mode 専用**。public な request URL / event URL を要求しません。

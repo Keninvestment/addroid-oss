@@ -47,12 +47,15 @@ async function withTempHome<T>(
 ): Promise<T> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-init-"));
   const prev = process.env.ADDROID_HOME;
+  const prevMetaCliBin = process.env.ADDROID_META_CLI_BIN;
   process.env.ADDROID_HOME = dir;
   try {
     return await fn(dir);
   } finally {
     if (prev === undefined) delete process.env.ADDROID_HOME;
     else process.env.ADDROID_HOME = prev;
+    if (prevMetaCliBin === undefined) delete process.env.ADDROID_META_CLI_BIN;
+    else process.env.ADDROID_META_CLI_BIN = prevMetaCliBin;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -362,6 +365,7 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       "Agency Ops",
       "postgresql://addroid@localhost:5432/addroid",
       "codex-oauth",
+      "Iv1.client123",
     ];
     const authCalls: string[][] = [];
     try {
@@ -415,11 +419,121 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       assert.match(out.stdout, /LLM Provider setup:/);
       assert.doesNotMatch(out.stdout, /LLM Provider を初期設定しますか/);
       assert.match(out.stdout, /Ready\./);
-      assert.match(out.stdout, /addroid up/);
-      assert.doesNotMatch(out.stdout, /addroid auth meta/);
+      assert.match(out.stdout, /addroid start/);
+      assert.doesNotMatch(out.stdout, /addroid connect meta/);
       assert.doesNotMatch(out.stdout, /addroid accounts select/);
       assert.doesNotMatch(out.stdout, /addroid auth llm --provider openai/);
       assert.doesNotMatch(out.stdout, /addroid init --interactive --reauth-llm/);
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
+test("init --interactive は初期画面に Integration check を表示する", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    delete process.env.DATABASE_URL;
+    delete process.env.ENCRYPTION_KEY;
+    const answers = [
+      "Agency Ops",
+      "postgresql://addroid@localhost:5432/addroid",
+      "codex-oauth",
+      "Iv1.client123",
+    ];
+    try {
+      const { code, out } = await capture(() =>
+        runInit(
+          [
+            "--interactive",
+            "--skip-deps",
+            "--skip-db-create",
+            "--skip-db-push",
+            "--env-file",
+            envFile,
+          ],
+          {
+            isTTY: true,
+            prompt: async () => answers.shift() ?? "",
+            confirm: async () => false,
+            runAuthCommand: async () => 0,
+            readAuthState: async () => ({
+              checked: false,
+              metaConnected: false,
+              githubConnected: false,
+              opsRepoLinked: false,
+              llmProviders: [],
+              detail: "DATABASE_URL or ENCRYPTION_KEY is not configured",
+            }),
+            randomBytes: () => Buffer.alloc(32, 3),
+          }
+        )
+      );
+      assert.equal(code, 0, out.stdout + out.stderr);
+      assert.match(out.stdout, /Integration check:/);
+      assert.match(out.stdout, /\[pending\] Meta Token\s+\.env \/ DB 作成後に init 内で token 入力 \+ Ad Account 選択を行います/);
+      assert.match(out.stdout, /\[pending\] LLM Provider\s+\.env \/ DB 作成後に Codex OAuth \/ OpenAI \/ Anthropic を選択して認証します/);
+      assert.match(out.stdout, /\[pending\] GitHub \/ Ops Repo\s+\.env \/ DB 作成後に GitHub 認証 \+ ops repo 自動作成を行います/);
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
+test("init --interactive は GitHub client id 未設定時に GitHub CLI browser auth へ進む", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    process.env.DATABASE_URL = "postgresql://addroid:secret@localhost:5432/addroid";
+    process.env.ENCRYPTION_KEY = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=";
+    const answers = [
+      "Agency Ops",
+      "postgresql://addroid:secret@localhost:5432/addroid",
+    ];
+    const authCalls: string[][] = [];
+    try {
+      const { code, out } = await capture(() =>
+        runInit(
+          [
+            "--interactive",
+            "--skip-deps",
+            "--skip-db-create",
+            "--skip-db-push",
+            "--env-file",
+            envFile,
+          ],
+          {
+            isTTY: true,
+            prompt: async (_question, defaultValue = "") => answers.shift() ?? defaultValue,
+            confirm: async () => false,
+            runAuthCommand: async (args) => {
+              authCalls.push(args);
+              return 0;
+            },
+            readAuthState: async () => ({
+              checked: true,
+              metaConnected: true,
+              metaAccountSelected: true,
+              githubConnected: false,
+              opsRepoLinked: false,
+              llmProviders: ["codex"],
+            }),
+            randomBytes: () => Buffer.alloc(32, 4),
+          }
+        )
+      );
+      assert.equal(code, 0, out.stdout + out.stderr);
+      assert.match(out.stdout, /GitHub OAuth : client id 未設定のため GitHub CLI のブラウザ認証を使用します/);
+      assert.deepEqual(authCalls, [["github"]]);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = prevDb;
@@ -476,7 +590,7 @@ test("init --interactive は addroid コマンド未検出なら checkout CLI li
     assert.ok(calls.includes("npm link --workspace apps/cli"));
     assert.match(out.stdout, /CLI command setup:/);
     assert.match(out.stdout, /addroid\s+: linked/);
-    assert.match(out.stdout, /addroid doctor/);
+    assert.match(out.stdout, /addroid status/);
   });
 });
 

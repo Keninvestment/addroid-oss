@@ -8,13 +8,13 @@ AdDroid 全体は **localhost-only / outbound-only** で動作する GitOps ベ�
 
 ## インストール
 
-グローバルにインストールして smoke-test 用途で `addroid doctor` を実行できます:
+グローバルにインストールして `addroid status` を実行できます:
 
 ```bash
 npm install -g @addroid/cli
 addroid --help
 addroid init
-addroid doctor
+addroid status
 ```
 
 `npm install` 後の `postinstall` は次に実行すべき `addroid init` を表示するだけで、
@@ -30,20 +30,17 @@ PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、�
 | コマンド | 用途 |
 |---|---|
 | `addroid init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI / GitHub / LLM Provider)。初期設定済みなら状態表示のみ |
-| `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
-| `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
-| `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
-| `addroid chat` | init 済み LLM credential を使う対話型 command chat |
-| `addroid doctor` | 実行環境 (Node / uv / Python / Meta Ads CLI / PostgreSQL / DATABASE_URL / config / secrets / ENCRYPTION_KEY) を診断 |
-| `addroid up` | Web UI (127.0.0.1:3000) と Worker (pg-boss) を併走起動 (リポジトリ内でのみ意味があります) |
-| `addroid down` | `addroid up` で起動したプロセスを停止 |
-| `addroid status` | 直近の状態スナップショットを表示 |
-| `addroid validate` | ops repo の Ads YAML / cron.yaml / project.yaml を Zod で検証 |
-| `addroid plan` | ops repo から apply 案を simulate (dry-run 必須) |
-| `addroid activate` | PAUSED 状態の Meta オブジェクトを ACTIVE に遷移 |
-| `addroid cron` | cron プリセットの list / enable / disable / set / run / logs |
-| `addroid auth` | Provider 別のトークン登録 (`meta` / `github` / `llm` / `slack`) |
-| `addroid accounts` | Meta Ad Account の取得・登録・デフォルト選択 |
+| `addroid chat` | init 済み LLM credential と `AGENTS.md` を使う対話型 agent chat |
+| `addroid start` | Web UI (127.0.0.1:3000) と Worker (pg-boss) を併走起動 |
+| `addroid stop` | 起動中の Web UI / Worker を停止 |
+| `addroid open` | Web UI を開く / URL を表示 |
+| `addroid status` | 接続・起動状態を確認 |
+| `addroid connect` | Meta / GitHub / AI / Slack を接続・再接続 |
+| `addroid account` | Meta Ad Account の取得・登録・デフォルト選択 |
+| `addroid report` | 日次レポートや予算チェックを今すぐ実行 |
+| `addroid submit` | 入稿前チェックと dry-run 変更予定の確認 |
+| `addroid schedule` | 自動実行の確認・変更 |
+| `addroid backup` | データベースをバックアップ |
 | `addroid version` | CLI バージョン |
 
 詳細は `addroid --help` を参照してください。

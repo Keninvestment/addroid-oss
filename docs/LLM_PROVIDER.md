@@ -29,19 +29,23 @@ Image Provider はクリエイティブ画像生成のための独立した任�
 
 初心者向けの推奨経路です。`addroid init` の対話セットアップで
 `openai-api-key` または `anthropic-api-key` を選ぶか、後から CLI で登録します。
+`addroid connect ai` を provider 未指定で実行すると、Codex OAuth / OpenAI API key /
+Claude (Anthropic) API key の選択から開始できます。
 
 ```bash
-npm run addroid -- auth llm --provider openai
+npm run addroid -- connect ai
+# provider を明示する場合
+npm run addroid -- connect ai --provider openai
 # または
-npm run addroid -- auth llm --provider anthropic
+npm run addroid -- connect ai --provider anthropic
 ```
 
 `--api-key` を省略すると、TTY では非表示入力になります。CI などでは
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` を一時的な環境変数として渡せます。
 
 ```bash
-npm run addroid -- auth llm --provider openai --model gpt-4.1
-npm run addroid -- auth llm --provider anthropic --model claude-3-5-sonnet-latest
+npm run addroid -- connect ai --provider openai --model gpt-4.1
+npm run addroid -- connect ai --provider anthropic --model claude-3-5-sonnet-latest
 ```
 
 保存先は `oauth_tokens` です。
@@ -57,7 +61,7 @@ npm run addroid -- auth llm --provider anthropic --model claude-3-5-sonnet-lates
 切断:
 
 ```bash
-npm run addroid -- auth llm --provider openai --disconnect
+npm run addroid -- connect ai --provider openai --disconnect
 ```
 
 `ADDROID_LLM_PROVIDER=openai|anthropic|codex` を設定すると provider 優先度を明示できます。
@@ -97,7 +101,7 @@ ADDROID_CODEX_CLIENT_SECRET=    # 設定すると Confidential Client、未設�
 ### 3.3 OAuth フロー
 
 対話型 `addroid init` で `Codex OAuth` を選ぶと、その場で
-`addroid auth llm --provider codex` が起動します。
+`addroid connect ai --provider codex` が起動します。
 内蔵 OAuth client と `.env` の既定 runtime 設定を使うため、client id の入力はありません。
 
 1. CLI がブラウザを開き、Codex / OpenAI OAuth の許可画面に遷移
@@ -114,10 +118,10 @@ CLI に貼り付けて Enter すると同じ処理で完了できます。
 npm run addroid -- init --interactive --reauth-llm
 
 # Codex OAuth だけを直接再認証したい場合
-npm run addroid -- auth llm --provider codex
+npm run addroid -- connect ai --provider codex
 ```
 
-Web UI から接続する場合は、`addroid up` 後に `/ai` の "Codex を接続" を押しても同じ
+Web UI から接続する場合は、`addroid start` 後に `/ai` の "Codex を接続" を押しても同じ
 `oauth_tokens` に保存されます。
 
 ---
@@ -168,12 +172,12 @@ ENABLE_MOCK_IMAGE_PROVIDER=1 npm run addroid -- up
 
 ### 6.2 OpenAI API key で GPT Image 2 を使う
 
-`addroid auth llm --provider openai` で登録済みの OpenAI API key がある場合、
+`addroid connect ai --provider openai` で登録済みの OpenAI API key がある場合、
 同じ暗号化済み credential を使って `gpt-image-2` の画像生成を実行できます。
 追加で画像専用 API key を `.env` に保存する必要はありません。
 
 ```bash
-npm run addroid -- auth llm --provider openai
+npm run addroid -- connect ai --provider openai
 ADDROID_IMAGE_PROVIDER=openai npm run addroid -- up
 ```
 

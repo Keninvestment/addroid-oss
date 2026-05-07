@@ -57,14 +57,16 @@ test("bin/addroid.cjs は実在し、--help を実行すると Usage を出し�
   // 主要サブコマンドが Usage に列挙されていること。
   for (const sub of [
     "init",
-    "doctor",
-    "up",
-    "validate",
-    "plan",
-    "activate",
-    "cron",
-    "auth",
     "chat",
+    "start",
+    "stop",
+    "open",
+    "connect",
+    "account",
+    "report",
+    "submit",
+    "schedule",
+    "backup",
   ]) {
     assert.match(stdout, new RegExp(`\\b${sub}\\b`), `Usage missing: ${sub}`);
   }
@@ -95,11 +97,12 @@ test("bin/addroid.cjs doctor は clean smoke env で check と overall: を出�
       `expected exit 0 or 1, got ${code}\nstdout:\n${stdout}`
     );
     assert.match(stdout, /\[addroid doctor\]/);
-    // doctor が出す 9 件の check 名が並ぶこと (state は環境依存)。
+    // doctor が出す check 名が並ぶこと (state は環境依存)。
     for (const name of [
       "uv",
       "python3.12",
       "meta-ads-cli",
+      "github-cli",
       "DATABASE_URL",
       "ENCRYPTION_KEY",
       "config",

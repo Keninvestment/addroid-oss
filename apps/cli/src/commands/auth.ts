@@ -124,7 +124,7 @@ interface ParsedMetaArgs {
 
 interface ParsedLlmArgs {
   kind: "llm";
-  provider: ApiKeyLLMProviderName | "codex";
+  provider?: ApiKeyLLMProviderName | "codex";
   apiKey?: string;
   model?: string;
   baseUrl?: string;
@@ -132,6 +132,11 @@ interface ParsedLlmArgs {
   asJson: boolean;
   openBrowser: boolean;
   timeoutMs: number;
+}
+
+interface LlmAuthSelection {
+  provider: ApiKeyLLMProviderName | "codex";
+  model?: string;
 }
 
 interface ParsedGithubArgs {
@@ -142,6 +147,18 @@ interface ParsedGithubArgs {
   clientId?: string;
   bootstrap: boolean;
 }
+
+interface GhCommandResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+type GithubGhRunner = (
+  args: string[],
+  opts?: { streamOutput?: boolean }
+) => GhCommandResult;
 
 type ParsedAction =
   | ParsedSlackArgs
@@ -183,6 +200,10 @@ export interface SlackAuthRunOptions {
   githubFetch?: typeof fetch;
   /** GitHub device flow の polling sleep 注入。 */
   githubSleep?: (ms: number) => Promise<void>;
+  /** GitHub CLI fallback 用 command runner。 */
+  githubGhRunner?: GithubGhRunner;
+  /** LLM provider 選択 UI の注入 (テスト用)。 */
+  llmSelectProvider?: () => Promise<LlmAuthSelection | null>;
 }
 
 export async function runAuthCommand(
@@ -371,8 +392,15 @@ function parseArgs(args: string[]): ParsedAction {
       };
     }
 
-    llmProvider ??= parseLLMAuthProvider(env.ADDROID_LLM_PROVIDER) ?? "openai";
-    if (!apiKey && llmProvider !== "codex") {
+    if (disconnect && !llmProvider) {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: "[addroid auth llm] --disconnect には --provider <openai|anthropic|codex> が必要です\n",
+        stdoutHelp: true,
+      };
+    }
+    if (!apiKey && llmProvider && llmProvider !== "codex") {
       apiKey =
         llmProvider === "anthropic"
           ? env.ANTHROPIC_API_KEY
@@ -380,7 +408,7 @@ function parseArgs(args: string[]): ParsedAction {
     }
     return {
       kind: "llm",
-      provider: llmProvider,
+      ...(llmProvider ? { provider: llmProvider } : {}),
       ...(apiKey ? { apiKey } : {}),
       ...(model ? { model } : {}),
       ...(baseUrl ? { baseUrl } : {}),
@@ -549,6 +577,73 @@ function defaultModelForApiKeyProvider(provider: ApiKeyLLMProviderName): string 
   return provider === "anthropic" ? "claude-3-5-sonnet-latest" : "gpt-4.1";
 }
 
+function readApiKeyFromEnv(
+  provider: ApiKeyLLMProviderName,
+  env: NodeJS.ProcessEnv
+): string | undefined {
+  return provider === "anthropic" ? env.ANTHROPIC_API_KEY : env.OPENAI_API_KEY;
+}
+
+async function resolveLlmAuthSelection(
+  parsed: ParsedLlmArgs,
+  opts: SlackAuthRunOptions
+): Promise<LlmAuthSelection | null> {
+  if (parsed.provider) return { provider: parsed.provider };
+  if (opts.llmSelectProvider) return await opts.llmSelectProvider();
+  if (parsed.asJson || !process.stdin.isTTY || !process.stdout.isTTY) {
+    const provider = parseLLMAuthProvider(process.env.ADDROID_LLM_PROVIDER);
+    if (provider) return { provider };
+    process.stderr.write(
+      "[addroid auth llm] provider が未指定です。`addroid auth llm --provider codex` または `addroid auth llm --provider openai|anthropic` を指定してください。\n"
+    );
+    return null;
+  }
+
+  return await promptLLMAuthSelection();
+}
+
+async function promptLLMAuthSelection(): Promise<LlmAuthSelection | null> {
+  process.stdout.write("[addroid auth llm]\n\n");
+  process.stdout.write("  LLM Provider を選択します。\n");
+  process.stdout.write("  Codex OAuth はブラウザ認証、OpenAI / Claude は API key を暗号化保存します。\n\n");
+  process.stdout.write("  1. Codex OAuth\n");
+  process.stdout.write("  2. OpenAI API key\n");
+  process.stdout.write("  3. Claude / Anthropic API key\n");
+  const choice = (await promptPlain("LLM Provider [1]", "1")).trim().toLowerCase();
+  const provider =
+    choice === "" || choice === "1" || choice === "codex" || choice === "codex-oauth"
+      ? "codex"
+      : choice === "2" || choice === "openai" || choice === "openai-api-key"
+        ? "openai"
+        : choice === "3" ||
+            choice === "claude" ||
+            choice === "anthropic" ||
+            choice === "anthropic-api-key"
+          ? "anthropic"
+          : null;
+  if (!provider) {
+    process.stderr.write(
+      "[addroid auth llm] LLM Provider は 1 / 2 / 3、または codex / openai / anthropic で選択してください。\n"
+    );
+    return null;
+  }
+  if (provider === "codex") return { provider };
+
+  const defaultModel = defaultModelForApiKeyProvider(provider);
+  const model = (await promptPlain(`${provider} default model`, defaultModel)).trim() || defaultModel;
+  return { provider, model };
+}
+
+function promptPlain(question: string, defaultValue = ""): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const suffix = defaultValue ? ` [${defaultValue} / Enterで既定]` : "";
+  return rl.question(`? ${question}${suffix}: `).then((answer) => {
+    rl.close();
+    const trimmed = answer.trim();
+    return trimmed.length > 0 ? trimmed : defaultValue;
+  });
+}
+
 async function runAuthLlm(
   parsed: ParsedLlmArgs,
   opts: SlackAuthRunOptions
@@ -585,54 +680,62 @@ async function runAuthLlm(
   };
 
   try {
+    const selected = await resolveLlmAuthSelection(parsed, opts);
+    if (!selected) return 2;
+    const provider = selected.provider;
+    const model = parsed.model ?? selected.model;
+
     if (parsed.disconnect) {
       const result = await prisma.oAuthToken.deleteMany({
-        where: { provider: parsed.provider },
+        where: { provider },
       });
       if (parsed.asJson) {
         process.stdout.write(
-          `${JSON.stringify({ ok: true, provider: parsed.provider, removed: result.count }, null, 2)}\n`
+          `${JSON.stringify({ ok: true, provider, removed: result.count }, null, 2)}\n`
         );
       } else {
         process.stdout.write(
-          `[addroid auth llm]\n\n  provider      : ${parsed.provider}\n  disconnected  : ${result.count} credential(s) removed\n`
+          `[addroid auth llm]\n\n  provider      : ${provider}\n  disconnected  : ${result.count} credential(s) removed\n`
         );
       }
       return 0;
     }
 
-    if (parsed.provider === "codex") {
-      return await runAuthLlmCodexOAuth({ ...parsed, provider: "codex" }, {
+    if (provider === "codex") {
+      return await runAuthLlmCodexOAuth({ ...parsed, provider: "codex", ...(model ? { model } : {}) }, {
         prisma: prisma as never,
         crypto,
         fetchImpl: opts.llmFetch,
       });
     }
 
-    const apiKey = parsed.apiKey ?? (await promptSecret(`${parsed.provider} API key`));
+    const apiKey =
+      parsed.apiKey ??
+      readApiKeyFromEnv(provider, process.env) ??
+      (await promptSecret(`${provider} API key`));
     if (!apiKey.trim()) {
       process.stderr.write("[addroid auth llm] API key が未入力です。\n");
       return 2;
     }
-    if (!looksLikeApiKey(parsed.provider, apiKey)) {
+    if (!looksLikeApiKey(provider, apiKey)) {
       process.stderr.write(
-        `[addroid auth llm] ${parsed.provider} API key の形式が想定と異なります。入力値を確認してください。\n`
+        `[addroid auth llm] ${provider} API key の形式が想定と異なります。入力値を確認してください。\n`
       );
       return 2;
     }
-    const model = parsed.model?.trim() || defaultModelForApiKeyProvider(parsed.provider);
-    const baseUrl = parsed.baseUrl?.trim() || defaultApiKeyChatUrl(parsed.provider);
+    const defaultModel = model?.trim() || defaultModelForApiKeyProvider(provider);
+    const baseUrl = parsed.baseUrl?.trim() || defaultApiKeyChatUrl(provider);
     if (!/^https:\/\//i.test(baseUrl)) {
       process.stderr.write("[addroid auth llm] --base-url は https URL で指定してください。\n");
       return 2;
     }
     const now = opts.now ?? (() => new Date());
     const connectedAt = now();
-    const accountIdentifier = `${parsed.provider}-api-key`;
+    const accountIdentifier = `${provider}-api-key`;
     await prisma.oAuthToken.upsert({
       where: {
         provider_accountIdentifier: {
-          provider: parsed.provider,
+          provider,
           accountIdentifier,
         },
       },
@@ -644,12 +747,12 @@ async function runAuthLlm(
         connectedAt,
         metadata: {
           authKind: "api_key",
-          defaultModel: model,
+          defaultModel,
           apiBaseUrl: baseUrl,
         },
       },
       create: {
-        provider: parsed.provider,
+        provider,
         accountIdentifier,
         scopes: [],
         accessTokenCiphertext: crypto.encrypt(apiKey),
@@ -658,7 +761,7 @@ async function runAuthLlm(
         connectedAt,
         metadata: {
           authKind: "api_key",
-          defaultModel: model,
+          defaultModel,
           apiBaseUrl: baseUrl,
         },
       },
@@ -668,10 +771,10 @@ async function runAuthLlm(
         `${JSON.stringify(
           {
             ok: true,
-            provider: parsed.provider,
+            provider,
             authKind: "api_key",
             accountIdentifier,
-            defaultModel: model,
+            defaultModel,
             apiBaseUrl: baseUrl,
             connectedAt: connectedAt.toISOString(),
           },
@@ -684,9 +787,9 @@ async function runAuthLlm(
         [
           "[addroid auth llm]",
           "",
-          `  provider      : ${parsed.provider}`,
+          `  provider      : ${provider}`,
           "  auth          : api_key",
-          `  model         : ${model}`,
+          `  model         : ${defaultModel}`,
           `  endpoint      : ${baseUrl}`,
           "  api key       : encrypted (oauth_tokens.accessTokenCiphertext)",
           "",
@@ -875,61 +978,67 @@ async function runAuthGithub(
       adapter = mock;
     } else {
       const clientId = await resolveGithubClientId(parsed.clientId);
-      if (!clientId) {
-        process.stderr.write(
-          "[addroid auth github] GitHub OAuth client id が未設定です。\n" +
-            "  `~/.addroid/secrets.local.yaml` の github.oauth.clientId、または ADDROID_GITHUB_CLIENT_ID を設定してください。\n" +
-            "  Web UI OAuth Code Flow も維持する場合は github.oauth.clientSecret も設定してください。\n"
-        );
-        return 2;
-      }
+      if (clientId) {
+        const device = await requestDeviceCode({
+          clientId,
+          scopes: ADDROID_REQUIRED_SCOPES,
+          fetchImpl,
+        });
+        if (!parsed.asJson) {
+          process.stdout.write("[addroid auth github]\n\n");
+          process.stdout.write("  auth          : device flow\n");
+          process.stdout.write(`  URL           : ${device.verificationUri}\n`);
+          process.stdout.write(`  code          : ${device.userCode}\n`);
+          process.stdout.write("  ブラウザで GitHub 認証を完了してください。\n\n");
+        }
+        if (parsed.openBrowser) openUrl(device.verificationUri);
 
-      const device = await requestDeviceCode({
-        clientId,
-        scopes: ADDROID_REQUIRED_SCOPES,
-        fetchImpl,
-      });
-      if (!parsed.asJson) {
-        process.stdout.write("[addroid auth github]\n\n");
-        process.stdout.write("  auth          : device flow\n");
-        process.stdout.write(`  URL           : ${device.verificationUri}\n`);
-        process.stdout.write(`  code          : ${device.userCode}\n`);
-        process.stdout.write("  ブラウザで GitHub 認証を完了してください。\n\n");
+        const exchanged = await waitForGithubDeviceToken({
+          clientId,
+          deviceCode: device.deviceCode,
+          intervalSeconds: device.intervalSeconds,
+          timeoutMs: Math.min(parsed.timeoutMs, device.expiresInSeconds * 1000),
+          fetchImpl,
+          sleep: opts.githubSleep,
+        });
+        const api = await createDefaultGithubApiClient(exchanged.accessToken);
+        const login = await api.getAuthenticatedUserLogin();
+        const connectedAt = opts.now?.() ?? new Date();
+        const expiresAt = exchanged.expiresInSeconds
+          ? new Date(connectedAt.getTime() + exchanged.expiresInSeconds * 1000)
+          : null;
+        const scopes = exchanged.grantedScopes.length
+          ? exchanged.grantedScopes
+          : [...ADDROID_REQUIRED_SCOPES];
+        await tokenStore.saveOAuthToken({
+          provider: "github",
+          accountIdentifier: login,
+          scopes,
+          accessTokenCiphertext: crypto.encrypt(exchanged.accessToken),
+          ...(exchanged.refreshToken
+            ? { refreshTokenCiphertext: crypto.encrypt(exchanged.refreshToken) }
+            : {}),
+          ...(expiresAt ? { expiresAt } : {}),
+          connectedAt,
+        });
+        connection = { accountIdentifier: login, scopes, connectedAt, expiresAt };
+      } else {
+        const gh = await authenticateGithubWithGhCli({
+          parsed,
+          crypto,
+          tokenStore,
+          runner: opts.githubGhRunner ?? defaultGithubGhRunner,
+          now: opts.now,
+        });
+        if (!gh.ok) {
+          process.stderr.write(gh.message);
+          return gh.code;
+        }
+        connection = gh.connection;
       }
-      if (parsed.openBrowser) openUrl(device.verificationUri);
-
-      const exchanged = await waitForGithubDeviceToken({
-        clientId,
-        deviceCode: device.deviceCode,
-        intervalSeconds: device.intervalSeconds,
-        timeoutMs: Math.min(parsed.timeoutMs, device.expiresInSeconds * 1000),
-        fetchImpl,
-        sleep: opts.githubSleep,
-      });
-      const api = await createDefaultGithubApiClient(exchanged.accessToken);
-      const login = await api.getAuthenticatedUserLogin();
-      const connectedAt = opts.now?.() ?? new Date();
-      const expiresAt = exchanged.expiresInSeconds
-        ? new Date(connectedAt.getTime() + exchanged.expiresInSeconds * 1000)
-        : null;
-      const scopes = exchanged.grantedScopes.length
-        ? exchanged.grantedScopes
-        : [...ADDROID_REQUIRED_SCOPES];
-      await tokenStore.saveOAuthToken({
-        provider: "github",
-        accountIdentifier: login,
-        scopes,
-        accessTokenCiphertext: crypto.encrypt(exchanged.accessToken),
-        ...(exchanged.refreshToken
-          ? { refreshTokenCiphertext: crypto.encrypt(exchanged.refreshToken) }
-          : {}),
-        ...(expiresAt ? { expiresAt } : {}),
-        connectedAt,
-      });
-      connection = { accountIdentifier: login, scopes, connectedAt, expiresAt };
       adapter = new OctokitGithubAdapter({
         oauthClient: {
-          clientId,
+          clientId: clientId ?? "github-cli",
           clientSecret: "unused-by-device-flow",
           redirectUri: "http://127.0.0.1/unused",
         },
@@ -991,6 +1100,135 @@ async function resolveGithubClientId(explicit?: string): Promise<string | null> 
   if (fromEnv) return fromEnv;
   const secrets = await readLocalSecrets().catch(() => null);
   return secrets?.github?.oauth?.clientId?.trim() || null;
+}
+
+async function authenticateGithubWithGhCli(opts: {
+  parsed: ParsedGithubArgs;
+  crypto: ReturnType<typeof getCryptoBoundary>;
+  tokenStore: ReturnType<typeof createPrismaOAuthTokenStore>;
+  runner: GithubGhRunner;
+  now?: () => Date;
+}): Promise<
+  | {
+      ok: true;
+      connection: {
+        accountIdentifier: string;
+        scopes: string[];
+        connectedAt: Date;
+        expiresAt: Date | null;
+      };
+    }
+  | { ok: false; code: number; message: string }
+> {
+  const version = opts.runner(["--version"]);
+  if (version.status !== 0) {
+    return {
+      ok: false,
+      code: 2,
+      message:
+        "[addroid auth github] GitHub OAuth client id が未設定で、GitHub CLI (`gh`) も見つかりません。\n" +
+        "  非エンジニア向けのブラウザ認証には GitHub CLI を使います。`brew install gh` 後に再実行してください。\n" +
+        "  代替として `addroid auth github --client-id <GitHub OAuth App client id>` も利用できます。\n",
+    };
+  }
+
+  const status = opts.runner(["auth", "status", "--hostname", "github.com"]);
+  if (status.status !== 0) {
+    if (!opts.parsed.openBrowser) {
+      return {
+        ok: false,
+        code: 2,
+        message:
+          "[addroid auth github] GitHub CLI は未認証です。`--no-open` なしで再実行し、ブラウザ認証を完了してください。\n",
+      };
+    }
+    if (!opts.parsed.asJson) {
+      process.stdout.write("[addroid auth github]\n\n");
+      process.stdout.write("  auth          : GitHub CLI browser flow\n");
+      process.stdout.write("  ブラウザで GitHub 認証を完了してください。\n\n");
+    }
+    const login = opts.runner(
+      [
+        "auth",
+        "login",
+        "--hostname",
+        "github.com",
+        "--web",
+        "--scopes",
+        ADDROID_REQUIRED_SCOPES.join(","),
+        "--git-protocol",
+        "https",
+      ],
+      { streamOutput: true }
+    );
+    if (login.status !== 0) {
+      return {
+        ok: false,
+        code: 1,
+        message: `[addroid auth github] GitHub CLI browser auth に失敗しました: ${summarizeGhFailure(login)}\n`,
+      };
+    }
+  }
+
+  const tokenResult = opts.runner(["auth", "token", "--hostname", "github.com"]);
+  const accessToken = tokenResult.stdout.trim();
+  if (tokenResult.status !== 0 || !accessToken) {
+    return {
+      ok: false,
+      code: 1,
+      message: `[addroid auth github] GitHub CLI token の取得に失敗しました: ${summarizeGhFailure(tokenResult)}\n`,
+    };
+  }
+  const userResult = opts.runner(["api", "user", "--jq", ".login"]);
+  const login = userResult.stdout.trim();
+  if (userResult.status !== 0 || !login) {
+    return {
+      ok: false,
+      code: 1,
+      message: `[addroid auth github] GitHub user の取得に失敗しました: ${summarizeGhFailure(userResult)}\n`,
+    };
+  }
+
+  const connectedAt = opts.now?.() ?? new Date();
+  const scopes = [...ADDROID_REQUIRED_SCOPES];
+  await opts.tokenStore.saveOAuthToken({
+    provider: "github",
+    accountIdentifier: login,
+    scopes,
+    accessTokenCiphertext: opts.crypto.encrypt(accessToken),
+    connectedAt,
+  });
+  return {
+    ok: true,
+    connection: {
+      accountIdentifier: login,
+      scopes,
+      connectedAt,
+      expiresAt: null,
+    },
+  };
+}
+
+function defaultGithubGhRunner(
+  args: string[],
+  opts: { streamOutput?: boolean } = {}
+): GhCommandResult {
+  const result = spawnSync("gh", args, {
+    encoding: "utf8",
+    stdio: opts.streamOutput ? "inherit" : ["ignore", "pipe", "pipe"],
+  });
+  return {
+    status: result.status,
+    stdout: typeof result.stdout === "string" ? result.stdout : "",
+    stderr: typeof result.stderr === "string" ? result.stderr : "",
+    ...(result.error ? { error: result.error } : {}),
+  };
+}
+
+function summarizeGhFailure(result: GhCommandResult): string {
+  if (result.error) return result.error.message;
+  const detail = (result.stderr || result.stdout || "").trim();
+  return `exit ${result.status ?? "unknown"}${detail ? `: ${detail.split(/\r?\n/).slice(-3).join(" ")}` : ""}`;
 }
 
 async function waitForGithubDeviceToken(opts: {
@@ -1102,7 +1340,7 @@ async function bootstrapOpsRepoFromCli(
     };
   }
   const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();
-  const desiredName = config.github?.opsRepo?.name ?? `addroid-ops-${config.workspace.slug}`;
+  const desiredName = config.github?.opsRepo?.name ?? "addroid-ops";
   const defaultBranch = config.github?.opsRepo?.defaultBranch ?? "main";
   const account = await prisma.adAccount.findFirst({
     where: { active: true },
@@ -2119,6 +2357,7 @@ function printHelp() {
       "  addroid auth meta --oauth [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
       "  addroid auth github [--client-id <id>] [--no-open] [--no-bootstrap] [--timeout-ms <ms>] [--json]",
       "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
+      "  addroid auth llm",
       "  addroid auth llm --provider <openai|anthropic> [--api-key <key>] [--model <model>] [--base-url <url>] [--json]",
       "  addroid auth llm --provider codex [--no-open] [--timeout-ms <ms>] [--json]",
       "  addroid auth llm --provider <openai|anthropic|codex> --disconnect [--json]",
@@ -2127,7 +2366,7 @@ function printHelp() {
       "  --token <token>    Meta Access Token。未指定時は非表示入力",
       "  --access-token <token> --token と同じ",
       "  --oauth            上級者向け: Meta OAuth callback 経路を使う",
-      "  --client-id <id>   GitHub OAuth App client id (未指定時は secrets.local.yaml / env)",
+      "  --client-id <id>   GitHub OAuth App client id (未指定時は GitHub CLI fallback / secrets.local.yaml / env)",
       "  --no-open          OAuth URL をブラウザで自動オープンしない",
       "  --no-bootstrap     GitHub 認証後の ops repository 自動作成をスキップ",
       "  --no-select-default Meta Ad Account 既定選択をスキップ",
@@ -2152,8 +2391,9 @@ function printHelp() {
       "  - Meta の標準経路は Access Token 入力です。HTTPS callback URL は不要です。",
       "  - token 入力後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
       "  - OAuth callback は `addroid auth meta --oauth` の上級者向け経路として残しています。",
-      "  - GitHub は CLI では Device Flow、Web UI では既存の OAuth Code Flow を使います。どちらも provider=github として暗号化保存します。",
+      "  - GitHub は CLI では GitHub CLI browser flow または Device Flow、Web UI では既存の OAuth Code Flow を使います。どちらも provider=github として暗号化保存します。",
       "  - GitHub 認証後、未連携なら private ops repository を作成し workspace に紐付けます。",
+      "  - `addroid auth llm` は Codex OAuth / OpenAI API key / Claude (Anthropic) API key の選択から開始します。",
       "  - Codex OAuth は `addroid auth llm --provider codex` でブラウザ認証を開始し、localhost callback または callback URL 貼り付けで完了します。",
       "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
       "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",

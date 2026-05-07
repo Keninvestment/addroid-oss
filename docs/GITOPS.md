@@ -36,7 +36,7 @@ Ads YAML / cron.yaml / project.yaml はすべて `packages/yaml-schemas` の Zod
 
 ## 2. 連携の bootstrap
 
-1. `addroid init` または `addroid auth github` で GitHub OAuth を完了
+1. `addroid init` または `addroid connect github` で GitHub OAuth を完了
 2. AdDroid が未連携 workspace に private ops repo を自動作成
 3. AdDroid が ops repo 直下に initial commit を push (config skeleton)
 4. `audit_logs` に `ops_repo.bootstrapped` が記録される

@@ -174,7 +174,7 @@ npm run addroid -- init
 - ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
 - `npm run db:generate` と `npm run db:push` による Prisma schema 反映
 - 実際の Meta 広告アカウント利用に必要な Meta Access Token の取得手順と必要権限を表示
-- `addroid auth meta` で Access Token を暗号化保存し、取得できる Ad Account から既定を選択
+- `addroid connect meta` で Access Token を暗号化保存し、取得できる Ad Account から既定を選択
 
 既存の `.env` / `config.yaml` / `secrets.local.yaml` は破壊しません。既存値がある場合は保持し、
 `.env.example` 由来の placeholder だけを置き換えます。
@@ -220,12 +220,12 @@ npm run addroid -- up       # web (127.0.0.1:3000) + worker (pg-boss) を 1 プ�
 ```
 
 `addroid` を `npm install -g @addroid/cli` で導入済みであれば `addroid init` /
-`addroid doctor` / `addroid up` をそのまま呼び出せます。`addroid doctor` は任意の
+`addroid status` / `addroid start` をそのまま呼び出せます。詳細診断の `addroid doctor` は任意の
 診断コマンドで、セットアップ後や起動前の確認に使います。既定モードでは Next.js (web) と
 pg-boss (worker) を CLI と同じ 1 プロセス内で併走させ、`SIGINT` / `SIGTERM` で graceful
 shutdown します。別ターミナルで worker を起動する必要はありません。
 
-将来的に worker を別ホストへ水平スケールしたい場合は `addroid up --separate-worker`
+将来的に worker を別ホストへ水平スケールしたい場合は `addroid start --separate-worker`
 で worker のみ別プロセスに spawn できます (web は引き続き CLI 内で起動)。
 
 ### 個別起動 (任意・デバッグ用途)
@@ -280,6 +280,7 @@ Meta Access Token が必須です。Meta 未接続のままでは Apply / Activa
 | `uv` | uv コマンドが PATH にあるか |
 | `python3.12` | Python 3.12+ が利用可能か (`uv python find '>=3.12'` で見つかる uv-managed Python も可) |
 | `meta-ads-cli` | Meta Ads CLI (`meta ads --help` / `ADDROID_META_CLI_BIN` / `meta-ads` / `meta_ads` / `metaads`) が呼び出せるか (`ADDROID_META_ADS_CLI_MOCK=1` で mock 経由扱い) |
+| `github-cli` | GitHub CLI (`gh --version`) が呼び出せるか。client id 不要のブラウザ認証に使用 |
 | `postgres-16` | PostgreSQL 16+ が `psql --version` から判別できるか (`psql` が無ければ warn) |
 | `DATABASE_URL` | 設定済みで Prisma 経由で `SELECT 1` できるか |
 | `ENCRYPTION_KEY` | 設定済みで 32 byte 以上か |
@@ -300,8 +301,9 @@ checks には含まれません。これらは `/setup` の OSS Release Readines
 
 各統合は未設定でも core 動作 (Dashboard / DB / worker / cron / Doctor) を阻害しません。
 実際の Meta 広告アカウントを利用する場合は Meta Access Token、実際に入稿する場合は
-GitHub token と ops repo 連携を必ず登録してください。CLI の GitHub Device Flow は
-`~/.addroid/secrets.local.yaml` の `github.oauth.clientId`、Web UI OAuth Code Flow は
+GitHub token と ops repo 連携を必ず登録してください。CLI は GitHub CLI (`gh`) があれば
+ブラウザ認証を使うため client id 入力は不要です。`gh` が無い場合は
+`github.oauth.clientId` を使った Device Flow も利用できます。Web UI OAuth Code Flow は
 `github.oauth.clientId` / `github.oauth.clientSecret` を使います。
 
 | 統合 | 役割 | 詳細 |
@@ -358,11 +360,11 @@ addroid backup --out /path/to/snapshot.dump
 復元は **破壊的** (target DB の対象スキーマを `--clean --if-exists` で削除して
 置換) です。worker / web が動いていると pg-boss スキーマが衝突するため、
 `addroid backup` 自体は up 中でも安全ですが、`addroid restore` の前には
-**必ず `addroid down`** を実行してください。
+**必ず `addroid stop`** を実行してください。
 
 ```bash
 # 1. 停止
-addroid down
+addroid stop
 
 # 2. (任意) 復元前に念のため現状をバックアップ
 addroid backup --out ~/.addroid/backups/pre-restore.dump
@@ -371,12 +373,12 @@ addroid backup --out ~/.addroid/backups/pre-restore.dump
 addroid restore ~/.addroid/backups/<file>.dump
 
 # 4. 起動して doctor で接続確認
-addroid up
-addroid doctor
+addroid start
+addroid status
 ```
 
 CI / 自動化では `--yes` で確認プロンプトをスキップできます。
-`addroid up` が動いているのを承知の上で強制実行する場合は `--force-while-up` を
+`addroid start` が動いているのを承知の上で強制実行する場合は `--force-while-up` を
 指定してください (非推奨。worker が DB を触ると pg-boss スキーマが破損する
 可能性があります)。
 

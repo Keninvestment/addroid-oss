@@ -41,6 +41,8 @@ import type { Prisma, PrismaClient } from "@addroid/db";
 const DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_CODEX_AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize";
 const DEFAULT_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
+const DEFAULT_CODEX_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_CODEX_MODEL = "gpt-4.1";
 const DEFAULT_CODEX_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
 
 /**
@@ -300,8 +302,9 @@ export async function selectLLMProviderForWorker(
   // factory が StubLLMProvider に倒し、analyst runner が `status="failed"` の
   // ai_run を返す (snapshot は保存される — GitOps state は腐らない)。
   const codexClient = loadCodexLLMClientFromEnv(env);
-  const chatCompletionsUrl = env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || null;
-  const defaultModel = env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || undefined;
+  const chatCompletionsUrl =
+    env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || DEFAULT_CODEX_CHAT_COMPLETIONS_URL;
+  const defaultModel = env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || DEFAULT_CODEX_MODEL;
   const selection = selectLLMProvider({
     env,
     tokenStore,

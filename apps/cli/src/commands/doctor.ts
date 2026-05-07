@@ -1,7 +1,7 @@
 // `addroid doctor` — 環境診断 (read-only)。
 //
 // 検証対象 (acceptance):
-//   uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / config / secrets / ENCRYPTION_KEY
+//   uv / Python 3.12+ / Meta Ads CLI / GitHub CLI / PostgreSQL 16+ / DATABASE_URL / config / secrets / ENCRYPTION_KEY
 // 結果は stdout に並べると同時に、DB が利用可能であれば doctor_results テーブルに 1 行追記する
 // (UI の /setup ページから直近結果を読むため)。
 // DB 未到達でも CLI 自体は失敗扱いにしないが、いずれかの check が error なら exit code 1。
@@ -11,6 +11,7 @@ import {
   checkConfigFile,
   checkDatabaseUrl,
   checkEncryptionKey,
+  checkGithubCli,
   checkMetaAdsCli,
   checkPlatform,
   checkPostgresVersion,
@@ -29,6 +30,7 @@ export async function runDoctor(_args: string[]): Promise<number> {
   checks.push(checkUv());
   checks.push(checkPython312());
   checks.push(checkMetaAdsCli());
+  checks.push(checkGithubCli());
   checks.push(checkPostgresVersion());
   checks.push(checkDatabaseUrl());
   checks.push(checkEncryptionKey());

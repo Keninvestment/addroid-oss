@@ -12,7 +12,19 @@ interface DoctorRow {
   checks: unknown;
 }
 
-export async function runStatus(_args: string[]): Promise<number> {
+export async function runStatus(args: string[]): Promise<number> {
+  if (args.includes("--help") || args.includes("-h")) {
+    process.stdout.write(
+      [
+        "addroid status — 接続・起動状態を確認",
+        "",
+        "Usage:",
+        "  addroid status",
+        "",
+      ].join("\n")
+    );
+    return 0;
+  }
   const paths = resolveAddroidPaths();
   const lines: string[] = [];
   lines.push("[addroid status]");

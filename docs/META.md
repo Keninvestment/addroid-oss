@@ -45,20 +45,20 @@ HTTPS callback URL、public domain、ngrok 等を用意する必要はありま�
 
 ### 2.2 Token の保存
 
-`addroid auth meta` で貼り付けた Access Token は、`ENCRYPTION_KEY` で暗号化して
+`addroid connect meta` で貼り付けた Access Token は、`ENCRYPTION_KEY` で暗号化して
 `oauth_tokens(provider="meta")` に保存します。Meta Ads CLI 実行時は公式 CLI 互換の
 `ACCESS_TOKEN` / `AD_ACCOUNT_ID` だけを短命な子プロセス環境に注入します。
 
 ### 2.3 Token 入力フロー
 
-1. `addroid auth meta` を実行
+1. `addroid connect meta` を実行
 2. Meta Access Token を貼り付ける
 3. AdDroid が `/me` と `/me/adaccounts` を呼び、取得できる Ad Account を表示
 4. CLI に表示された Ad Account 候補から既定アカウントを選択
 5. `oauth_tokens` (provider="meta") に AES-256-GCM で暗号化保存
 6. Web UI を使う場合は `/accounts` で接続状態・Ad Account 同期・既定変更を確認可能
 
-OAuth callback を使う上級者向け経路は `addroid auth meta --oauth` です。HTTPS callback
+OAuth callback を使う上級者向け経路は詳細 CLI の `addroid auth meta --oauth` です。HTTPS callback
 URL を Meta App に登録できる環境でのみ使ってください。
 
 ---
@@ -97,7 +97,7 @@ AdDroid は Meta への書き込みを 2 段階に分けます (詳細は [`docs
 
 ### 4.2 Activate
 
-- `addroid activate <act_id>` / Web UI `/campaigns` / Slack `/adops activate <act_id>`
+- Web UI `/campaigns` / Slack `/adops activate <act_id>` / 詳細 CLI の activate 経路
   のいずれかで明示的に呼び出された場合のみ実行
 - PAUSED → ACTIVE に遷移し、実予算消費はこの段階で初めて発生
 - `approval_records` (targetType="ads_hierarchy") に承認の出所 (`web_merge` /

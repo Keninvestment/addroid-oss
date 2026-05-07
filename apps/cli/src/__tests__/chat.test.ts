@@ -99,9 +99,8 @@ test("chat --once は LLM の command plan を addroid command として実行�
   const calls: Array<{ command: string; args: string[] }> = [];
   const provider = fakeProvider(
     JSON.stringify({
-      type: "commands",
-      summary: "日次レポートを実行します。",
-      commands: [{ command: "cron", args: ["run", "daily_report"], why: "レポート取得" }],
+      message: "日次レポートを実行します。",
+      tools: [{ name: "get_report", args: { kind: "daily" }, why: "レポート取得" }],
     })
   );
   const { code, out } = await capture(() =>
@@ -114,16 +113,16 @@ test("chat --once は LLM の command plan を addroid command として実行�
     })
   );
   assert.equal(code, 0);
-  assert.match(out.stdout, /addroid cron run daily_report/);
-  assert.deepEqual(calls, [{ command: "cron", args: ["run", "daily_report"] }]);
+  assert.match(out.stdout, /addroid report daily/);
+  assert.deepEqual(calls, [{ command: "report", args: ["daily"] }]);
 });
 
-test("chat は plan に --dry-run を強制する", async () => {
+test("chat は入稿前チェックを submit にまとめる", async () => {
   const calls: Array<{ command: string; args: string[] }> = [];
   const provider = fakeProvider(
     JSON.stringify({
-      type: "commands",
-      commands: [{ command: "plan", args: [], why: "入稿前チェック" }],
+      message: "入稿前チェックを実行します。",
+      tools: [{ name: "check_submission", args: {}, why: "入稿前チェック" }],
     })
   );
   const { code } = await capture(() =>
@@ -136,21 +135,20 @@ test("chat は plan に --dry-run を強制する", async () => {
     })
   );
   assert.equal(code, 0);
-  assert.deepEqual(calls, [{ command: "plan", args: ["--dry-run"] }]);
+  assert.deepEqual(calls, [{ command: "submit", args: [] }]);
 });
 
-test("chat は副作用のある command を確認なしに実行しない", async () => {
-  const calls: unknown[] = [];
+test("chat は副作用のある tool も確認なしで実行する", async () => {
+  const calls: Array<{ command: string; args: string[] }> = [];
   const provider = fakeProvider(
     JSON.stringify({
-      type: "commands",
-      commands: [{ command: "auth", args: ["github"], why: "GitHub 接続" }],
+      message: "GitHub 接続を開始します。",
+      tools: [{ name: "connect_service", args: { service: "github" }, why: "GitHub 接続" }],
     })
   );
   const { code, out } = await capture(() =>
     runChatCommand(["--once", "GitHubを接続"], {
       provider,
-      confirm: async () => false,
       runCommand: async (command, args) => {
         calls.push({ command, args });
         return 0;
@@ -158,7 +156,28 @@ test("chat は副作用のある command を確認なしに実行しない", asy
     })
   );
   assert.equal(code, 0);
-  assert.match(out.stdout, /skipped/);
-  assert.deepEqual(calls, []);
+  assert.match(out.stdout, /addroid connect github/);
+  assert.deepEqual(calls, [{ command: "connect", args: ["github"] }]);
 });
 
+test("chat は危険 tool をコード側 policy で拒否する", async () => {
+  const calls: unknown[] = [];
+  const provider = fakeProvider(
+    JSON.stringify({
+      message: "DB を復元します。",
+      tools: [{ name: "restore_db", args: { file: "backup.dump" }, why: "復元" }],
+    })
+  );
+  const { code, out } = await capture(() =>
+    runChatCommand(["--once", "前の状態に戻して"], {
+      provider,
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return 0;
+      },
+    })
+  );
+  assert.equal(code, 0);
+  assert.match(out.stdout, /denied: restore_db/);
+  assert.deepEqual(calls, []);
+});

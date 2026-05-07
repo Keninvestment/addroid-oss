@@ -55,7 +55,7 @@ CLI は以下を順に実行します:
 
 ## 3. Slack 連携を解除する
 
-`addroid auth slack --revoke` か Web UI `/setup#slack` の「Disconnect Slack」で
+`addroid connect slack --revoke` か Web UI `/setup#slack` の「Disconnect Slack」で
 トークンを削除できます。`oauth_tokens` から該当行を削除し、Socket Mode 接続を
 graceful close します。Slack 側の App は手動で削除してください。
 

@@ -8,7 +8,19 @@ import {
   terminateProcess,
 } from "../lib/processes.js";
 
-export async function runDown(_args: string[]): Promise<number> {
+export async function runDown(args: string[]): Promise<number> {
+  if (args.includes("--help") || args.includes("-h")) {
+    process.stdout.write(
+      [
+        "addroid stop — 起動中の Web UI と自動処理を停止",
+        "",
+        "Usage:",
+        "  addroid stop",
+        "",
+      ].join("\n")
+    );
+    return 0;
+  }
   const paths = resolveAddroidPaths();
   const state = await readUpState(paths);
   if (!state) {

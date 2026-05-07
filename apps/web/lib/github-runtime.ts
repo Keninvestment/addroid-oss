@@ -10,7 +10,7 @@
 // - Workspace 行は worker 起動より先に web から OAuth callback が叩かれる可能性が
 //   あるため、本ファイルでも `ensureWorkspace` を upsert で呼べるようにする。
 // - ops repository の希望名は `~/.addroid/config.yaml` の `github.opsRepo.name` を
-//   優先し、未設定なら workspace slug 由来の `addroid-ops-<slug>` をフォールバック
+//   優先し、未設定なら `addroid-ops` をフォールバック
 //   として使う (個人アカウントや具体プロジェクト名を literal に書かない)。
 
 import {
@@ -171,7 +171,7 @@ export interface DesiredOpsRepo {
 export async function resolveDesiredOpsRepo(): Promise<DesiredOpsRepo> {
   const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();
   const slug = config.workspace.slug;
-  const desiredName = config.github?.opsRepo?.name ?? `addroid-ops-${slug}`;
+  const desiredName = config.github?.opsRepo?.name ?? "addroid-ops";
   const defaultBranch = config.github?.opsRepo?.defaultBranch ?? "main";
   return {
     desiredName,

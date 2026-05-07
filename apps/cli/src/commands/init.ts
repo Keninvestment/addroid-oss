@@ -24,11 +24,13 @@ import {
   ConfigParseError,
   defaultAddroidConfig,
   ensureAddroidPaths,
+  readLocalSecrets,
   readAddroidConfig,
   writeAddroidConfig,
   type AddroidConfig,
 } from "@addroid/config";
 import {
+  checkGithubCli,
   checkMetaAdsCli,
   checkPlatform,
   checkPostgresVersion,
@@ -115,6 +117,7 @@ interface InitOptions {
 interface InitAuthState {
   checked: boolean;
   metaConnected: boolean;
+  metaAccountSelected?: boolean;
   githubConnected?: boolean;
   opsRepoLinked?: boolean;
   llmProviders: string[];
@@ -123,10 +126,13 @@ interface InitAuthState {
 
 type InitAuthPrismaClient = {
   oAuthToken: {
-    findMany: (args: unknown) => Promise<Array<{ provider: string }>>;
+    findMany: (args: unknown) => Promise<Array<{ provider: string; metadata?: unknown }>>;
   };
   workspace: {
-    findFirst: (args: unknown) => Promise<{ opsRepoId: string | null } | null>;
+    findFirst: (args: unknown) => Promise<{
+      opsRepoId: string | null;
+      defaultAdAccountId?: string | null;
+    } | null>;
   };
   $disconnect: () => Promise<void>;
 };
@@ -319,12 +325,12 @@ async function runNonInteractiveSetup(
 
   lines.push("");
   lines.push("Next steps:");
-  lines.push("  1. addroid doctor");
+  lines.push("  1. addroid status");
   lines.push("  2. Meta Access Token を用意");
-  lines.push("  3. addroid auth meta                    # token 入力 + Ad Account 選択");
-  lines.push("  4. addroid auth llm --provider openai   # または anthropic / codex");
-  lines.push("  5. addroid auth github                  # GitHub 認証 + ops repo 作成");
-  lines.push("  6. addroid up");
+  lines.push("  3. addroid connect meta                 # token 入力 + Ad Account 選択");
+  lines.push("  4. addroid connect ai                   # Codex OAuth / OpenAI / Claude を選択");
+  lines.push("  5. addroid connect github               # GitHub 認証 + ops repo 作成");
+  lines.push("  6. addroid start");
   lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
@@ -350,9 +356,20 @@ async function runInteractiveInit(
   ];
 
   if (!opts.skipDeps) {
-    const checks = [checkPlatform(), checkUv(), checkPython312(), checkMetaAdsCli(env), checkPostgresVersion()];
+    const checks = [
+      checkPlatform(),
+      checkUv(),
+      checkPython312(),
+      checkMetaAdsCli(env),
+      checkGithubCli(),
+      checkPostgresVersion(),
+    ];
     lines.push("Dependency check:");
     for (const c of checks) lines.push(formatCheck(c));
+    lines.push("");
+    const initialAuth = await readInitAuthState(env, overrides);
+    lines.push("Integration check:");
+    lines.push(...formatIntegrationCheck(initialAuth, opts));
     const failing = checks.filter(needsSetupAction);
     if (failing.length > 0) {
       lines.push("");
@@ -382,6 +399,11 @@ async function runInteractiveInit(
     } else {
       lines.push("");
     }
+  } else {
+    const initialAuth = await readInitAuthState(env, overrides);
+    lines.push("Integration check:");
+    lines.push(...formatIntegrationCheck(initialAuth, opts));
+    lines.push("");
   }
 
   let existing: AddroidConfig | null = null;
@@ -478,7 +500,7 @@ async function runInteractiveInit(
       out.push("");
       out.push("Meta Access Token setup:");
       out.push("  Meta Token    : already configured");
-      out.push("                  再認証する場合は `addroid init --reauth-meta` または `addroid auth meta` を実行してください。");
+      out.push("                  再認証する場合は `addroid init --reauth-meta` または `addroid connect meta` を実行してください。");
     } else {
       const configured = await maybeConfigureMetaAccessToken({
         out,
@@ -493,7 +515,7 @@ async function runInteractiveInit(
         out.push(`  Meta Token    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
         metaCredentialReady = code === 0;
         if (code !== 0) {
-          out.push("                  Meta Access Token は実利用に必須です。token と DB 設定を確認し、`addroid auth meta` を再実行してください。");
+          out.push("                  Meta Access Token は実利用に必須です。token と DB 設定を確認し、`addroid connect meta` を再実行してください。");
           process.stdout.write(out.join("\n") + "\n");
           return 1;
         }
@@ -538,16 +560,32 @@ async function runInteractiveInit(
       out.push("GitHub setup:");
       out.push("  実際の入稿には ops repository が必要です。");
       out.push("  このまま GitHub Device Flow 認証に進み、認証後に ops repository を自動作成します。");
+      const githubOAuth = await resolveGithubClientIdForInit(env);
+      if (githubOAuth.clientId) {
+        out.push(`  GitHub OAuth : client id configured (${githubOAuth.source})`);
+        if (githubOAuth.clientSecretPresent) {
+          out.push("                 Web UI OAuth Code Flow 用 clientSecret も設定済みです。");
+        } else {
+          out.push("                 CLI Device Flow はこのまま実行できます。");
+          out.push("                 Web UI OAuth Code Flow も使う場合は github.oauth.clientSecret を secrets.local.yaml に追加してください。");
+        }
+      } else {
+        out.push("  GitHub OAuth : client id 未設定のため GitHub CLI のブラウザ認証を使用します。");
+        out.push("                 GitHub CLI が未インストールの場合は `brew install gh` 後に再実行してください。");
+      }
       process.stdout.write(out.join("\n") + "\n");
       out.length = 0;
       const runAuthCommand =
         overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
-      const code = await withRuntimeEnv(env, () => runAuthCommand(["github"]));
+      const authArgs = githubOAuth.clientId
+        ? ["github", "--client-id", githubOAuth.clientId]
+        : ["github"];
+      const code = await withRuntimeEnv(env, () => runAuthCommand(authArgs));
       out.push(`  GitHub       : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
       githubCredentialReady = code === 0;
       opsRepoReady = code === 0;
       if (code !== 0) {
-        out.push("                 実際の入稿には GitHub 認証と ops repository が必須です。`addroid auth github` を再実行してください。");
+        out.push("                 実際の入稿には GitHub 認証と ops repository が必須です。`addroid connect github` を再実行してください。");
         process.stdout.write(out.join("\n") + "\n");
         return 1;
       }
@@ -583,17 +621,17 @@ function formatReadySteps(opts: {
   githubCredentialReady: boolean;
   opsRepoReady: boolean;
 }): string[] {
-  const steps: string[] = ["addroid doctor"];
+  const steps: string[] = ["addroid status"];
   if (!opts.metaCredentialReady) {
-    steps.push("addroid auth meta                    # Meta Access Token 入力 + Ad Account 選択");
+    steps.push("addroid connect meta                 # Meta Access Token 入力 + Ad Account 選択");
   }
   if (!opts.llmCredentialReady) {
-    steps.push("addroid auth llm --provider codex     # または openai / anthropic");
+    steps.push("addroid connect ai                   # Codex OAuth / OpenAI / Claude を選択");
   }
   if (!opts.githubCredentialReady || !opts.opsRepoReady) {
-    steps.push("addroid auth github                  # GitHub 認証 + ops repo 作成");
+    steps.push("addroid connect github               # GitHub 認証 + ops repo 作成");
   }
-  steps.push("addroid up");
+  steps.push("addroid start");
   return steps.map((step, i) => `  ${i + 1}. ${step}`);
 }
 
@@ -607,7 +645,7 @@ async function maybeEnsureCliCommand(opts: {
     return [
       "CLI command setup:",
       "  addroid       : skipped (--skip-link-cli)",
-      "                  後で `npm run link:cli` を実行すると `addroid doctor` の形で使えます。",
+      "                  後で `npm run link:cli` を実行すると `addroid status` の形で使えます。",
       "",
     ];
   }
@@ -638,14 +676,14 @@ async function maybeEnsureCliCommand(opts: {
   }
 
   const shouldLink = await opts.confirm(
-    "`addroid doctor` のように直接実行できるよう、この checkout の CLI をリンクしますか?",
+    "`addroid status` のように直接実行できるよう、この checkout の CLI をリンクしますか?",
     true
   );
   if (!shouldLink) {
     return [
       "CLI command setup:",
       "  addroid       : skipped",
-      "                  後で `npm run link:cli` を実行すると `addroid doctor` の形で使えます。",
+      "                  後で `npm run link:cli` を実行すると `addroid status` の形で使えます。",
       "",
     ];
   }
@@ -659,7 +697,7 @@ async function maybeEnsureCliCommand(opts: {
     return [
       "CLI command setup:",
       "  addroid       : linked",
-      "                  以後は `npm run addroid -- doctor` ではなく `addroid doctor` を使えます。",
+      "                  以後は `npm run addroid -- status` ではなく `addroid status` を使えます。",
       "",
     ];
   }
@@ -692,7 +730,7 @@ async function maybeConfigureMetaAccessToken(opts: {
 
   if (opts.assumeYes) {
     opts.out.push("  Meta Token    : skipped (--yes では token 入力を省略)");
-    opts.out.push("                  後で `addroid auth meta` を実行してください。");
+    opts.out.push("                  後で `addroid connect meta` を実行してください。");
     return false;
   }
   return true;
@@ -709,7 +747,7 @@ async function maybeConfigureLLMProvider(opts: {
 }): Promise<boolean> {
   if (opts.assumeYes) {
     opts.out.push("  LLM Provider  : skipped (--yes では API key / OAuth 入力を省略)");
-    opts.out.push("                  実利用には LLM Provider が必須です。後で `addroid auth llm` を実行してください。");
+    opts.out.push("                  実利用には LLM Provider が必須です。後で `addroid connect ai` を実行してください。");
     return true;
   }
   opts.out.push("");
@@ -767,7 +805,7 @@ async function maybeConfigureLLMProvider(opts: {
     );
     opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
     if (code !== 0) {
-      opts.out.push("                  実利用には LLM Provider が必須です。ADDROID_CODEX_* を確認し、`addroid auth llm --provider codex` を再実行してください。");
+      opts.out.push("                  実利用には LLM Provider が必須です。ADDROID_CODEX_* を確認し、`addroid connect ai --provider codex` を再実行してください。");
       return false;
     }
     return true;
@@ -803,10 +841,35 @@ async function maybeConfigureLLMProvider(opts: {
     opts.out.push("  Image Provider: GPT Image 2 requires OpenAI API key or Codex app-server");
   }
   if (code !== 0) {
-    opts.out.push(`                  実利用には LLM Provider が必須です。API key を確認し、\`addroid auth llm --provider ${provider}\` を再実行してください。`);
+    opts.out.push(`                  実利用には LLM Provider が必須です。API key を確認し、\`addroid connect ai --provider ${provider}\` を再実行してください。`);
     return false;
   }
   return true;
+}
+
+async function resolveGithubClientIdForInit(env: NodeJS.ProcessEnv): Promise<{
+  clientId: string | null;
+  source: string;
+  clientSecretPresent: boolean;
+}> {
+  const fromEnv =
+    env.ADDROID_GITHUB_CLIENT_ID?.trim() ||
+    env.ADDROID_GITHUB_OAUTH_CLIENT_ID?.trim();
+  if (fromEnv) {
+    const secrets = await readLocalSecrets(env).catch(() => null);
+    return {
+      clientId: fromEnv,
+      source: "env",
+      clientSecretPresent: Boolean(secrets?.github?.oauth?.clientSecret),
+    };
+  }
+  const secrets = await readLocalSecrets(env).catch(() => null);
+  const clientId = secrets?.github?.oauth?.clientId?.trim() || null;
+  return {
+    clientId,
+    source: "secrets.local.yaml",
+    clientSecretPresent: Boolean(secrets?.github?.oauth?.clientSecret),
+  };
 }
 
 async function ensureCodexOAuthEnvConfig(opts: {
@@ -1124,22 +1187,54 @@ async function readInitAuthState(
       },
       select: {
         provider: true,
+        metadata: true,
       },
       orderBy: {
         connectedAt: "desc",
       },
     });
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { opsRepoId: true },
+    const config = await readAddroidConfig(env).catch(() => null);
+    const currentWs =
+      (config
+        ? await prisma.workspace.findFirst({
+            where: { slug: config.workspace.slug },
+            select: { opsRepoId: true, defaultAdAccountId: true },
+          })
+        : null);
+    const fallbackAccountWs = await prisma.workspace.findFirst({
+      where: { defaultAdAccountId: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      select: { opsRepoId: true, defaultAdAccountId: true },
     });
+    const fallbackOpsRepoWs = await prisma.workspace.findFirst({
+      where: { opsRepoId: { not: null } },
+      orderBy: { updatedAt: "desc" },
+      select: { opsRepoId: true, defaultAdAccountId: true },
+    });
+    const fallbackLatestWs = await prisma.workspace.findFirst({
+        orderBy: { updatedAt: "desc" },
+        select: { opsRepoId: true, defaultAdAccountId: true },
+      });
+    const accountWs =
+      currentWs?.defaultAdAccountId ? currentWs : fallbackAccountWs ?? fallbackLatestWs;
+    const opsRepoWs =
+      currentWs?.opsRepoId ? currentWs : fallbackOpsRepoWs ?? fallbackLatestWs;
     const providers = Array.from(new Set(rows.map((r) => r.provider)));
+    const llmProviders = Array.from(
+      new Set(
+        rows
+          .filter((r) => r.provider === "codex" || r.provider === "openai" || r.provider === "anthropic")
+          .filter((r) => hasLLMDefaultModel(r.metadata))
+          .map((r) => r.provider)
+      )
+    );
     return {
       checked: true,
       metaConnected: providers.includes("meta"),
+      metaAccountSelected: Boolean(accountWs?.defaultAdAccountId),
       githubConnected: providers.includes("github"),
-      opsRepoLinked: Boolean(ws?.opsRepoId),
-      llmProviders: providers.filter((p) => p === "codex" || p === "openai" || p === "anthropic"),
+      opsRepoLinked: Boolean(opsRepoWs?.opsRepoId),
+      llmProviders,
     };
   } catch (err) {
     return {
@@ -1153,6 +1248,12 @@ async function readInitAuthState(
   } finally {
     await prisma?.$disconnect().catch(() => undefined);
   }
+}
+
+function hasLLMDefaultModel(metadata: unknown): boolean {
+  if (!metadata || typeof metadata !== "object") return false;
+  const value = (metadata as Record<string, unknown>)["defaultModel"];
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function resolveDefaultEnvFile(): string {
@@ -1343,6 +1444,22 @@ async function installMissingDependencies(
       out.push({ label: "Meta Ads CLI", outcome });
       if (!outcome.ok) return out;
     }
+    if (check.name === "github-cli") {
+      const command =
+        process.platform === "darwin"
+          ? "brew install gh"
+          : process.platform === "linux"
+            ? "sudo apt-get update && sudo apt-get install -y gh (or GitHub CLI official package repository)"
+            : "install GitHub CLI with your OS package manager";
+      const approval = await confirmInstallCommand(opts, "GitHub CLI", command, true);
+      if (!approval.ok) {
+        out.push({ label: "GitHub CLI", outcome: approval.outcome });
+        return out;
+      }
+      const outcome = installGithubCli(runner, env);
+      out.push({ label: "GitHub CLI", outcome });
+      if (!outcome.ok) return out;
+    }
     if (check.name === "postgres-16") {
       const command =
         process.platform === "darwin"
@@ -1384,6 +1501,7 @@ async function setupDependencies(opts: {
     checkUv(),
     checkPython312(),
     checkMetaAdsCli(opts.env),
+    checkGithubCli(),
     checkPostgresVersion(),
   ];
   const lines = ["", "Dependency setup:"];
@@ -1422,6 +1540,54 @@ function prependUvBinToPath(env: NodeJS.ProcessEnv): void {
   if (!pathValue.split(path.delimiter).includes(binDir)) {
     env.PATH = pathValue ? `${binDir}${path.delimiter}${pathValue}` : binDir;
   }
+}
+
+function installGithubCli(
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): { ok: boolean; detail: string } {
+  if (process.platform === "darwin") {
+    const brew = runner("brew", ["--version"], { env, timeoutMs: 10_000 });
+    if (brew.status !== 0) {
+      return { ok: false, detail: "Homebrew が見つかりません。brew install gh を手動実行してください。" };
+    }
+    const install = runVisibleCommand(
+      "GitHub CLI",
+      "brew install gh",
+      runner,
+      "brew",
+      ["install", "gh"],
+      { env, timeoutMs: 300_000 }
+    );
+    return commandOutcome(install, "GitHub CLI installed");
+  }
+  if (process.platform === "linux") {
+    const apt = runner("sh", ["-c", "command -v apt-get >/dev/null 2>&1"], { env, timeoutMs: 10_000 });
+    if (apt.status === 0) {
+      const install = runVisibleCommand(
+        "GitHub CLI",
+        "sudo apt-get update && sudo apt-get install -y gh",
+        runner,
+        "sh",
+        ["-c", "sudo apt-get update && sudo apt-get install -y gh"],
+        { env, timeoutMs: 300_000 }
+      );
+      return commandOutcome(install, "GitHub CLI installed");
+    }
+    const dnf = runner("sh", ["-c", "command -v dnf >/dev/null 2>&1"], { env, timeoutMs: 10_000 });
+    if (dnf.status === 0) {
+      const install = runVisibleCommand(
+        "GitHub CLI",
+        "sudo dnf install -y gh",
+        runner,
+        "sh",
+        ["-c", "sudo dnf install -y gh"],
+        { env, timeoutMs: 300_000 }
+      );
+      return commandOutcome(install, "GitHub CLI installed");
+    }
+  }
+  return { ok: false, detail: "このOSでは GitHub CLI の自動インストール手順を判定できませんでした。" };
 }
 
 function installPostgres(
@@ -1750,19 +1916,19 @@ function printScaffoldResult(result: ScaffoldResult): void {
   const lines = ["[addroid init]", "", ...formatScaffoldResult(result), "", "Next steps:"];
   if (!process.env.DATABASE_URL) {
     lines.push("  1. addroid init --interactive    # .env / DB まで対話セットアップ");
-    lines.push("  2. addroid doctor");
+    lines.push("  2. addroid status");
     lines.push("  3. Meta Access Token を用意");
-    lines.push("  4. addroid auth meta             # token 入力 + Ad Account 選択");
-    lines.push("  5. addroid auth github           # GitHub 認証 + ops repo 作成");
-    lines.push("  6. addroid auth llm --provider openai");
-    lines.push("  7. addroid up");
+    lines.push("  4. addroid connect meta          # token 入力 + Ad Account 選択");
+    lines.push("  5. addroid connect github        # GitHub 認証 + ops repo 作成");
+    lines.push("  6. addroid connect ai            # Codex OAuth / OpenAI / Claude を選択");
+    lines.push("  7. addroid start");
   } else {
-    lines.push("  1. addroid doctor");
+    lines.push("  1. addroid status");
     lines.push("  2. Meta Access Token を用意");
-    lines.push("  3. addroid auth meta             # token 入力 + Ad Account 選択");
-    lines.push("  4. addroid auth github           # GitHub 認証 + ops repo 作成");
-    lines.push("  5. addroid auth llm --provider openai");
-    lines.push("  6. addroid up");
+    lines.push("  3. addroid connect meta          # token 入力 + Ad Account 選択");
+    lines.push("  4. addroid connect github        # GitHub 認証 + ops repo 作成");
+    lines.push("  5. addroid connect ai            # Codex OAuth / OpenAI / Claude を選択");
+    lines.push("  6. addroid start");
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -1778,6 +1944,7 @@ function printAlreadyInitializedResult(result: ScaffoldResult, auth: InitAuthSta
     "",
     "Connected credentials:",
     `  Meta Token    : ${auth.metaConnected ? "configured" : "not detected"}`,
+    `  Meta Account  : ${auth.metaAccountSelected ? "selected" : "not detected"}`,
     `  GitHub       : ${auth.githubConnected ? "configured" : "not detected"}`,
     `  Ops Repo     : ${auth.opsRepoLinked ? "linked" : "not linked"}`,
     `  LLM Provider  : ${auth.llmProviders.length > 0 ? auth.llmProviders.join(", ") : "not detected"}`,
@@ -1787,7 +1954,7 @@ function printAlreadyInitializedResult(result: ScaffoldResult, auth: InitAuthSta
   }
   lines.push("");
   lines.push("Maintenance:");
-  lines.push("  addroid doctor");
+  lines.push("  addroid status");
   lines.push("  addroid init --interactive --force       # 初期セットアップを明示的に再実行");
   lines.push("  addroid init --interactive --reauth-meta # Meta token を再認証");
   lines.push("  addroid init --interactive --reauth-github # GitHub token / ops repo を再設定");
@@ -1822,6 +1989,72 @@ function formatCommandOutcome(label: string, outcome: { ok: boolean; detail: str
 function formatCheck(c: CheckResult): string {
   const state = c.state.padEnd(7);
   return `  [${state}] ${c.name.padEnd(17)} ${c.message}`;
+}
+
+function formatIntegrationCheck(auth: InitAuthState, opts: InitOptions): string[] {
+  if (opts.mockIntegrations) {
+    return [
+      formatIntegrationLine("ok", "Meta Token", "mock mode enabled"),
+      formatIntegrationLine("ok", "Meta Account", "mock mode enabled"),
+      formatIntegrationLine("ok", "LLM Provider", "mock mode enabled"),
+      formatIntegrationLine("ok", "GitHub / Ops Repo", "mock mode enabled"),
+    ];
+  }
+  if (!auth.checked) {
+    const detail = auth.detail ? ` (${auth.detail})` : "";
+    return [
+      formatIntegrationLine(
+        "pending",
+        "Meta Token",
+        `.env / DB 作成後に init 内で token 入力 + Ad Account 選択を行います${detail}`
+      ),
+      formatIntegrationLine(
+        "pending",
+        "LLM Provider",
+        ".env / DB 作成後に Codex OAuth / OpenAI / Anthropic を選択して認証します"
+      ),
+      formatIntegrationLine(
+        "pending",
+        "GitHub / Ops Repo",
+        ".env / DB 作成後に GitHub 認証 + ops repo 自動作成を行います"
+      ),
+    ];
+  }
+  const githubReady = auth.githubConnected !== false && auth.opsRepoLinked !== false;
+  return [
+    formatIntegrationLine(
+      auth.metaConnected ? "ok" : "missing",
+      "Meta Token",
+      auth.metaConnected ? "configured" : "init 内で token 入力を行います"
+    ),
+    formatIntegrationLine(
+      auth.metaAccountSelected ? "ok" : "missing",
+      "Meta Account",
+      auth.metaAccountSelected ? "selected" : "init 内で Ad Account 選択を行います"
+    ),
+    formatIntegrationLine(
+      auth.llmProviders.length > 0 ? "ok" : "missing",
+      "LLM Provider",
+      auth.llmProviders.length > 0
+        ? auth.llmProviders.join(", ")
+        : "init 内で Codex OAuth / OpenAI / Anthropic を選択して認証します"
+    ),
+    formatIntegrationLine(
+      githubReady ? "ok" : "missing",
+      "GitHub / Ops Repo",
+      githubReady
+        ? "configured + linked"
+        : "init 内で GitHub 認証 + ops repo 自動作成を行います"
+    ),
+  ];
+}
+
+function formatIntegrationLine(
+  state: "ok" | "missing" | "pending",
+  name: string,
+  message: string
+): string {
+  return `  [${state.padEnd(7)}] ${name.padEnd(17)} ${message}`;
 }
 
 function needsSetupAction(c: CheckResult): boolean {
@@ -1913,18 +2146,18 @@ function printInitHelp(): void {
       "  --mock-integrations    初回検証用に mock フラグを .env に追加",
       "  --skip-link-cli        `addroid` コマンドの checkout link をスキップ",
       "  --force                初期化済み検出を無視してセットアップ確認を再実行",
-      "  --reauth-meta          既存 Meta token があっても `addroid auth meta` を実行",
-      "  --reauth-github        既存 GitHub token / ops repo があっても `addroid auth github` を実行",
+      "  --reauth-meta          既存 Meta token があっても Meta 接続を再実行",
+      "  --reauth-github        既存 GitHub token / ops repo があっても GitHub 接続を再実行",
       "  --reauth-llm           既存 LLM credential があっても provider 選択から再認証",
       "  --no-chat              セットアップ完了後に `addroid chat` を自動起動しない",
       "",
       "Interactive setup:",
       "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",
       "  標準設定では OAuth callback を使わず、token 入力後に取得可能な Ad Account を表示します。",
-      "  `addroid auth meta` で token を暗号化保存し、Ad Account を選択します。",
-      "  OAuth callback を使う上級者向け経路は `addroid auth meta --oauth` です。",
+      "  `addroid connect meta` で token を暗号化保存し、Ad Account を選択します。",
+      "  OAuth callback を使う上級者向け経路は詳細コマンド `addroid auth meta --oauth` です。",
       "  LLM Provider は openai-api-key / anthropic-api-key / codex-oauth から選択できます。",
-      "  API key / Codex OAuth token は `addroid auth llm` 経由で ENCRYPTION_KEY により暗号化保存されます。",
+      "  API key / Codex OAuth token は `addroid connect ai` 経由で ENCRYPTION_KEY により暗号化保存されます。",
       "",
     ].join("\n")
   );

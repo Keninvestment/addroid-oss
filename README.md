@@ -6,7 +6,7 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
 自動実行します。
 
 > **Status:** Initial OSS release candidate. `npm install` / `addroid init` /
-> `addroid up` の 3 コマンドでローカル起動が完結します。`addroid init` は uv /
+> `addroid start` の 3 コマンドでローカル起動が完結します。`addroid init` は uv /
 > Python / Meta Ads CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
 > Meta 広告アカウントを実際に利用するには Meta Access Token が必須です。未設定でも core
 > ヘルスチェックは通りますが、Apply / Activate / レポート取得はできません。
@@ -26,7 +26,7 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
   (Activate) は分離され、人間の承認 (PR merge / Web UI merge / Slack `/adops activate`) を
   経由してから Meta に反映されます。
 - **Apply / Activate split**: PR merge から発火する Apply は新規オブジェクトを **PAUSED**
-  で作成するのみで、ACTIVE 化は別経路 (`addroid activate` / Web UI / Slack) で行います。
+  で作成するのみで、ACTIVE 化は監査された有効化経路 (Web UI / Slack / 詳細 CLI) で行います。
 - **未設定統合は idle で OK**: Slack / Meta / LLM Provider / Image Provider が未設定の状態でも
   Web UI は 200 OK を返し、Dashboard は idle 表示になります。ただし実際の Meta 広告アカウントを
   利用するには Meta Access Token が必須です。
@@ -51,6 +51,7 @@ Node.js 22.11 以上を使ってください。
 | `addroid init` | uv | Python と Meta Ads CLI の導入補助 | 実行前に確認してから導入 |
 | `addroid init` | Python 3.12+ | Meta Ads CLI の実行環境 | uv-managed Python 3.13 を導入 |
 | `addroid init` | Meta Ads CLI | Meta 広告への insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| `addroid init` | GitHub CLI (`gh`) | client id 不要のGitHubブラウザ認証 / ops repo 作成 | macOS は `brew install gh`、Linux は OS package manager で導入 |
 | `addroid init` | PostgreSQL 16+ | AdDroid DB、queue、監査ログ | Homebrew / apt / dnf 等を実行前に確認 |
 | Meta 側で発行 | Meta Access Token | Meta 広告アカウント接続、Apply / Activate、レポート取得 | ユーザーが Meta Business Suite / Graph API Explorer 等で発行 |
 
@@ -63,6 +64,7 @@ system 変更は既定で no です。
 | uv | Python / Meta Ads CLI の導入 | 無ければ公式 installer を実行前に確認 |
 | Python 3.12+ | Meta Ads CLI の実行 | uv-managed Python 3.13 を導入 |
 | Meta Ads CLI | Meta insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
+| GitHub CLI (`gh`) | GitHub ブラウザ認証 / ops repo 作成 | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
 | PostgreSQL 16+ | DB / pg-boss queue | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
 
 PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必要になる場合があります。
@@ -93,8 +95,8 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 | macOS 13+ (darwin x86_64 / arm64) | **対応** | 主開発環境。Homebrew 経由で PostgreSQL / Python 3.12+ を導入する想定 |
 | Linux (x86_64 / arm64, glibc) | **対応** | Ubuntu 22.04+ / Debian 12+ / Fedora 39+ で動作 |
 | Windows + WSL2 (Ubuntu 22.04+) | **対応 (推奨)** | WSL2 内の Linux として扱う。Windows native との混在不可 |
-| Windows native (PowerShell / cmd.exe) | **非対応** | `0600` パーミッション、`pg_dump` の dynamic-link、`addroid up` の shell 起動が成立しないため対応しません。WSL2 を使用してください |
-| その他 (FreeBSD, Alpine musl, etc.) | 動作未検証 | `addroid doctor` は `warn` として通過させますが動作保証は行いません |
+| Windows native (PowerShell / cmd.exe) | **非対応** | `0600` パーミッション、`pg_dump` の dynamic-link、`addroid start` の shell 起動が成立しないため対応しません。WSL2 を使用してください |
+| その他 (FreeBSD, Alpine musl, etc.) | 動作未検証 | 詳細診断コマンド `addroid doctor` は `warn` として通過させますが動作保証は行いません |
 
 `addroid doctor` の `platform` チェックがこの分類を runtime で再確認します
 (macOS / Linux / WSL2 → `ok`、Windows native → `error`、それ以外 → `warn`)。
@@ -103,11 +105,13 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 実利用で必要な外部連携:
 
-- GitHub OAuth クライアント — ops repo bootstrap と PR ポーリングに必要。CLI Device Flow には
-  `clientId`、Web UI OAuth Code Flow には `clientId` / `clientSecret` を `~/.addroid/secrets.local.yaml` に設定
+- GitHub 認証 — ops repo bootstrap と PR ポーリングに必要。CLI は `gh` があれば
+  GitHub CLI のブラウザ認証を使うため client id 入力は不要です。Web UI OAuth Code Flow
+  も使う場合は `~/.addroid/secrets.local.yaml` に `clientId` / `clientSecret` を追加します
 - Meta Access Token — 実際の Meta 広告アカウント接続、Apply / Activate、レポート取得に必須
-- LLM Provider — AI workflow 実行に必要。初回セットアップでは OpenAI / Anthropic API key
-  または Codex OAuth を選択できます (未設定時は StubLLMProvider で fail-closed)
+- LLM Provider — AI workflow 実行に必要。初回セットアップまたは `addroid connect ai` で
+  Codex OAuth / OpenAI API key / Claude (Anthropic) API key を選択できます
+  (未設定時は StubLLMProvider で fail-closed)
 - Image Provider — クリエイティブ画像生成に必要。OpenAI API key は GPT Image 2 に再利用でき、
   Codex OAuth は localhost の Codex app-server 経路で生成できます
 - Slack Bot / App-level token — 通知と `/adops` slash command に必要 (任意)
@@ -118,7 +122,7 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 Meta へ実際に接続して Apply / Activate するには、Meta Marketing API を呼び出せる
 Access Token が必要です。AdDroid の標準セットアップは OAuth callback を使わず、
-`addroid auth meta` で token を貼り付ける方式です。ローカル利用のために HTTPS
+`addroid connect meta` で token を貼り付ける方式です。ローカル利用のために HTTPS
 callback URL やトンネルサービスを用意する必要はありません。
 
 App ID / App Secret だけでは広告アカウントの読み書きはできません。Meta Ads CLI と
@@ -153,17 +157,17 @@ AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。
 9. `addroid init` の対話セットアップ中に Meta アカウント連携まで進みます。スキップした場合だけ、後から次を実行してください。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
 ```bash
-addroid auth meta
+addroid connect meta
 ```
 
 検証だけなら [Graph API Explorer](https://developers.facebook.com/tools/explorer/) で User Access Token を生成して使うこともできます。ただし User token は個人ログインに紐付き、期限切れしやすいため、非エンジニアが継続運用する AdDroid では System User Access Token を標準手順とします。
 
 Access Token はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
-などには貼らず、`addroid auth meta` の入力欄にだけ貼ってください。AdDroid は token を
+などには貼らず、`addroid connect meta` の入力欄にだけ貼ってください。AdDroid は token を
 `ENCRYPTION_KEY` で暗号化して `oauth_tokens` に保存し、Meta Ads CLI 実行時だけ
 `ACCESS_TOKEN` / `AD_ACCOUNT_ID` として子プロセスに渡します。
 
-OAuth callback を使いたい上級者は `addroid auth meta --oauth` を利用できます。
+OAuth callback を使いたい上級者は詳細コマンド `addroid auth meta --oauth` を利用できます。
 この場合は HTTPS の callback URL を Meta App に登録できる環境が必要です。通常のローカル
 OSS 利用では token 入力方式を使ってください。
 
@@ -181,15 +185,15 @@ npm install
 npx --no-install addroid init
 
 # 3. init 後は短い addroid コマンドを使えます
-addroid doctor
+addroid status
 
 # 4. init で接続をスキップした場合だけ、後から個別に接続
 #    Meta は Ad Account 選択、GitHub は ops repository 作成まで行います。
-addroid auth meta
-addroid auth github
+addroid connect meta
+addroid connect github
 
 # 5. web (127.0.0.1:3000) と worker (pg-boss) を起動
-addroid up
+addroid start
 ```
 
 `addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
@@ -197,7 +201,7 @@ addroid up
 Meta Access Token 入力、GitHub Device Flow 認証と ops repository 作成、
 OpenAI / Anthropic API key / Codex OAuth の選択まで案内します。
 リポジトリ checkout で `addroid` コマンドが未リンクの場合は、init 中に確認して
-`npm link --workspace apps/cli` を実行し、以後 `addroid doctor` の形で使えるようにします。
+`npm link --workspace apps/cli` を実行し、以後 `addroid status` の形で使えるようにします。
 初期設定済みの状態で再実行した場合は、既存の config / secrets / credential を保持し、
 状態表示だけで終了します。
 
@@ -211,8 +215,9 @@ OpenAI / Anthropic API key / Codex OAuth の選択まで案内します。
 - uv-managed Python 3.13 と Meta Ads CLI
 - Meta Access Token: 実利用では必須。入力された値は暗号化して `oauth_tokens` に保存し、
   取得できる Ad Account から既定アカウントを選択
-- GitHub OAuth: 実際の入稿には必須。CLI は Device Flow、Web UI は既存の OAuth Code Flow を使い、
-  token を `oauth_tokens` に暗号化保存。未連携なら private ops repository を自動作成
+- GitHub OAuth: 実際の入稿には必須。CLI は GitHub CLI のブラウザ認証または Device Flow、
+  Web UI は既存の OAuth Code Flow を使い、token を `oauth_tokens` に暗号化保存。
+  未連携なら private ops repository を自動作成
 - LLM Provider: OpenAI / Anthropic API key または Codex OAuth を選択し、
   `oauth_tokens` に暗号化保存
 - Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex OAuth の場合は
@@ -253,7 +258,7 @@ addroid init --non-interactive --yes --skip-deps --mock-integrations --skip-db-p
 起動前に状態を確認したい場合は `doctor` を実行します。
 
 ```bash
-addroid doctor
+addroid status
 ```
 
 `doctor` で `meta-ads-cli` が error になった場合は、通常は再度 `init` を実行すれば
@@ -278,10 +283,10 @@ campaign / adset です。`ad` は直接予算を持たないため、親 adset 
 実行前に「今すぐ一度だけ」「定期ルール」「両方」の確認質問を返します。
 
 リポジトリ checkout では `addroid init` が checkout link を案内します。スキップした場合も
-`npm run link:cli` を一度実行すると、以後は `npx --no-install addroid doctor` ではなく
-`addroid doctor` と入力できます。npm package として
+`npm run link:cli` を一度実行すると、以後は `npx --no-install addroid status` ではなく
+`addroid status` と入力できます。npm package として
 導入する場合は `npm install -g @addroid/cli` でも同じ `addroid` コマンドが入ります。
-worker のみ別プロセスに分離して水平スケールしたい場合は `addroid up --separate-worker` を使います。
+worker のみ別プロセスに分離して水平スケールしたい場合は `addroid start --separate-worker` を使います。
 低レベルなデバッグ用途で個別に起動したい
 場合のみ `npm run dev` / `npm run dev:worker` を直接呼び出せます。その場合は root の
 `.env.local` を shell に export してから起動してください。
@@ -334,20 +339,20 @@ addroid/
 | `npm install` | ワークスペース全体の依存解決 |
 | `npm run link:cli` | この checkout の CLI を `addroid` コマンドとしてリンク |
 | `addroid init` | 対話型初期セットアップ。初期設定済みなら既存 credential を保持して状態表示のみ |
-| `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
-| `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
-| `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
-| `addroid chat` | init 済み LLM credential を使う対話型 command chat |
-| `addroid doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
-| `addroid up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
-| `addroid down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |
-| `addroid status` | config / プロセス / 直近 doctor 結果のスナップショット |
-| `addroid logs` | `~/.addroid/logs/{up,web,worker}.log` を tail |
-| `addroid validate` | ops repo の Ads / cron / project YAML を Zod 検証 |
-| `addroid plan` | Apply の dry-run シミュレーション (`--dry-run` 必須) |
-| `addroid activate <act_id>` | PAUSED → ACTIVE 移行 (Apply とは別の承認境界) |
-| `addroid cron <list/enable/disable/run/...>` | cron preset 管理 |
-| `addroid auth <provider>` | provider トークン登録 (`meta` / `github` / `llm` / `slack`) |
+| `addroid chat` | init 済み LLM credential と `AGENTS.md` を使う対話型 agent chat |
+| `addroid start` | Web UI (`127.0.0.1:3000`) と worker を起動 |
+| `addroid stop` | 起動中の Web UI / worker を停止 |
+| `addroid open` | Web UI を開く / URL を表示 |
+| `addroid status` | 接続・起動状態を確認 |
+| `addroid connect meta` | Meta Access Token を登録し、広告アカウントを選択 |
+| `addroid connect github` | GitHub 認証と ops repo 作成 |
+| `addroid connect ai` | Codex OAuth / OpenAI API key / Claude API key を選択して接続 |
+| `addroid account` | 利用する広告アカウントを確認・選択 |
+| `addroid report` | 日次レポートや予算チェックを今すぐ実行 |
+| `addroid submit` | 入稿前チェックと dry-run 変更予定の確認 |
+| `addroid schedule` | 自動実行の確認・変更 |
+| `addroid backup` | データベースをバックアップ |
+| `addroid doctor` | 詳細診断 (CI / troubleshooting 用) |
 | `npm run dev` | (任意) apps/web 単独を `127.0.0.1:3000` で起動 |
 | `npm run dev:worker` | (任意) apps/worker (pg-boss) 単独を起動 |
 | `npm run typecheck` | 全ワークスペースで `tsc --noEmit` |
@@ -395,8 +400,8 @@ addroid/
 - **任意統合のフェイルクローズ**: LLM Provider 未設定時は `StubLLMProvider` が fail-closed し、
   GitOps 状態を破壊しません。Slack / Image Provider 未設定時は通知 / 画像生成のみが
   skip され、Apply / Activate / レポート取得は通常通り動きます。
-- **LLM credential は暗号化保存**: `addroid auth llm --provider openai|anthropic` の
-  API key と `addroid auth llm --provider codex` の OAuth token は `ENCRYPTION_KEY` により
+- **LLM credential は暗号化保存**: `addroid connect ai --provider openai|anthropic` の
+  API key と `addroid connect ai --provider codex` の OAuth token は `ENCRYPTION_KEY` により
   `oauth_tokens.access_token_ciphertext` に保存され、`.env` への恒久保存は不要です。
 - **画像生成キーも平文保存しない**: GPT Image 2 は登録済み OpenAI API key の暗号化済み
   credential を再利用します。Codex app-server 経路は localhost のみ許可し、外部 URL を

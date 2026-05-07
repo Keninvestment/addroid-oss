@@ -59,6 +59,7 @@ type NextFactory = (opts: {
   dir: string;
   hostname: string;
   port: number;
+  webpack?: boolean;
 }) => NextAppInstance;
 
 // regression fix: worker / next の解決経路を関数に切り出し、E2E ハーネスから
@@ -73,7 +74,17 @@ async function loadWorkerRuntimeModule(repoRoot: string): Promise<WorkerRuntimeM
     ? path.resolve(override)
     : path.join(repoRoot, "apps/worker/src/runtime.ts");
   const url = pathToFileURL(targetPath).href;
-  return (await import(url)) as WorkerRuntimeModule;
+  try {
+    return (await import(url)) as WorkerRuntimeModule;
+  } catch (err) {
+    if (override || !targetPath.endsWith(".ts")) throw err;
+    const spec = "tsx/esm/api";
+    const tsxApi = (await import(spec)) as {
+      tsImport?: (modulePath: string, parentUrl: string) => Promise<unknown>;
+    };
+    if (typeof tsxApi.tsImport !== "function") throw err;
+    return (await tsxApi.tsImport(url, import.meta.url)) as WorkerRuntimeModule;
+  }
 }
 
 async function loadNextFactory(): Promise<NextFactory> {
@@ -188,7 +199,7 @@ function parseArgs(args: string[]): ParsedArgs {
 function printUsage() {
   process.stdout.write(
     [
-      "Usage: addroid up [--separate-worker]",
+      "Usage: addroid start [--separate-worker]",
       "",
       "  (default)            web と worker を CLI と同じプロセスで併走 (the current implementation 既定モデル)",
       "  --separate-worker    worker を別プロセスとして spawn する (将来の水平スケール経路)",
@@ -292,6 +303,7 @@ async function runShared(ctx: SharedContext): Promise<number> {
       dir: webDir,
       hostname: ctx.binding.hostname,
       port: ctx.binding.port,
+      webpack: true,
     });
     nextApp = app;
     await app.prepare();
@@ -513,6 +525,7 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
       dir: webDir,
       hostname: ctx.binding.hostname,
       port: ctx.binding.port,
+      webpack: true,
     });
     nextApp = app;
     await app.prepare();
