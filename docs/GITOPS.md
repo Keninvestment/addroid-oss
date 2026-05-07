@@ -36,12 +36,14 @@ Ads YAML / cron.yaml / project.yaml はすべて `packages/yaml-schemas` の Zod
 
 ## 2. 連携の bootstrap
 
-1. AdDroid 側で GitHub OAuth を完了
-2. `addroid up` 起動後 Web UI `/github` で "Connect ops repo" を押す
-3. 既存リポジトリを選択するか、新規リポジトリを `packages/ops-template` から生成
-4. AdDroid が ops repo 直下に initial commit を push (config skeleton)
-5. `audit_logs` に `ops_repo.bootstrapped` が記録される
-6. 以降、`github_poll` cron が ETag-aware ポーリングで PR / merge を検知
+1. `addroid init` または `addroid auth github` で GitHub OAuth を完了
+2. AdDroid が未連携 workspace に private ops repo を自動作成
+3. AdDroid が ops repo 直下に initial commit を push (config skeleton)
+4. `audit_logs` に `ops_repo.bootstrapped` が記録される
+5. 以降、`github_poll` cron が ETag-aware ポーリングで PR / merge を検知
+
+Web UI `/github` の OAuth Code Flow も維持しており、ブラウザから接続した場合も同じ
+token store に保存して未連携なら ops repo bootstrap まで実行します。
 
 ops repo を別の場所に置きたい場合は `addroid` から bootstrap せず、手動で
 `packages/ops-template` の構造をコピーして `workspaces.ops_repo_*` に登録することも

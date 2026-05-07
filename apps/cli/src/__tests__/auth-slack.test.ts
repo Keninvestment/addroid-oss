@@ -113,10 +113,81 @@ test("auth はサブコマンドなしで help を出して 0 を返す", async 
 });
 
 test("auth は未対応プロバイダで 2 を返す", async () => {
-  const { code, out } = await capture(() => runAuthCommand(["github"]));
+  const { code, out } = await capture(() => runAuthCommand(["unknown"]));
   assert.equal(code, 2);
-  assert.match(out.stderr, /未対応のプロバイダ: github/);
+  assert.match(out.stderr, /未対応のプロバイダ: unknown/);
   assert.match(out.stdout, /addroid auth slack/);
+});
+
+test("auth github は client id 未設定で 2 を返す", async () => {
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert() {
+        return {};
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+      ADDROID_GITHUB_CLIENT_ID: undefined,
+      ADDROID_GITHUB_OAUTH_CLIENT_ID: undefined,
+      ADDROID_GITHUB_OAUTH_MOCK: undefined,
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(["github", "--no-open", "--no-bootstrap"], {
+          prismaOverride,
+        })
+      )
+  );
+  assert.equal(code, 2);
+  assert.match(out.stderr, /GitHub OAuth client id/);
+});
+
+test("auth github mock は token を保存し bootstrap をスキップできる", async () => {
+  const calls: unknown[] = [];
+  const prismaOverride = {
+    oAuthToken: {
+      async upsert(args: unknown) {
+        calls.push(args);
+        return {};
+      },
+    },
+    async $disconnect() {},
+  };
+  const { code, out } = await withEnv(
+    {
+      DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
+      ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
+      ADDROID_GITHUB_OAUTH_MOCK: "1",
+    },
+    () =>
+      capture(() =>
+        runAuthCommand(["github", "--no-bootstrap", "--json"], {
+          prismaOverride,
+        })
+      )
+  );
+  assert.equal(code, 0);
+  const parsed = JSON.parse(out.stdout) as {
+    ok: boolean;
+    provider: string;
+    accountIdentifier: string;
+    bootstrap: { status: string; reason: string };
+  };
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.provider, "github");
+  assert.equal(parsed.accountIdentifier, "addroid-mock-user");
+  assert.deepEqual(parsed.bootstrap, { status: "skipped", reason: "--no-bootstrap" });
+  assert.equal(calls.length, 1);
+  const arg = calls[0] as {
+    create: { provider: string; accessTokenCiphertext: string };
+  };
+  assert.equal(arg.create.provider, "github");
+  assert.match(arg.create.accessTokenCiphertext, /^mock-encrypted::/);
 });
 
 test("auth llm は API key を暗号化して oauth_tokens に保存する", async () => {
@@ -171,7 +242,7 @@ test("auth llm は API key を暗号化して oauth_tokens に保存する", asy
   });
 });
 
-test("auth llm --provider codex は OAuth 設定不足を分かりやすく返す", async () => {
+test("auth llm --provider codex は redirect URI 不正を分かりやすく返す", async () => {
   const prismaOverride = {
     oAuthToken: {
       async upsert() {
@@ -192,6 +263,7 @@ test("auth llm --provider codex は OAuth 設定不足を分かりやすく返�
       ADDROID_CODEX_TOKEN_URL: undefined,
       ADDROID_CODEX_CHAT_COMPLETIONS_URL: undefined,
       ADDROID_CODEX_DEFAULT_MODEL: undefined,
+      ADDROID_CODEX_OAUTH_REDIRECT_URI: "https://example.com/auth/callback",
     },
     () =>
       capture(() =>
@@ -201,8 +273,7 @@ test("auth llm --provider codex は OAuth 設定不足を分かりやすく返�
       )
   );
   assert.equal(code, 2);
-  assert.match(out.stderr, /Codex OAuth が未設定です/);
-  assert.match(out.stderr, /ADDROID_CODEX_CLIENT_ID/);
+  assert.match(out.stderr, /localhost の redirect URI/);
 });
 
 test("auth slack はトークン未指定で 2 を返す", async () => {

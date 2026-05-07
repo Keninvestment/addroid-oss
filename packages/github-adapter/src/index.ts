@@ -38,15 +38,21 @@ export {
 } from "./octokit-adapter.js";
 export {
   ADDROID_REQUIRED_SCOPES,
+  GITHUB_DEVICE_CODE_URL,
   GITHUB_AUTHORIZE_URL,
   GITHUB_TOKEN_URL,
   OAuthExchangeError,
   buildAuthorizationUrl,
   exchangeCodeForToken,
   generateOAuthState,
+  pollDeviceToken,
+  requestDeviceCode,
+  type DeviceCodeResponse,
   type ExchangeCodeForTokenOptions,
   type ExchangedToken,
   type OAuthClientConfig,
+  type PollDeviceTokenOptions,
+  type RequestDeviceCodeOptions,
 } from "./oauth.js";
 export {
   InMemoryOAuthTokenStore,

@@ -11,7 +11,7 @@
 //   worker 側 helper (`apps/worker/src/lib/llm-runtime`) と同じものを使う。
 //   web の callback で保存された ciphertext + metadata を worker がそのまま
 //   読み出せるようにするため、env と `oauth_tokens` テーブルの境界を共有する。
-// - Codex OAuth client が未設定 (env 不足 / ENCRYPTION_KEY 未設定) の場合は
+// - Codex OAuth に必要な runtime 設定 (ENCRYPTION_KEY / chat endpoint / model) が未設定の場合は
 //   `selectLLMProvider` が StubLLMProvider に倒し、begin route は理由付きで
 //   `/ai` に戻す。
 

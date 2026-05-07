@@ -69,13 +69,13 @@ npm run addroid -- auth llm --provider openai --disconnect
 
 ### 3.1 必須環境変数
 
-`.env.example` に定義済みの 5 つを `.env` または `.env.local` に設定します
-(`ENCRYPTION_KEY` も別途必要):
+Codex OAuth の OAuth client は OpenAI Codex 互換の内蔵 public client を既定で使います。
+`ADDROID_CODEX_CLIENT_ID` の入力は不要です。
+
+通常は `addroid init` で `Codex OAuth` を選ぶだけで、次の runtime 設定が `.env` に
+補完されます (`ENCRYPTION_KEY` と `DATABASE_URL` も別途必要):
 
 ```bash
-ADDROID_CODEX_CLIENT_ID=...
-ADDROID_CODEX_AUTHORIZATION_URL=https://auth.openai.com/oauth/authorize
-ADDROID_CODEX_TOKEN_URL=https://auth.openai.com/oauth/token
 ADDROID_CODEX_CHAT_COMPLETIONS_URL=https://api.openai.com/v1/chat/completions
 ADDROID_CODEX_DEFAULT_MODEL=gpt-4.1
 ```
@@ -83,8 +83,11 @@ ADDROID_CODEX_DEFAULT_MODEL=gpt-4.1
 ### 3.2 任意の上書き
 
 ```bash
+ADDROID_CODEX_CLIENT_ID=...
+ADDROID_CODEX_AUTHORIZATION_URL=https://auth.openai.com/oauth/authorize
+ADDROID_CODEX_TOKEN_URL=https://auth.openai.com/oauth/token
 ADDROID_CODEX_OAUTH_REDIRECT_URI=http://127.0.0.1:3000/api/oauth/codex/callback
-ADDROID_CODEX_SCOPES=openai,offline_access
+ADDROID_CODEX_SCOPES=openid,profile,email,offline_access
 ADDROID_CODEX_CLIENT_SECRET=    # 設定すると Confidential Client、未設定なら PKCE
 ```
 
@@ -95,9 +98,10 @@ ADDROID_CODEX_CLIENT_SECRET=    # 設定すると Confidential Client、未設�
 
 対話型 `addroid init` で `Codex OAuth` を選ぶと、その場で
 `addroid auth llm --provider codex` が起動します。
+内蔵 OAuth client と `.env` の既定 runtime 設定を使うため、client id の入力はありません。
 
 1. CLI がブラウザを開き、Codex / OpenAI OAuth の許可画面に遷移
-2. 許可後、`http://127.0.0.1:3000/api/oauth/codex/callback` を CLI が localhost で受信
+2. 許可後、`http://localhost:1455/auth/callback` を CLI が localhost で受信
 3. AdDroid が authorization code を token に交換 (PKCE 既定)
 4. `oauth_tokens` (provider="codex") に AES-256-GCM で暗号化保存
 
@@ -107,6 +111,9 @@ CLI に貼り付けて Enter すると同じ処理で完了できます。
 後から接続し直す場合:
 
 ```bash
+npm run addroid -- init --interactive --reauth-llm
+
+# Codex OAuth だけを直接再認証したい場合
 npm run addroid -- auth llm --provider codex
 ```
 

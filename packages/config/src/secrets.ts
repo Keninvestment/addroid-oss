@@ -2,12 +2,13 @@
 //
 // `~/.addroid/secrets.local.yaml` はユーザーのローカル機微情報をまとめる任意ファイルで
 // `.gitignore` で追跡対象外。許容する値:
-//   - github.oauth.clientId / clientSecret  (GitHub OAuth クライアント)
+//   - github.oauth.clientId / clientSecret  (GitHub OAuth クライアント; local-only 0600)
 //   - meta.oauth.appIdCiphertext / appSecretCiphertext (Meta Login for Business OAuth クライアント)
 //   - meta.oauth.permissions (string[])      (override default scopes)
 //   - meta.accessToken                       (オプション: 開発時の手動トークン)
-// OAuth client secret / token 等の機微値は YAML 上でも ciphertext とし、
-// ファイルパーミッション 0600 を強制し、git 追跡対象外にする。
+// provider token は oauth_tokens へ ciphertext として保存する。GitHub OAuth client
+// secret は現状 YAML 上では平文だが、ファイルパーミッション 0600 を強制し、
+// git 追跡対象外にする。
 
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";

@@ -76,7 +76,7 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 
 | provider | 取得経路 | 保存場所 |
 |---|---|---|
-| GitHub | OAuth Device Flow / 設定 UI 経由の OAuth | `oauth_tokens` (provider="github") |
+| GitHub | CLI `addroid auth github` の OAuth Device Flow / Web UI `/github` の OAuth Code Flow | `oauth_tokens` (provider="github") |
 | Meta | `addroid auth meta` または Web UI `/accounts` の OAuth Code Flow | `oauth_tokens` (provider="meta") |
 | Codex / OpenAI | OAuth (PKCE 既定、Confidential Client は `ADDROID_CODEX_CLIENT_SECRET`) | `oauth_tokens` (provider="codex") |
 | Slack | `addroid auth slack` で Bot/App トークンを暗号化保存 (Socket Mode 接続テスト後) | `oauth_tokens` (provider="slack") |

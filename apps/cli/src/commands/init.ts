@@ -40,14 +40,25 @@ import { resolveRepoRoot } from "../lib/paths.js";
 
 const SECRETS_STUB =
   "# AdDroid OSS — local-only secrets. THIS FILE IS GITIGNORED.\n" +
-  "# 例: github_oauth_client_secret: \"...\"\n" +
-  "# OAuth トークンや per-host の機微情報をここに置きます。値は ENCRYPTION_KEY で暗号化されます。\n";
+  "# 例:\n" +
+  "# github:\n" +
+  "#   oauth:\n" +
+  "#     clientId: \"...\"\n" +
+  "#     clientSecret: \"...\"\n" +
+  "# OAuth / API tokens are encrypted in oauth_tokens with ENCRYPTION_KEY.\n" +
+  "# This file is local-only and chmod 0600; do not commit it.\n";
 
 const DEFAULT_DATABASE_USER = "addroid";
 const DEFAULT_DATABASE_NAME = "addroid";
 const DEFAULT_DATABASE_HOST = "localhost";
 const DEFAULT_DATABASE_PORT = "5432";
 const META_ADS_CLI_PYTHON_VERSION = "3.13";
+const DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const DEFAULT_CODEX_AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize";
+const DEFAULT_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
+const DEFAULT_CODEX_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_CODEX_MODEL = "gpt-4.1";
+const DEFAULT_CODEX_SCOPES = "openid,profile,email,offline_access";
 const UV_SH = [
   'uv_bin="$(command -v uv || true)"',
   'if [ -z "$uv_bin" ]; then uv_bin="$HOME/.local/bin/uv"; fi',
@@ -73,6 +84,7 @@ export interface InitCommandOverrides {
   selectOption?: SelectFn;
   runAuthCommand?: (args: string[]) => Promise<number>;
   runCommand?: CommandRunner;
+  readAuthState?: (env: NodeJS.ProcessEnv) => Promise<InitAuthState>;
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   isTTY?: boolean;
@@ -88,11 +100,35 @@ interface InitOptions {
   skipDbPush: boolean;
   dbPush: boolean;
   mockIntegrations: boolean;
+  skipLinkCli: boolean;
+  force: boolean;
+  reauthMeta: boolean;
+  reauthGithub: boolean;
+  reauthLlm: boolean;
   projectName?: string;
   databaseUrl?: string;
   envFile?: string;
   help: boolean;
 }
+
+interface InitAuthState {
+  checked: boolean;
+  metaConnected: boolean;
+  githubConnected?: boolean;
+  opsRepoLinked?: boolean;
+  llmProviders: string[];
+  detail?: string;
+}
+
+type InitAuthPrismaClient = {
+  oAuthToken: {
+    findMany: (args: unknown) => Promise<Array<{ provider: string }>>;
+  };
+  workspace: {
+    findFirst: (args: unknown) => Promise<{ opsRepoId: string | null } | null>;
+  };
+  $disconnect: () => Promise<void>;
+};
 
 interface ScaffoldOptions {
   projectName?: string;
@@ -140,7 +176,21 @@ export async function runInit(
     (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY) && env.CI !== "true");
   const interactive = opts.interactive ?? isTTY;
 
+  if (!interactive && hasReauthIntent(opts)) {
+    process.stderr.write(
+      "[addroid init] --reauth-* は対話入力またはブラウザ認証を伴います。`--interactive` で再実行してください。\n"
+    );
+    return 2;
+  }
+
   if (interactive) {
+    if (await shouldShortCircuitAlreadyInitialized(opts, overrides, env)) {
+      const result = await safeScaffoldAddroid({ projectName: opts.projectName });
+      if (!result) return 1;
+      const auth = await readInitAuthState(env, overrides);
+      printAlreadyInitializedResult(result, auth);
+      return 0;
+    }
     return runInteractiveInit(opts, overrides);
   }
 
@@ -162,7 +212,50 @@ function shouldRunNonInteractiveSetup(opts: InitOptions): boolean {
       opts.projectName ||
       opts.databaseUrl ||
       opts.envFile ||
-      opts.mockIntegrations
+      opts.mockIntegrations ||
+      opts.force
+  );
+}
+
+function hasReauthIntent(opts: InitOptions): boolean {
+  return opts.reauthMeta || opts.reauthGithub || opts.reauthLlm;
+}
+
+function hasSetupIntent(opts: InitOptions): boolean {
+  return Boolean(
+    opts.yes ||
+      opts.installDeps ||
+      opts.dbPush ||
+      opts.projectName ||
+      opts.databaseUrl ||
+      opts.envFile ||
+      opts.mockIntegrations ||
+      opts.force ||
+      hasReauthIntent(opts)
+  );
+}
+
+async function shouldShortCircuitAlreadyInitialized(
+  opts: InitOptions,
+  overrides: InitCommandOverrides,
+  env: NodeJS.ProcessEnv
+): Promise<boolean> {
+  if (opts.interactive === true || hasSetupIntent(opts)) return false;
+  if (!env.DATABASE_URL || !env.ENCRYPTION_KEY) return false;
+  let existing: AddroidConfig | null = null;
+  try {
+    existing = await readAddroidConfig();
+  } catch {
+    return false;
+  }
+  if (!existing) return false;
+  const auth = await readInitAuthState(env, overrides);
+  return (
+    auth.checked &&
+    auth.metaConnected &&
+    auth.githubConnected !== false &&
+    auth.opsRepoLinked !== false &&
+    auth.llmProviders.length > 0
   );
 }
 
@@ -228,8 +321,8 @@ async function runNonInteractiveSetup(
   lines.push("  1. addroid doctor");
   lines.push("  2. Meta Access Token を用意");
   lines.push("  3. addroid auth meta                    # token 入力 + Ad Account 選択");
-  lines.push("  4. addroid accounts select");
-  lines.push("  5. addroid auth llm --provider openai   # または anthropic / codex");
+  lines.push("  4. addroid auth llm --provider openai   # または anthropic / codex");
+  lines.push("  5. addroid auth github                  # GitHub 認証 + ops repo 作成");
   lines.push("  6. addroid up");
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -303,6 +396,17 @@ async function runInteractiveInit(
 
   if (lines.length > 0) {
     process.stdout.write(lines.join("\n") + "\n");
+    lines.length = 0;
+  }
+
+  const cliLinkLines = await maybeEnsureCliCommand({
+    env,
+    runner,
+    confirm,
+    skip: opts.skipLinkCli,
+  });
+  if (cliLinkLines.length > 0) {
+    process.stdout.write(cliLinkLines.join("\n") + "\n");
   }
 
   const projectName =
@@ -362,48 +466,193 @@ async function runInteractiveInit(
     }
   }
 
+  let metaCredentialReady = opts.mockIntegrations;
+  let llmCredentialReady = opts.mockIntegrations;
+  let githubCredentialReady = opts.mockIntegrations;
+  let opsRepoReady = opts.mockIntegrations;
   if (!opts.mockIntegrations) {
-    const configured = await maybeConfigureMetaAccessToken({
-      out,
-      assumeYes: opts.yes,
-    });
-    if (configured && !opts.yes) {
+    const auth = await readInitAuthState(env, overrides);
+    if (auth.checked && auth.metaConnected && !opts.force && !opts.reauthMeta) {
+      metaCredentialReady = true;
+      out.push("");
+      out.push("Meta Access Token setup:");
+      out.push("  Meta Token    : already configured");
+      out.push("                  再認証する場合は `addroid init --reauth-meta` または `addroid auth meta` を実行してください。");
+    } else {
+      const configured = await maybeConfigureMetaAccessToken({
+        out,
+        assumeYes: opts.yes,
+      });
+      if (configured && !opts.yes) {
+        process.stdout.write(out.join("\n") + "\n");
+        out.length = 0;
+        const runAuthCommand =
+          overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+        const code = await withRuntimeEnv(env, () => runAuthCommand(["meta"]));
+        out.push(`  Meta Token    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+        metaCredentialReady = code === 0;
+        if (code !== 0) {
+          out.push("                  Meta Access Token は実利用に必須です。token と DB 設定を確認し、`addroid auth meta` を再実行してください。");
+          process.stdout.write(out.join("\n") + "\n");
+          return 1;
+        }
+      }
+    }
+
+    let llmConfigured = true;
+    if (auth.checked && auth.llmProviders.length > 0 && !opts.force && !opts.reauthLlm) {
+      llmCredentialReady = true;
+      out.push("");
+      out.push("LLM Provider setup:");
+      out.push(`  LLM Provider  : already configured (${auth.llmProviders.join(", ")})`);
+      out.push("                  再認証する場合は `addroid init --reauth-llm` で provider を選び直してください。");
+    } else {
+      llmConfigured = await maybeConfigureLLMProvider({
+        prompt,
+        selectOption,
+        out,
+        assumeYes: opts.yes,
+        runAuthCommand: overrides.runAuthCommand,
+        env,
+        envFile: opts.envFile,
+      });
+      llmCredentialReady = llmConfigured && !opts.yes;
+    }
+    if (!llmConfigured) {
+      process.stdout.write(out.join("\n") + "\n");
+      return 1;
+    }
+
+    const githubAlreadyReady =
+      auth.checked && auth.githubConnected !== false && auth.opsRepoLinked !== false;
+    if (githubAlreadyReady && !opts.force && !opts.reauthGithub) {
+      githubCredentialReady = true;
+      opsRepoReady = true;
+      out.push("");
+      out.push("GitHub setup:");
+      out.push("  GitHub       : already configured");
+      out.push("                 ops repository は既に workspace に紐付いています。");
+    } else {
+      out.push("");
+      out.push("GitHub setup:");
+      out.push("  実際の入稿には ops repository が必要です。");
+      out.push("  このまま GitHub Device Flow 認証に進み、認証後に ops repository を自動作成します。");
       process.stdout.write(out.join("\n") + "\n");
       out.length = 0;
       const runAuthCommand =
         overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
-      const code = await withRuntimeEnv(env, () => runAuthCommand(["meta"]));
-      out.push(`  Meta Token    : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+      const code = await withRuntimeEnv(env, () => runAuthCommand(["github"]));
+      out.push(`  GitHub       : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+      githubCredentialReady = code === 0;
+      opsRepoReady = code === 0;
       if (code !== 0) {
-        out.push("                  Meta Access Token は実利用に必須です。token と DB 設定を確認し、`addroid auth meta` を再実行してください。");
+        out.push("                 実際の入稿には GitHub 認証と ops repository が必須です。`addroid auth github` を再実行してください。");
         process.stdout.write(out.join("\n") + "\n");
         return 1;
       }
-    }
-    const llmConfigured = await maybeConfigureLLMProvider({
-      prompt,
-      selectOption,
-      out,
-      assumeYes: opts.yes,
-      runAuthCommand: overrides.runAuthCommand,
-      env,
-    });
-    if (!llmConfigured) {
-      process.stdout.write(out.join("\n") + "\n");
-      return 1;
     }
   }
 
   out.push("");
   out.push("Ready.");
-  out.push("  1. addroid doctor");
-  out.push("  2. addroid auth meta                    # Meta Access Token 入力 + Ad Account 選択");
-  out.push("  3. addroid accounts select");
-  out.push("  4. addroid auth llm --provider openai   # または anthropic / codex");
-  out.push("  5. addroid up");
+  out.push(...formatReadySteps({ metaCredentialReady, llmCredentialReady, githubCredentialReady, opsRepoReady }));
   out.push("");
   process.stdout.write(out.join("\n"));
   return 0;
+}
+
+function formatReadySteps(opts: {
+  metaCredentialReady: boolean;
+  llmCredentialReady: boolean;
+  githubCredentialReady: boolean;
+  opsRepoReady: boolean;
+}): string[] {
+  const steps: string[] = ["addroid doctor"];
+  if (!opts.metaCredentialReady) {
+    steps.push("addroid auth meta                    # Meta Access Token 入力 + Ad Account 選択");
+  }
+  if (!opts.llmCredentialReady) {
+    steps.push("addroid auth llm --provider codex     # または openai / anthropic");
+  }
+  if (!opts.githubCredentialReady || !opts.opsRepoReady) {
+    steps.push("addroid auth github                  # GitHub 認証 + ops repo 作成");
+  }
+  steps.push("addroid up");
+  return steps.map((step, i) => `  ${i + 1}. ${step}`);
+}
+
+async function maybeEnsureCliCommand(opts: {
+  env: NodeJS.ProcessEnv;
+  runner: CommandRunner;
+  confirm: ConfirmFn;
+  skip: boolean;
+}): Promise<string[]> {
+  if (opts.skip) {
+    return [
+      "CLI command setup:",
+      "  addroid       : skipped (--skip-link-cli)",
+      "                  後で `npm run link:cli` を実行すると `addroid doctor` の形で使えます。",
+      "",
+    ];
+  }
+
+  let repoRoot: string;
+  try {
+    repoRoot = resolveRepoRoot();
+  } catch {
+    return [];
+  }
+
+  const lookupEnv = {
+    ...opts.env,
+    PATH: stripNodeModulesBinFromPath(opts.env.PATH ?? process.env.PATH ?? ""),
+  };
+  const existing = opts.runner("sh", ["-c", "command -v addroid"], {
+    cwd: repoRoot,
+    env: lookupEnv,
+    timeoutMs: 10_000,
+  });
+  const existingPath = existing.status === 0 ? existing.stdout.trim().split(/\r?\n/)[0] : "";
+  if (existingPath) {
+    return [
+      "CLI command setup:",
+      `  addroid       : available (${existingPath})`,
+      "",
+    ];
+  }
+
+  const shouldLink = await opts.confirm(
+    "`addroid doctor` のように直接実行できるよう、この checkout の CLI をリンクしますか?",
+    true
+  );
+  if (!shouldLink) {
+    return [
+      "CLI command setup:",
+      "  addroid       : skipped",
+      "                  後で `npm run link:cli` を実行すると `addroid doctor` の形で使えます。",
+      "",
+    ];
+  }
+
+  const linked = opts.runner("npm", ["link", "--workspace", "apps/cli"], {
+    cwd: repoRoot,
+    env: opts.env,
+    timeoutMs: 120_000,
+  });
+  if (linked.status === 0) {
+    return [
+      "CLI command setup:",
+      "  addroid       : linked",
+      "                  以後は `npm run addroid -- doctor` ではなく `addroid doctor` を使えます。",
+      "",
+    ];
+  }
+  return [
+    "CLI command setup:",
+    `  addroid       : link failed - ${summarizeCommandFailure(linked)}`,
+    "                  セットアップは続行します。後で `npm run link:cli` を再実行してください。",
+    "",
+  ];
 }
 
 async function maybeConfigureMetaAccessToken(opts: {
@@ -440,6 +689,7 @@ async function maybeConfigureLLMProvider(opts: {
   assumeYes: boolean;
   runAuthCommand?: (args: string[]) => Promise<number>;
   env: NodeJS.ProcessEnv;
+  envFile?: string;
 }): Promise<boolean> {
   if (opts.assumeYes) {
     opts.out.push("  LLM Provider  : skipped (--yes では API key / OAuth 入力を省略)");
@@ -484,6 +734,12 @@ async function maybeConfigureLLMProvider(opts: {
     return false;
   }
   if (choice === "codex-oauth" || choice === "oauth" || choice === "codex") {
+    const codexEnv = await ensureCodexOAuthEnvConfig({
+      env: opts.env,
+      envFile: opts.envFile,
+      out: opts.out,
+    });
+    if (!codexEnv) return false;
     opts.out.push("  LLM Provider  : configuring Codex OAuth");
     opts.out.push("                  ブラウザが開きます。自動検出できない場合は callback URL を貼り付けて続行できます。");
     process.stdout.write(opts.out.join("\n") + "\n");
@@ -533,6 +789,40 @@ async function maybeConfigureLLMProvider(opts: {
   if (code !== 0) {
     opts.out.push(`                  実利用には LLM Provider が必須です。API key を確認し、\`addroid auth llm --provider ${provider}\` を再実行してください。`);
     return false;
+  }
+  return true;
+}
+
+async function ensureCodexOAuthEnvConfig(opts: {
+  env: NodeJS.ProcessEnv;
+  envFile?: string;
+  out: string[];
+}): Promise<boolean> {
+  const requiredDefaults: Record<string, string> = {
+    ADDROID_CODEX_CLIENT_ID: DEFAULT_CODEX_CLIENT_ID,
+    ADDROID_CODEX_AUTHORIZATION_URL: DEFAULT_CODEX_AUTHORIZATION_URL,
+    ADDROID_CODEX_TOKEN_URL: DEFAULT_CODEX_TOKEN_URL,
+    ADDROID_CODEX_CHAT_COMPLETIONS_URL: DEFAULT_CODEX_CHAT_COMPLETIONS_URL,
+    ADDROID_CODEX_DEFAULT_MODEL: DEFAULT_CODEX_MODEL,
+    ADDROID_CODEX_SCOPES: DEFAULT_CODEX_SCOPES,
+  };
+  if (opts.env.ADDROID_CODEX_CLIENT_ID?.trim()) {
+    requiredDefaults.ADDROID_CODEX_CLIENT_ID = opts.env.ADDROID_CODEX_CLIENT_ID.trim();
+  }
+  const result = await ensureAdditionalEnvValues({
+    env: opts.env,
+    envFile: opts.envFile,
+    updates: requiredDefaults,
+  });
+  if (result.updated.length > 0 || result.kept.length > 0) {
+    opts.out.push(
+      `  Codex config  : ${result.path} ${result.wrote ? "(updated)" : "(unchanged)"}`
+    );
+    opts.out.push(
+      `                  updated: ${result.updated.length > 0 ? result.updated.join(", ") : "none"}${
+        result.kept.length > 0 ? `; kept existing: ${result.kept.join(", ")}` : ""
+      }`
+    );
   }
   return true;
 }
@@ -681,6 +971,7 @@ async function ensureEnvFile(opts: EnvEnsureOptions): Promise<EnvEnsureResult> {
   const seen = new Set<string>();
   const updated: string[] = [];
   const kept: string[] = [];
+  const keptValues = new Map<string, string>();
   const next = lines.map((line) => {
     const match = line.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
     if (!match) return line;
@@ -690,10 +981,12 @@ async function ensureEnvFile(opts: EnvEnsureOptions): Promise<EnvEnsureResult> {
     const current = stripEnvQuotes(match[4] ?? "");
     if (!opts.forcePlaceholders && current.trim().length > 0) {
       kept.push(key);
+      keptValues.set(key, current);
       return line;
     }
     if (current.trim().length > 0 && !isPlaceholderEnvValue(key, current)) {
       kept.push(key);
+      keptValues.set(key, current);
       return line;
     }
     updated.push(key);
@@ -718,11 +1011,132 @@ async function ensureEnvFile(opts: EnvEnsureOptions): Promise<EnvEnsureResult> {
 
   for (const [key, value] of Object.entries(updates)) {
     if (!opts.env[key] || isPlaceholderEnvValue(key, opts.env[key]!)) {
-      opts.env[key] = value;
+      opts.env[key] = keptValues.get(key) ?? value;
     }
   }
 
   return { path: envFile, wrote, updated, kept };
+}
+
+async function ensureAdditionalEnvValues(opts: {
+  env: NodeJS.ProcessEnv;
+  envFile?: string;
+  updates: Record<string, string>;
+}): Promise<EnvEnsureResult> {
+  const envFile = opts.envFile ? path.resolve(opts.envFile) : resolveDefaultEnvFile();
+  let text = "";
+  try {
+    text = await fs.readFile(envFile, "utf8");
+  } catch {
+    text =
+      "# AdDroid OSS local environment. Generated by `addroid init`.\n" +
+      "# This file is gitignored. Do not commit secrets.\n";
+  }
+
+  const lines = text.split(/\r?\n/);
+  const seen = new Set<string>();
+  const updated: string[] = [];
+  const kept: string[] = [];
+  const keptValues = new Map<string, string>();
+  const next = lines.map((line) => {
+    const match = line.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/);
+    if (!match) return line;
+    const key = match[2]!;
+    if (!(key in opts.updates)) return line;
+    seen.add(key);
+    const current = stripEnvQuotes(match[4] ?? "");
+    if (current.trim().length > 0 && !isPlaceholderEnvValue(key, current)) {
+      kept.push(key);
+      keptValues.set(key, current);
+      return line;
+    }
+    updated.push(key);
+    return `${match[1]}${key}${match[3]}${quoteEnv(opts.updates[key]!)}`;
+  });
+
+  for (const [key, value] of Object.entries(opts.updates)) {
+    if (!seen.has(key)) {
+      if (next.length > 0 && next[next.length - 1] !== "") next.push("");
+      next.push(`${key}=${quoteEnv(value)}`);
+      updated.push(key);
+    }
+  }
+
+  const finalText = next.join("\n").replace(/\n*$/, "\n");
+  const wrote = finalText !== text;
+  if (wrote) {
+    await fs.mkdir(path.dirname(envFile), { recursive: true });
+    await fs.writeFile(envFile, finalText, { encoding: "utf8", mode: 0o600 });
+    await fs.chmod(envFile, 0o600).catch(() => undefined);
+  }
+
+  for (const [key, value] of Object.entries(opts.updates)) {
+    if (!opts.env[key] || isPlaceholderEnvValue(key, opts.env[key]!)) {
+      opts.env[key] = keptValues.get(key) ?? value;
+    }
+  }
+
+  return { path: envFile, wrote, updated, kept };
+}
+
+async function readInitAuthState(
+  env: NodeJS.ProcessEnv,
+  overrides: InitCommandOverrides
+): Promise<InitAuthState> {
+  if (overrides.readAuthState) return await overrides.readAuthState(env);
+  if (!env.DATABASE_URL || !env.ENCRYPTION_KEY) {
+    return {
+      checked: false,
+      metaConnected: false,
+      githubConnected: false,
+      opsRepoLinked: false,
+      llmProviders: [],
+      detail: "DATABASE_URL or ENCRYPTION_KEY is not configured",
+    };
+  }
+  let prisma: InitAuthPrismaClient | null = null;
+  try {
+    const imported = (await import("@addroid/db")) as {
+      prisma: InitAuthPrismaClient;
+    };
+    prisma = imported.prisma;
+    const rows = await prisma.oAuthToken.findMany({
+      where: {
+        provider: {
+          in: ["meta", "github", "codex", "openai", "anthropic"],
+        },
+      },
+      select: {
+        provider: true,
+      },
+      orderBy: {
+        connectedAt: "desc",
+      },
+    });
+    const ws = await prisma.workspace.findFirst({
+      orderBy: { createdAt: "asc" },
+      select: { opsRepoId: true },
+    });
+    const providers = Array.from(new Set(rows.map((r) => r.provider)));
+    return {
+      checked: true,
+      metaConnected: providers.includes("meta"),
+      githubConnected: providers.includes("github"),
+      opsRepoLinked: Boolean(ws?.opsRepoId),
+      llmProviders: providers.filter((p) => p === "codex" || p === "openai" || p === "anthropic"),
+    };
+  } catch (err) {
+    return {
+      checked: false,
+      metaConnected: false,
+      githubConnected: false,
+      opsRepoLinked: false,
+      llmProviders: [],
+      detail: (err as Error).message,
+    };
+  } finally {
+    await prisma?.$disconnect().catch(() => undefined);
+  }
 }
 
 function resolveDefaultEnvFile(): string {
@@ -1297,6 +1711,13 @@ function quoteEnv(value: string): string {
   return JSON.stringify(value);
 }
 
+function stripNodeModulesBinFromPath(value: string): string {
+  return value
+    .split(path.delimiter)
+    .filter((entry) => !/[\\/]node_modules[\\/]\.bin$/.test(entry))
+    .join(path.delimiter);
+}
+
 function isPlaceholderEnvValue(key: string, value: string): boolean {
   const v = value.trim();
   if (!v) return true;
@@ -1316,17 +1737,45 @@ function printScaffoldResult(result: ScaffoldResult): void {
     lines.push("  2. addroid doctor");
     lines.push("  3. Meta Access Token を用意");
     lines.push("  4. addroid auth meta             # token 入力 + Ad Account 選択");
-    lines.push("  5. addroid accounts select");
+    lines.push("  5. addroid auth github           # GitHub 認証 + ops repo 作成");
     lines.push("  6. addroid auth llm --provider openai");
     lines.push("  7. addroid up");
   } else {
     lines.push("  1. addroid doctor");
     lines.push("  2. Meta Access Token を用意");
     lines.push("  3. addroid auth meta             # token 入力 + Ad Account 選択");
-    lines.push("  4. addroid accounts select");
+    lines.push("  4. addroid auth github           # GitHub 認証 + ops repo 作成");
     lines.push("  5. addroid auth llm --provider openai");
     lines.push("  6. addroid up");
   }
+  lines.push("");
+  process.stdout.write(lines.join("\n"));
+}
+
+function printAlreadyInitializedResult(result: ScaffoldResult, auth: InitAuthState): void {
+  const lines = [
+    "[addroid init]",
+    "",
+    "AdDroid is already initialized. Existing config / secrets / credentials were left as-is.",
+    "",
+    ...formatScaffoldResult(result),
+    "",
+    "Connected credentials:",
+    `  Meta Token    : ${auth.metaConnected ? "configured" : "not detected"}`,
+    `  GitHub       : ${auth.githubConnected ? "configured" : "not detected"}`,
+    `  Ops Repo     : ${auth.opsRepoLinked ? "linked" : "not linked"}`,
+    `  LLM Provider  : ${auth.llmProviders.length > 0 ? auth.llmProviders.join(", ") : "not detected"}`,
+  ];
+  if (!auth.checked && auth.detail) {
+    lines.push(`  auth check    : skipped (${auth.detail})`);
+  }
+  lines.push("");
+  lines.push("Maintenance:");
+  lines.push("  addroid doctor");
+  lines.push("  addroid init --interactive --force       # 初期セットアップを明示的に再実行");
+  lines.push("  addroid init --interactive --reauth-meta # Meta token を再認証");
+  lines.push("  addroid init --interactive --reauth-github # GitHub token / ops repo を再設定");
+  lines.push("  addroid init --interactive --reauth-llm  # LLM provider を選び直して再認証");
   lines.push("");
   process.stdout.write(lines.join("\n"));
 }
@@ -1382,6 +1831,11 @@ function parseInitArgs(args: string[]): InitOptions {
     skipDbPush: false,
     dbPush: false,
     mockIntegrations: false,
+    skipLinkCli: false,
+    force: false,
+    reauthMeta: false,
+    reauthGithub: false,
+    reauthLlm: false,
     help: false,
   };
   for (let i = 0; i < args.length; i += 1) {
@@ -1401,6 +1855,11 @@ function parseInitArgs(args: string[]): InitOptions {
     else if (a === "--skip-db-push") opts.skipDbPush = true;
     else if (a === "--db-push") opts.dbPush = true;
     else if (a === "--mock-integrations") opts.mockIntegrations = true;
+    else if (a === "--skip-link-cli") opts.skipLinkCli = true;
+    else if (a === "--force") opts.force = true;
+    else if (a === "--reauth-meta") opts.reauthMeta = true;
+    else if (a === "--reauth-github") opts.reauthGithub = true;
+    else if (a === "--reauth-llm") opts.reauthLlm = true;
     else if (a === "--project-name") opts.projectName = next();
     else if (a.startsWith("--project-name=")) opts.projectName = a.slice("--project-name=".length);
     else if (a === "--database-url") opts.databaseUrl = next();
@@ -1434,6 +1893,11 @@ function printInitHelp(): void {
       "  --db-push              npm run db:generate && npm run db:push を実行",
       "  --skip-db-push         Prisma schema 反映をスキップ",
       "  --mock-integrations    初回検証用に mock フラグを .env に追加",
+      "  --skip-link-cli        `addroid` コマンドの checkout link をスキップ",
+      "  --force                初期化済み検出を無視してセットアップ確認を再実行",
+      "  --reauth-meta          既存 Meta token があっても `addroid auth meta` を実行",
+      "  --reauth-github        既存 GitHub token / ops repo があっても `addroid auth github` を実行",
+      "  --reauth-llm           既存 LLM credential があっても provider 選択から再認証",
       "",
       "Interactive setup:",
       "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",

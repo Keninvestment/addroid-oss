@@ -210,12 +210,12 @@ npm run db:push
 
 ```bash
 npm install                 # JS dependencies + CLI postinstall の next-step 表示
-npm run addroid -- init     # 対話型 wizard: .env / DB / ~/.addroid / Prisma schema
+npm run addroid -- init     # 対話型 wizard: .env / DB / ~/.addroid / Prisma schema / Meta / GitHub / LLM
 
-# 実際の Meta 広告アカウントを使う場合は必須:
-# Meta Access Token を貼り付けると、取得できる Ad Account が表示されます。
+# 実際の Meta 広告アカウントと入稿用 ops repo は init 内で接続します。
+# init でスキップした場合だけ、後から個別に実行します。
 npm run addroid -- auth meta
-npm run addroid -- accounts select
+npm run addroid -- auth github
 npm run addroid -- up       # web (127.0.0.1:3000) + worker (pg-boss) を 1 プロセスで起動
 ```
 
@@ -299,7 +299,10 @@ checks には含まれません。これらは `/setup` の OSS Release Readines
 ## 7. 外部統合のセットアップ
 
 各統合は未設定でも core 動作 (Dashboard / DB / worker / cron / Doctor) を阻害しません。
-実際の Meta 広告アカウントを利用する場合は、Meta Access Token を必ず登録してください。
+実際の Meta 広告アカウントを利用する場合は Meta Access Token、実際に入稿する場合は
+GitHub token と ops repo 連携を必ず登録してください。CLI の GitHub Device Flow は
+`~/.addroid/secrets.local.yaml` の `github.oauth.clientId`、Web UI OAuth Code Flow は
+`github.oauth.clientId` / `github.oauth.clientSecret` を使います。
 
 | 統合 | 役割 | 詳細 |
 |---|---|---|

@@ -66,7 +66,7 @@ system 変更は既定で no です。
 | PostgreSQL 16+ | DB / pg-boss queue | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
 
 PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必要になる場合があります。
-セットアップに失敗した場合でも、表示されたコマンドを実行してから `npm run addroid -- init`
+セットアップに失敗した場合でも、表示されたコマンドを実行してから `addroid init`
 を再実行すれば途中から続行できます。
 
 `npm install` だけでは Meta Ads CLI や PostgreSQL は入りません。OS やユーザー環境を
@@ -103,7 +103,8 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 実利用で必要な外部連携:
 
-- GitHub OAuth クライアント — ops repo bootstrap と PR ポーリングに必要
+- GitHub OAuth クライアント — ops repo bootstrap と PR ポーリングに必要。CLI Device Flow には
+  `clientId`、Web UI OAuth Code Flow には `clientId` / `clientSecret` を `~/.addroid/secrets.local.yaml` に設定
 - Meta Access Token — 実際の Meta 広告アカウント接続、Apply / Activate、レポート取得に必須
 - LLM Provider — AI workflow 実行に必要。初回セットアップでは OpenAI / Anthropic API key
   または Codex OAuth を選択できます (未設定時は StubLLMProvider で fail-closed)
@@ -149,10 +150,10 @@ AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。
 6. System User を選んだ状態で **Generate New Token** を押し、手順 2 の Business App を選択します。
 7. Permission / scope は、`ads_read`, `ads_management`, `business_management` を選びます。AdDroid は広告アカウント一覧の取得、入稿操作、Business 配下の資産確認にこれらを使います。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
 8. 表示された token は、その画面を離れると再表示できない前提で安全な場所に一時保管します。AdDroid へ登録した後は、平文を共有・コミットしないでください。
-9. 初回セットアップ後、Meta アカウント連携は次で行います。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
+9. `addroid init` の対話セットアップ中に Meta アカウント連携まで進みます。スキップした場合だけ、後から次を実行してください。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
 ```bash
-npm run addroid -- auth meta
+addroid auth meta
 ```
 
 検証だけなら [Graph API Explorer](https://developers.facebook.com/tools/explorer/) で User Access Token を生成して使うこともできます。ただし User token は個人ログインに紐付き、期限切れしやすいため、非エンジニアが継続運用する AdDroid では System User Access Token を標準手順とします。
@@ -162,7 +163,7 @@ Access Token はパスワード相当です。README、Issue、Slack、スクリ
 `ENCRYPTION_KEY` で暗号化して `oauth_tokens` に保存し、Meta Ads CLI 実行時だけ
 `ACCESS_TOKEN` / `AD_ACCOUNT_ID` として子プロセスに渡します。
 
-OAuth callback を使いたい上級者は `npm run addroid -- auth meta --oauth` を利用できます。
+OAuth callback を使いたい上級者は `addroid auth meta --oauth` を利用できます。
 この場合は HTTPS の callback URL を Meta App に登録できる環境が必要です。通常のローカル
 OSS 利用では token 入力方式を使ってください。
 
@@ -175,21 +176,30 @@ OSS 利用では token 入力方式を使ってください。
 npm install
 
 # 2. 初回セットアップ
-#    uv / Python / Meta Ads CLI / PostgreSQL の不足分と、Meta Access Token の必要項目を確認できます。
-npm run addroid -- init
+#    uv / Python / Meta Ads CLI / PostgreSQL と、Meta / GitHub / LLM Provider の接続を案内します。
+#    初回は local bin 経由で起動し、init 中に `addroid` コマンドをリンクします。
+npx --no-install addroid init
 
-# 3. 実際の Meta 広告アカウントを接続
-#    Meta Access Token を貼り付けると、取得できる Ad Account が表示されます。
-npm run addroid -- auth meta
-npm run addroid -- accounts select
+# 3. init 後は短い addroid コマンドを使えます
+addroid doctor
 
-# 4. web (127.0.0.1:3000) と worker (pg-boss) を起動
-npm run addroid -- up
+# 4. init で接続をスキップした場合だけ、後から個別に接続
+#    Meta は Ad Account 選択、GitHub は ops repository 作成まで行います。
+addroid auth meta
+addroid auth github
+
+# 5. web (127.0.0.1:3000) と worker (pg-boss) を起動
+addroid up
 ```
 
 `addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
-コマンドを見せた上で個別に確認します。Meta token が未設定の場合は、Access Token の
-必要権限と `addroid auth meta` の手順を画面に表示します。
+コマンドを見せた上で個別に確認します。Meta token / GitHub / LLM Provider が未設定の場合は、
+Meta Access Token 入力、GitHub Device Flow 認証と ops repository 作成、
+OpenAI / Anthropic API key / Codex OAuth の選択まで案内します。
+リポジトリ checkout で `addroid` コマンドが未リンクの場合は、init 中に確認して
+`npm link --workspace apps/cli` を実行し、以後 `addroid doctor` の形で使えるようにします。
+初期設定済みの状態で再実行した場合は、既存の config / secrets / credential を保持し、
+状態表示だけで終了します。
 
 初回セットアップで作成・設定されるもの:
 
@@ -201,34 +211,54 @@ npm run addroid -- up
 - uv-managed Python 3.13 と Meta Ads CLI
 - Meta Access Token: 実利用では必須。入力された値は暗号化して `oauth_tokens` に保存し、
   取得できる Ad Account から既定アカウントを選択
-- LLM Provider: OpenAI / Anthropic API key は `addroid auth llm` 経由で暗号化保存、
-  Codex OAuth は `addroid up` 後に `/ai` から接続
+- GitHub OAuth: 実際の入稿には必須。CLI は Device Flow、Web UI は既存の OAuth Code Flow を使い、
+  token を `oauth_tokens` に暗号化保存。未連携なら private ops repository を自動作成
+- LLM Provider: OpenAI / Anthropic API key または Codex OAuth を選択し、
+  `oauth_tokens` に暗号化保存
 - Image Provider: OpenAI API key 登録済みなら GPT Image 2 を利用可能。Codex OAuth の場合は
   localhost の `codex app-server` 経由で画像生成
+
+Codex OAuth を選ぶ場合、`init` は OpenAI Codex 互換の public OAuth client と
+既定 endpoint / model を `.env` に補完します。client id の入力は不要です。
+選択後はブラウザが自動で開き、認証完了後に CLI が続行します。localhost callback を
+自動検出できない場合は、ブラウザの callback URL 全体を CLI に貼り付ければ続行できます。
+
+初期設定済みの credential を更新したい場合は、明示的に再認証します。
+
+```bash
+# Meta Access Token を再登録
+addroid init --interactive --reauth-meta
+
+# GitHub token / ops repo を再設定
+addroid init --interactive --reauth-github
+
+# LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth)
+addroid init --interactive --reauth-llm
+```
 
 CI や手元の自動検証では次を使えます。
 
 ```bash
-npm run addroid -- init --non-interactive --yes --skip-deps --skip-db-push
+addroid init --non-interactive --yes --skip-deps --skip-db-push
 ```
 
 外部 API に接続せずに起動確認だけしたい場合は mock フラグも同時に作成できます。
 
 ```bash
-npm run addroid -- init --non-interactive --yes --skip-deps --mock-integrations --skip-db-push
+addroid init --non-interactive --yes --skip-deps --mock-integrations --skip-db-push
 ```
 
 起動前に状態を確認したい場合は `doctor` を実行します。
 
 ```bash
-npm run addroid -- doctor
+addroid doctor
 ```
 
 `doctor` で `meta-ads-cli` が error になった場合は、通常は再度 `init` を実行すれば
 Meta Ads CLI の導入を試行します。
 
 ```bash
-npm run addroid -- init --install-deps
+addroid init --install-deps
 ```
 
 日次レポートは Meta Ads CLI の `ads insights get` を優先して使います。
@@ -245,9 +275,12 @@ campaign / adset です。`ad` は直接予算を持たないため、親 adset 
 定期ルールとして扱います。どちらか判断できない予算変更・停止・再開リクエストでは、
 実行前に「今すぐ一度だけ」「定期ルール」「両方」の確認質問を返します。
 
-`addroid` を `npm install -g @addroid/cli` で導入済みの場合、CLI 操作は
-`npm run addroid --` を `addroid` に置き換えられます。worker のみ別プロセスに分離して水平スケールしたい
-場合は `addroid up --separate-worker` を使います。低レベルなデバッグ用途で個別に起動したい
+リポジトリ checkout では `addroid init` が checkout link を案内します。スキップした場合も
+`npm run link:cli` を一度実行すると、以後は `npx --no-install addroid doctor` ではなく
+`addroid doctor` と入力できます。npm package として
+導入する場合は `npm install -g @addroid/cli` でも同じ `addroid` コマンドが入ります。
+worker のみ別プロセスに分離して水平スケールしたい場合は `addroid up --separate-worker` を使います。
+低レベルなデバッグ用途で個別に起動したい
 場合のみ `npm run dev` / `npm run dev:worker` を直接呼び出せます。その場合は root の
 `.env.local` を shell に export してから起動してください。
 
@@ -297,17 +330,21 @@ addroid/
 | コマンド | 説明 |
 |---|---|
 | `npm install` | ワークスペース全体の依存解決 |
-| `npm run addroid -- init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI / LLM Provider) |
-| `npm run addroid -- doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
-| `npm run addroid -- up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
-| `npm run addroid -- down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |
-| `npm run addroid -- status` | config / プロセス / 直近 doctor 結果のスナップショット |
-| `npm run addroid -- logs` | `~/.addroid/logs/{up,web,worker}.log` を tail |
-| `npm run addroid -- validate` | ops repo の Ads / cron / project YAML を Zod 検証 |
-| `npm run addroid -- plan` | Apply の dry-run シミュレーション (`--dry-run` 必須) |
-| `npm run addroid -- activate <act_id>` | PAUSED → ACTIVE 移行 (Apply とは別の承認境界) |
-| `npm run addroid -- cron <list/enable/disable/run/...>` | cron preset 管理 |
-| `npm run addroid -- auth <provider>` | provider トークン登録 (現状 Slack のみ。Socket Mode 接続テスト + 暗号化保存) |
+| `npm run link:cli` | この checkout の CLI を `addroid` コマンドとしてリンク |
+| `addroid init` | 対話型初期セットアップ。初期設定済みなら既存 credential を保持して状態表示のみ |
+| `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
+| `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
+| `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
+| `addroid doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
+| `addroid up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
+| `addroid down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |
+| `addroid status` | config / プロセス / 直近 doctor 結果のスナップショット |
+| `addroid logs` | `~/.addroid/logs/{up,web,worker}.log` を tail |
+| `addroid validate` | ops repo の Ads / cron / project YAML を Zod 検証 |
+| `addroid plan` | Apply の dry-run シミュレーション (`--dry-run` 必須) |
+| `addroid activate <act_id>` | PAUSED → ACTIVE 移行 (Apply とは別の承認境界) |
+| `addroid cron <list/enable/disable/run/...>` | cron preset 管理 |
+| `addroid auth <provider>` | provider トークン登録 (`meta` / `github` / `llm` / `slack`) |
 | `npm run dev` | (任意) apps/web 単独を `127.0.0.1:3000` で起動 |
 | `npm run dev:worker` | (任意) apps/worker (pg-boss) 単独を起動 |
 | `npm run typecheck` | 全ワークスペースで `tsc --noEmit` |

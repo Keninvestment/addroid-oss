@@ -29,7 +29,10 @@ PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、�
 
 | コマンド | 用途 |
 |---|---|
-| `addroid init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI) と冪等 scaffold |
+| `addroid init` | 対話型初期セットアップ (`.env` / DB / `~/.addroid` / Meta Ads CLI / GitHub / LLM Provider)。初期設定済みなら状態表示のみ |
+| `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
+| `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
+| `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
 | `addroid doctor` | 実行環境 (Node / uv / Python / Meta Ads CLI / PostgreSQL / DATABASE_URL / config / secrets / ENCRYPTION_KEY) を診断 |
 | `addroid up` | Web UI (127.0.0.1:3000) と Worker (pg-boss) を併走起動 (リポジトリ内でのみ意味があります) |
 | `addroid down` | `addroid up` で起動したプロセスを停止 |
@@ -38,7 +41,7 @@ PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、�
 | `addroid plan` | ops repo から apply 案を simulate (dry-run 必須) |
 | `addroid activate` | PAUSED 状態の Meta オブジェクトを ACTIVE に遷移 |
 | `addroid cron` | cron プリセットの list / enable / disable / set / run / logs |
-| `addroid auth` | Provider 別のトークン登録 (`meta` OAuth / `slack` Socket Mode) |
+| `addroid auth` | Provider 別のトークン登録 (`meta` / `github` / `llm` / `slack`) |
 | `addroid accounts` | Meta Ad Account の取得・登録・デフォルト選択 |
 | `addroid version` | CLI バージョン |
 

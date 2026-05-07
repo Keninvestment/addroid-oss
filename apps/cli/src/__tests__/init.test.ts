@@ -187,6 +187,110 @@ test("init は DATABASE_URL の有無で database.urlRef を再評価する", as
   });
 });
 
+test("init は初期設定済みなら無印の対話再実行を状態表示だけで終了する", async () => {
+  await withTempHome(async (home) => {
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    process.env.DATABASE_URL = "postgresql://addroid:secret@localhost:5432/addroid";
+    process.env.ENCRYPTION_KEY = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=";
+    try {
+      {
+        const { code } = await capture(() => runInit([], { isTTY: false }));
+        assert.equal(code, 0);
+      }
+
+      const authCalls: string[][] = [];
+      const { code, out } = await capture(() =>
+        runInit([], {
+          isTTY: true,
+          prompt: async () => {
+            throw new Error("prompt should not run for already initialized default init");
+          },
+          confirm: async () => {
+            throw new Error("confirm should not run for already initialized default init");
+          },
+          runAuthCommand: async (args) => {
+            authCalls.push(args);
+            return 0;
+          },
+          readAuthState: async () => ({
+            checked: true,
+            metaConnected: true,
+            llmProviders: ["codex"],
+          }),
+        })
+      );
+
+      assert.equal(code, 0, out.stdout + out.stderr);
+      assert.match(out.stdout, /already initialized/);
+      assert.match(out.stdout, /Meta Token\s+: configured/);
+      assert.match(out.stdout, /LLM Provider\s+: codex/);
+      assert.deepEqual(authCalls, []);
+      assert.ok(fs.existsSync(path.join(home, "config.yaml")));
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
+test("init --reauth-llm は既存 LLM があっても provider 選択から Codex OAuth を再認証できる", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    process.env.DATABASE_URL = "postgresql://addroid:secret@localhost:5432/addroid";
+    process.env.ENCRYPTION_KEY = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=";
+    const authCalls: string[][] = [];
+    try {
+      const { code, out } = await capture(() =>
+        runInit(
+          [
+            "--interactive",
+            "--skip-deps",
+            "--skip-db-create",
+            "--skip-db-push",
+            "--env-file",
+            envFile,
+            "--reauth-llm",
+          ],
+          {
+            isTTY: true,
+            prompt: async (_question, defaultValue = "") => defaultValue,
+            selectOption: async () => "codex-oauth",
+            runAuthCommand: async (args) => {
+              authCalls.push(args);
+              return 0;
+            },
+            readAuthState: async () => ({
+              checked: true,
+              metaConnected: true,
+              llmProviders: ["codex"],
+            }),
+          }
+        )
+      );
+
+      assert.equal(code, 0, out.stdout + out.stderr);
+      assert.match(out.stdout, /Meta Token\s+: already configured/);
+      assert.match(out.stdout, /Codex config\s+:/);
+      assert.match(out.stdout, /LLM Provider setup:/);
+      assert.match(out.stdout, /configuring Codex OAuth/);
+      assert.deepEqual(authCalls, [["llm", "--provider", "codex"]]);
+      const envRaw = fs.readFileSync(envFile, "utf8");
+      assert.match(envRaw, /ADDROID_CODEX_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann/);
+      assert.match(envRaw, /ADDROID_CODEX_AUTHORIZATION_URL=https:\/\/auth\.openai\.com\/oauth\/authorize/);
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
 test("init --non-interactive --yes は .env と workspace 名を初期化する", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
@@ -254,7 +358,11 @@ test("init --interactive は prompt の回答で .env / config を作る", async
     const prevKey = process.env.ENCRYPTION_KEY;
     delete process.env.DATABASE_URL;
     delete process.env.ENCRYPTION_KEY;
-    const answers = ["Agency Ops", "postgresql://addroid@localhost:5432/addroid", "codex-oauth"];
+    const answers = [
+      "Agency Ops",
+      "postgresql://addroid@localhost:5432/addroid",
+      "codex-oauth",
+    ];
     const authCalls: string[][] = [];
     try {
       const { code, out } = await capture(() =>
@@ -275,6 +383,11 @@ test("init --interactive は prompt の回答で .env / config を作る", async
               authCalls.push(args);
               return 0;
             },
+            readAuthState: async () => ({
+              checked: true,
+              metaConnected: false,
+              llmProviders: [],
+            }),
             randomBytes: () => Buffer.alloc(32, 2),
           }
         )
@@ -284,6 +397,7 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       const envRaw = fs.readFileSync(envFile, "utf8");
       assert.match(envRaw, /DATABASE_URL=postgresql:\/\/addroid@localhost:5432\/addroid/);
       assert.match(envRaw, /ENCRYPTION_KEY=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=/);
+      assert.match(envRaw, /ADDROID_CODEX_CLIENT_ID=app_EMoamEEZ73f0CkXaXp7hrann/);
       const configRaw = fs.readFileSync(path.join(home, "config.yaml"), "utf8");
       assert.match(configRaw, /slug: agency-ops/);
       assert.match(configRaw, /displayName: Agency Ops/);
@@ -301,12 +415,68 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       assert.match(out.stdout, /LLM Provider setup:/);
       assert.doesNotMatch(out.stdout, /LLM Provider を初期設定しますか/);
       assert.match(out.stdout, /Ready\./);
+      assert.match(out.stdout, /addroid up/);
+      assert.doesNotMatch(out.stdout, /addroid auth meta/);
+      assert.doesNotMatch(out.stdout, /addroid accounts select/);
+      assert.doesNotMatch(out.stdout, /addroid auth llm --provider openai/);
+      assert.doesNotMatch(out.stdout, /addroid init --interactive --reauth-llm/);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = prevDb;
       if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
       else process.env.ENCRYPTION_KEY = prevKey;
     }
+  });
+});
+
+test("init --interactive は addroid コマンド未検出なら checkout CLI link を案内して実行する", async () => {
+  await withTempHome(async (home) => {
+    const envFile = path.join(home, ".env");
+    const calls: string[] = [];
+    const env = {
+      ...process.env,
+      ADDROID_HOME: home,
+      PATH: `${path.join(home, "node_modules", ".bin")}:/usr/bin:/bin`,
+    } as NodeJS.ProcessEnv;
+    delete env.DATABASE_URL;
+    delete env.ENCRYPTION_KEY;
+
+    const { code, out } = await capture(() =>
+      runInit(
+        [
+          "--interactive",
+          "--skip-deps",
+          "--skip-db-create",
+          "--skip-db-push",
+          "--mock-integrations",
+          "--env-file",
+          envFile,
+        ],
+        {
+          env,
+          isTTY: true,
+          prompt: async (_question, defaultValue = "") => defaultValue,
+          confirm: async () => true,
+          runCommand: (cmd, args) => {
+            calls.push([cmd, ...args].join(" "));
+            if (cmd === "sh" && args.join(" ").includes("command -v addroid")) {
+              return { status: 1, stdout: "", stderr: "" };
+            }
+            if (cmd === "npm" && args.join(" ") === "link --workspace apps/cli") {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+          randomBytes: () => Buffer.alloc(32, 9),
+        }
+      )
+    );
+
+    assert.equal(code, 0, out.stdout + out.stderr);
+    assert.ok(calls.includes("npm link --workspace apps/cli"));
+    assert.match(out.stdout, /CLI command setup:/);
+    assert.match(out.stdout, /addroid\s+: linked/);
+    assert.match(out.stdout, /addroid doctor/);
   });
 });
 
@@ -317,7 +487,11 @@ test("init --interactive はインスタンス名を空 Enter にすると addro
     const prevKey = process.env.ENCRYPTION_KEY;
     delete process.env.DATABASE_URL;
     delete process.env.ENCRYPTION_KEY;
-    const answers = ["", "postgresql://addroid@localhost:5432/addroid", "codex-oauth"];
+    const answers = [
+      "",
+      "postgresql://addroid@localhost:5432/addroid",
+      "codex-oauth",
+    ];
     try {
       const { code, out } = await capture(() =>
         runInit(
@@ -337,6 +511,11 @@ test("init --interactive はインスタンス名を空 Enter にすると addro
             },
             confirm: async () => false,
             runAuthCommand: async () => 0,
+            readAuthState: async () => ({
+              checked: true,
+              metaConnected: false,
+              llmProviders: [],
+            }),
             randomBytes: () => Buffer.alloc(32, 7),
           }
         )
@@ -395,6 +574,11 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
             }
             return 0;
           },
+          readAuthState: async () => ({
+            checked: true,
+            metaConnected: false,
+            llmProviders: [],
+          }),
           randomBytes: () => Buffer.alloc(32, 8),
         }
       )
@@ -407,7 +591,7 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
     assert.doesNotMatch(raw, /appIdCiphertext:/);
     assert.doesNotMatch(raw, /appSecretCiphertext:/);
     assert.match(out.stdout, /Meta Access Token setup:/);
-    assert.match(out.stdout, /addroid auth meta/);
+    assert.match(out.stdout, /Meta Token\s+: ok/);
     assert.equal(metaRuntimeEnv[0]?.databaseUrl, "postgresql://addroid:secret@localhost:5432/addroid");
     assert.ok(metaRuntimeEnv[0]?.encryptionKey);
     assert.doesNotMatch(out.stdout, /Valid OAuth Redirect URIs/);

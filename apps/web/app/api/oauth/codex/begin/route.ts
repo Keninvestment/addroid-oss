@@ -5,7 +5,7 @@
 //   - mock : `addroid.invalid` の URL は実在しないので、内部 callback に
 //            code=mock-<state> でループバックさせ、ローカルだけで OAuth が完結する。
 //   - codex: Codex / OpenAI 互換 OAuth provider の authorize URL に 302 する。
-//   - stub : OAuth client / 暗号化境界が未設定。`/ai` へ理由付きで戻す。
+//   - stub : runtime 設定 / 暗号化境界が未設定。`/ai` へ理由付きで戻す。
 
 import { NextResponse } from "next/server";
 import { getActiveCodexProviderSelection } from "../../../../../lib/codex-runtime";
@@ -20,7 +20,7 @@ export async function GET(request: Request) {
       return NextResponse.redirect(
         new URL(
           `/ai?oauth=error&reason=${encodeURIComponent(
-            "Codex OAuth client is not configured. Set ADDROID_LLM_MOCK=1, or set ADDROID_CODEX_CLIENT_ID / ADDROID_CODEX_AUTHORIZATION_URL / ADDROID_CODEX_TOKEN_URL / ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL and ENCRYPTION_KEY in the environment."
+            "Codex OAuth runtime is not configured. Set ADDROID_LLM_MOCK=1, or set ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL and ENCRYPTION_KEY in the environment. ADDROID_CODEX_CLIENT_ID / ADDROID_CODEX_AUTHORIZATION_URL / ADDROID_CODEX_TOKEN_URL are optional overrides."
           )}`,
           url
         ),

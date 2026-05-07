@@ -38,6 +38,11 @@ import { getCryptoBoundary, resolveWebBinding } from "@addroid/config";
 import type { CryptoBoundary } from "@addroid/config";
 import type { Prisma, PrismaClient } from "@addroid/db";
 
+const DEFAULT_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const DEFAULT_CODEX_AUTHORIZATION_URL = "https://auth.openai.com/oauth/authorize";
+const DEFAULT_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
+const DEFAULT_CODEX_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
+
 /**
  * Prisma の `oauth_tokens` テーブルを裏に持つ `LLMProviderTokenStore`。
  *
@@ -164,9 +169,8 @@ export function normalizeLLMProviderName(value: string | undefined | null): ApiK
  * `ADDROID_CODEX_CLIENT_SECRET` が与えられた場合は confidential client
  * (`tokenAuthMethod="client_secret_post"`) に切り替える。
  *
- * 必須キー (`clientId` / `authorizationUrl` / `tokenUrl`) のいずれかが未設定なら
- * `null` を返し、呼び出し側 (`selectLLMProviderForWorker`) は Stub に倒す
- * (fail-closed)。
+ * `clientId` / `authorizationUrl` / `tokenUrl` は Codex CLI 互換の内蔵既定値を使う。
+ * `ADDROID_CODEX_*` は自前 OAuth client を使う場合の override として扱う。
  *
  * `redirectUri` は web binding から既定値を組み立てる (Meta runtime と同じ規約)。
  * Worker 自身は redirect を消費しないが、`CodexOAuthClientConfig` の必須項目で
@@ -176,9 +180,10 @@ export function normalizeLLMProviderName(value: string | undefined | null): ApiK
 export function loadCodexLLMClientFromEnv(
   env: NodeJS.ProcessEnv = process.env
 ): CodexOAuthClientConfig | null {
-  const clientId = env.ADDROID_CODEX_CLIENT_ID?.trim();
-  const authorizationUrl = env.ADDROID_CODEX_AUTHORIZATION_URL?.trim();
-  const tokenUrl = env.ADDROID_CODEX_TOKEN_URL?.trim();
+  const clientId = env.ADDROID_CODEX_CLIENT_ID?.trim() || DEFAULT_CODEX_CLIENT_ID;
+  const authorizationUrl =
+    env.ADDROID_CODEX_AUTHORIZATION_URL?.trim() || DEFAULT_CODEX_AUTHORIZATION_URL;
+  const tokenUrl = env.ADDROID_CODEX_TOKEN_URL?.trim() || DEFAULT_CODEX_TOKEN_URL;
   if (!clientId || !authorizationUrl || !tokenUrl) return null;
 
   const binding = resolveWebBinding(env);
@@ -205,9 +210,14 @@ export function loadCodexLLMClientFromEnv(
     authorizationUrl,
     tokenUrl,
     tokenAuthMethod,
+    extraAuthorizeParams: {
+      id_token_add_organizations: "true",
+      codex_cli_simplified_flow: "true",
+      originator: env.ADDROID_CODEX_ORIGINATOR?.trim() || "addroid",
+    },
   };
   if (clientSecret) out.clientSecret = clientSecret;
-  if (scopes && scopes.length > 0) out.scopes = scopes;
+  out.scopes = scopes && scopes.length > 0 ? scopes : Array.from(DEFAULT_CODEX_SCOPES);
   return out;
 }
 

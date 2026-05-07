@@ -146,10 +146,7 @@ export default async function AiPage() {
   const env = process.env;
   const llmMockEnabled = env.ADDROID_LLM_MOCK === "1";
   const codexClientConfigured = Boolean(
-    env.ADDROID_CODEX_CLIENT_ID &&
-      env.ADDROID_CODEX_AUTHORIZATION_URL &&
-      env.ADDROID_CODEX_TOKEN_URL &&
-      env.ADDROID_CODEX_CHAT_COMPLETIONS_URL &&
+    env.ADDROID_CODEX_CHAT_COMPLETIONS_URL &&
       env.ADDROID_CODEX_DEFAULT_MODEL
   );
   const encryptionKeySet = Boolean((env.ENCRYPTION_KEY ?? "").trim());
@@ -183,8 +180,8 @@ export default async function AiPage() {
       : activeChoice === "codex" && codexConnected
         ? `Codex OAuth 連携済み (${providers.filter((p) => p.provider === "codex").length} 件)。`
         : activeChoice === "codex"
-          ? "Codex OAuth client は設定済みですが、まだ接続されていません。"
-          : "LLM provider 未設定。ADDROID_LLM_MOCK=1 か ADDROID_CODEX_* / ENCRYPTION_KEY を環境変数で設定してください。";
+          ? "Codex OAuth の runtime 設定はありますが、まだ接続されていません。"
+          : "LLM provider 未設定。ADDROID_LLM_MOCK=1 か ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL / ENCRYPTION_KEY を設定してください。";
 
   const setupItems = [
     { label: "Active provider choice", value: <InlineCode>{activeChoice}</InlineCode> },
@@ -193,7 +190,7 @@ export default async function AiPage() {
       value: llmMockEnabled ? "1 (mock 有効)" : "未設定",
     },
     {
-      label: "Codex OAuth client",
+      label: "Codex OAuth runtime",
       value: codexClientConfigured ? "設定済み" : "未設定",
     },
     {

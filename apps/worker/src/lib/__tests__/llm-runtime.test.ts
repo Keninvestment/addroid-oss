@@ -415,21 +415,28 @@ test("loadCodexLLMClientFromEnv: REDIRECT_URI env が override される", () =>
   assert.equal(cfg!.redirectUri, "http://127.0.0.1:9999/cb");
 });
 
-test("loadCodexLLMClientFromEnv: 必須キーが欠けると null を返す (fail-closed)", () => {
-  const baseline = fullCodexEnv();
-  for (const key of [
-    "ADDROID_CODEX_CLIENT_ID",
-    "ADDROID_CODEX_AUTHORIZATION_URL",
-    "ADDROID_CODEX_TOKEN_URL",
-  ] as const) {
-    const env = { ...baseline };
-    delete env[key];
-    assert.equal(
-      loadCodexLLMClientFromEnv(env),
-      null,
-      `expected null when ${key} is missing`
-    );
-  }
+test("loadCodexLLMClientFromEnv: Codex OAuth の内蔵 client config を使える", () => {
+  const env = fullCodexEnv();
+  delete env.ADDROID_CODEX_CLIENT_ID;
+  delete env.ADDROID_CODEX_AUTHORIZATION_URL;
+  delete env.ADDROID_CODEX_TOKEN_URL;
+  delete env.ADDROID_CODEX_SCOPES;
+  const cfg = loadCodexLLMClientFromEnv(env);
+  assert.ok(cfg);
+  assert.equal(cfg!.clientId, "app_EMoamEEZ73f0CkXaXp7hrann");
+  assert.equal(cfg!.authorizationUrl, "https://auth.openai.com/oauth/authorize");
+  assert.equal(cfg!.tokenUrl, "https://auth.openai.com/oauth/token");
+  assert.deepEqual(Array.from(cfg!.scopes ?? []), [
+    "openid",
+    "profile",
+    "email",
+    "offline_access",
+  ]);
+  assert.deepEqual(cfg!.extraAuthorizeParams, {
+    id_token_add_organizations: "true",
+    codex_cli_simplified_flow: "true",
+    originator: "addroid",
+  });
 });
 
 // ---------------------------------------------------------------------
@@ -474,13 +481,15 @@ test("selectLLMProviderForWorker: DEFAULT_MODEL 未設定 → Stub", async () =>
   assert.match(sel.reason, /defaultModel/);
 });
 
-test("selectLLMProviderForWorker: CODEX env 不足 → Stub (codexClient 欠落)", async () => {
+test("selectLLMProviderForWorker: CODEX OAuth client env なしでも内蔵設定で CodexLLMProvider", async () => {
   const { client } = makeFakePrisma();
   const env = fullCodexEnv();
   delete env.ADDROID_CODEX_CLIENT_ID;
+  delete env.ADDROID_CODEX_AUTHORIZATION_URL;
+  delete env.ADDROID_CODEX_TOKEN_URL;
   const sel = await selectLLMProviderForWorker(env, { prisma: client });
-  assert.equal(sel.choice, "stub");
-  assert.match(sel.reason, /codexClient/);
+  assert.equal(sel.choice, "codex");
+  assert.ok(sel.provider instanceof CodexLLMProvider);
 });
 
 test("selectLLMProviderForWorker: ADDROID_LLM_MOCK=1 は Codex env が揃っていても Mock を優先", async () => {

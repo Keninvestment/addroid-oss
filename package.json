@@ -42,6 +42,7 @@
     "db:push": "prisma db push --schema prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema prisma/schema.prisma",
     "addroid": "npm run --workspace apps/cli start --",
+    "link:cli": "npm link --workspace apps/cli",
     "package:cli": "npm run build --workspace apps/cli",
     "package:smoke": "npm run package:smoke --workspace apps/cli",
     "publish:dry-run": "npm publish --workspace apps/cli --dry-run --access public",

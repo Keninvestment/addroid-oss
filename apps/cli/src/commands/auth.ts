@@ -30,7 +30,10 @@ import readline from "node:readline/promises";
 import {
   buildSlackInstallationMetadata,
   CryptoNotConfiguredError,
+  defaultAddroidConfig,
   getCryptoBoundary,
+  readAddroidConfig,
+  readLocalSecrets,
   resolveWebBinding,
   postSlackMessage,
   redactSecretTail,
@@ -64,10 +67,25 @@ import {
   type LLMConnectionMeta,
 } from "@addroid/llm-provider";
 import {
+  ADDROID_REQUIRED_SCOPES,
+  MockGithubAdapter,
+  OctokitGithubAdapter,
+  createDefaultGithubApiClient,
+  pollDeviceToken,
+  requestDeviceCode,
+  type ExchangedToken,
+} from "@addroid/github-adapter";
+import {
   buildPrismaMetaAdapterSelection,
   createPrismaMetaTokenStore,
   loadMetaOAuthClientFromEnv,
 } from "../../../worker/src/lib/meta-runtime.js";
+import {
+  createPrismaOAuthTokenStore,
+} from "../../../worker/src/lib/github-adapter-wiring.js";
+import {
+  persistOpsRepoBootstrap,
+} from "../../../worker/src/lib/prisma-stores.js";
 import {
   createPrismaLLMProviderTokenStore,
   loadCodexLLMClientFromEnv,
@@ -80,6 +98,10 @@ import {
   type MetaAccountsPrisma,
   type RegisteredAccount,
 } from "../lib/meta-accounts.js";
+
+const DEFAULT_CODEX_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_CODEX_MODEL = "gpt-4.1";
+const DEFAULT_CODEX_CLI_REDIRECT_URI = "http://localhost:1455/auth/callback";
 
 const TEST_MESSAGE_TEXT =
   "AdDroid 接続テスト — Socket Mode が確立しました。本メッセージは `addroid auth slack` から送信されています。";
@@ -112,10 +134,20 @@ interface ParsedLlmArgs {
   timeoutMs: number;
 }
 
+interface ParsedGithubArgs {
+  kind: "github";
+  asJson: boolean;
+  openBrowser: boolean;
+  timeoutMs: number;
+  clientId?: string;
+  bootstrap: boolean;
+}
+
 type ParsedAction =
   | ParsedSlackArgs
   | ParsedMetaArgs
   | ParsedLlmArgs
+  | ParsedGithubArgs
   | { kind: "help" }
   | { kind: "error"; code: number; stderr?: string; stdoutHelp?: boolean };
 
@@ -147,6 +179,10 @@ export interface SlackAuthRunOptions {
   metaFetch?: typeof fetch;
   /** Codex OAuth token exchange 用 fetch 注入。テストでモックする。 */
   llmFetch?: typeof fetch;
+  /** GitHub OAuth Device Flow 用 fetch 注入。テストでモックする。 */
+  githubFetch?: typeof fetch;
+  /** GitHub device flow の polling sleep 注入。 */
+  githubSleep?: (ms: number) => Promise<void>;
 }
 
 export async function runAuthCommand(
@@ -168,6 +204,9 @@ export async function runAuthCommand(
   }
   if (parsed.kind === "llm") {
     return await runAuthLlm(parsed, opts);
+  }
+  if (parsed.kind === "github") {
+    return await runAuthGithub(parsed, opts);
   }
   return await runAuthSlack(parsed, opts);
 }
@@ -352,11 +391,72 @@ function parseArgs(args: string[]): ParsedAction {
     };
   }
 
+  if (provider === "github") {
+    let asJson = false;
+    let openBrowser = true;
+    let timeoutMs = 180_000;
+    let clientId: string | undefined;
+    let bootstrap = true;
+    for (let i = 0; i < rest.length; i += 1) {
+      const a = rest[i]!;
+      if (a === "--help" || a === "-h") return { kind: "help" };
+      if (a === "--json") asJson = true;
+      else if (a === "--no-open") openBrowser = false;
+      else if (a === "--no-bootstrap") bootstrap = false;
+      else if (a === "--bootstrap") bootstrap = true;
+      else if (a === "--client-id") {
+        const next = rest[i + 1];
+        if (!next) return optionMissing("auth github", a);
+        clientId = next;
+        i += 1;
+      } else if (a.startsWith("--client-id=")) {
+        clientId = a.slice("--client-id=".length);
+      } else if (a === "--timeout-ms") {
+        const next = rest[i + 1];
+        if (!next) return optionMissing("auth github", a);
+        timeoutMs = Number(next);
+        i += 1;
+      } else if (a.startsWith("--timeout-ms=")) {
+        timeoutMs = Number(a.slice("--timeout-ms=".length));
+      } else if (a.startsWith("--")) {
+        return {
+          kind: "error",
+          code: 2,
+          stderr: `[addroid auth github] 未知のオプション: ${a}\n`,
+          stdoutHelp: true,
+        };
+      } else {
+        return {
+          kind: "error",
+          code: 2,
+          stderr: `[addroid auth github] 余分な引数: ${a}\n`,
+          stdoutHelp: true,
+        };
+      }
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 10_000) {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: "[addroid auth github] --timeout-ms は 10000 以上のミリ秒で指定してください\n",
+        stdoutHelp: true,
+      };
+    }
+    return {
+      kind: "github",
+      asJson,
+      openBrowser,
+      timeoutMs,
+      bootstrap,
+      ...(clientId ? { clientId } : {}),
+    };
+  }
+
   if (provider !== "slack") {
     return {
       kind: "error",
       code: 2,
-      stderr: `[addroid auth] 未対応のプロバイダ: ${provider}\n  対応プロバイダ: meta, slack, llm\n`,
+      stderr: `[addroid auth] 未対応のプロバイダ: ${provider}\n  対応プロバイダ: meta, github, slack, llm\n`,
       stdoutHelp: true,
     };
   }
@@ -618,8 +718,10 @@ async function runAuthLlmCodexOAuth(
     ADDROID_CODEX_OAUTH_REDIRECT_URI: redirectUri.toString(),
   };
   const codexClient = loadCodexLLMClientFromEnv(env);
-  const chatCompletionsUrl = env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || null;
-  const defaultModel = parsed.model?.trim() || env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || null;
+  const chatCompletionsUrl =
+    env.ADDROID_CODEX_CHAT_COMPLETIONS_URL?.trim() || DEFAULT_CODEX_CHAT_COMPLETIONS_URL;
+  const defaultModel =
+    parsed.model?.trim() || env.ADDROID_CODEX_DEFAULT_MODEL?.trim() || DEFAULT_CODEX_MODEL;
   const tokenStore = createPrismaLLMProviderTokenStore(opts.prisma);
   const selection = selectLLMProvider({
     env,
@@ -636,7 +738,7 @@ async function runAuthLlmCodexOAuth(
     process.stderr.write(
       "[addroid auth llm] Codex OAuth が未設定です。\n" +
         `  reason: ${selection.reason}\n` +
-        "  .env に ADDROID_CODEX_CLIENT_ID / ADDROID_CODEX_AUTHORIZATION_URL / ADDROID_CODEX_TOKEN_URL / ADDROID_CODEX_CHAT_COMPLETIONS_URL / ADDROID_CODEX_DEFAULT_MODEL を設定してください。\n"
+        "  Codex OAuth の内蔵設定を使えませんでした。ADDROID_CODEX_* の上書き値を確認してください。\n"
     );
     return 2;
   }
@@ -715,6 +817,324 @@ async function runAuthLlmCodexOAuth(
     process.stdout.write("  token         : encrypted (oauth_tokens.accessTokenCiphertext)\n");
   }
   return 0;
+}
+
+async function runAuthGithub(
+  parsed: ParsedGithubArgs,
+  opts: SlackAuthRunOptions = {}
+): Promise<number> {
+  if (!process.env.DATABASE_URL) {
+    process.stderr.write(
+      "[addroid auth github] DATABASE_URL が設定されていません。先に `addroid init` を実行してください。\n"
+    );
+    return 2;
+  }
+
+  let crypto: ReturnType<typeof getCryptoBoundary>;
+  try {
+    crypto = getCryptoBoundary(process.env);
+  } catch (err) {
+    const message =
+      err instanceof CryptoNotConfiguredError
+        ? err.message
+        : `ENCRYPTION_KEY の初期化に失敗しました: ${(err as Error).message}`;
+    process.stderr.write(`[addroid auth github] ${message}\n`);
+    return 2;
+  }
+
+  const { prisma } = (opts.prismaOverride
+    ? { prisma: opts.prismaOverride as { $disconnect: () => Promise<void> } }
+    : await import("@addroid/db")) as {
+    prisma: { $disconnect: () => Promise<void> };
+  };
+
+  try {
+    const tokenStore = createPrismaOAuthTokenStore(prisma as never);
+    const fetchImpl = opts.githubFetch ?? fetch;
+    let connection: {
+      accountIdentifier: string;
+      scopes: string[];
+      connectedAt: Date;
+      expiresAt: Date | null;
+    };
+    let adapter: MockGithubAdapter | OctokitGithubAdapter;
+
+    if (process.env.ADDROID_GITHUB_OAUTH_MOCK === "1") {
+      const mock = new MockGithubAdapter({ tokenStore });
+      const begin = await mock.beginOAuth();
+      const connected = await mock.completeOAuth({
+        code: `mock-${begin.state}`,
+        state: begin.state,
+      });
+      connection = {
+        accountIdentifier: connected.accountIdentifier,
+        scopes: connected.scopes,
+        connectedAt: new Date(connected.connectedAt),
+        expiresAt: null,
+      };
+      adapter = mock;
+    } else {
+      const clientId = await resolveGithubClientId(parsed.clientId);
+      if (!clientId) {
+        process.stderr.write(
+          "[addroid auth github] GitHub OAuth client id が未設定です。\n" +
+            "  `~/.addroid/secrets.local.yaml` の github.oauth.clientId、または ADDROID_GITHUB_CLIENT_ID を設定してください。\n" +
+            "  Web UI OAuth Code Flow も維持する場合は github.oauth.clientSecret も設定してください。\n"
+        );
+        return 2;
+      }
+
+      const device = await requestDeviceCode({
+        clientId,
+        scopes: ADDROID_REQUIRED_SCOPES,
+        fetchImpl,
+      });
+      if (!parsed.asJson) {
+        process.stdout.write("[addroid auth github]\n\n");
+        process.stdout.write("  auth          : device flow\n");
+        process.stdout.write(`  URL           : ${device.verificationUri}\n`);
+        process.stdout.write(`  code          : ${device.userCode}\n`);
+        process.stdout.write("  ブラウザで GitHub 認証を完了してください。\n\n");
+      }
+      if (parsed.openBrowser) openUrl(device.verificationUri);
+
+      const exchanged = await waitForGithubDeviceToken({
+        clientId,
+        deviceCode: device.deviceCode,
+        intervalSeconds: device.intervalSeconds,
+        timeoutMs: Math.min(parsed.timeoutMs, device.expiresInSeconds * 1000),
+        fetchImpl,
+        sleep: opts.githubSleep,
+      });
+      const api = await createDefaultGithubApiClient(exchanged.accessToken);
+      const login = await api.getAuthenticatedUserLogin();
+      const connectedAt = opts.now?.() ?? new Date();
+      const expiresAt = exchanged.expiresInSeconds
+        ? new Date(connectedAt.getTime() + exchanged.expiresInSeconds * 1000)
+        : null;
+      const scopes = exchanged.grantedScopes.length
+        ? exchanged.grantedScopes
+        : [...ADDROID_REQUIRED_SCOPES];
+      await tokenStore.saveOAuthToken({
+        provider: "github",
+        accountIdentifier: login,
+        scopes,
+        accessTokenCiphertext: crypto.encrypt(exchanged.accessToken),
+        ...(exchanged.refreshToken
+          ? { refreshTokenCiphertext: crypto.encrypt(exchanged.refreshToken) }
+          : {}),
+        ...(expiresAt ? { expiresAt } : {}),
+        connectedAt,
+      });
+      connection = { accountIdentifier: login, scopes, connectedAt, expiresAt };
+      adapter = new OctokitGithubAdapter({
+        oauthClient: {
+          clientId,
+          clientSecret: "unused-by-device-flow",
+          redirectUri: "http://127.0.0.1/unused",
+        },
+        tokenStore,
+        crypto,
+        apiClientFactory: (accessToken) => lazyGithubApiClient(accessToken),
+      });
+    }
+
+    const bootstrap = parsed.bootstrap
+      ? await bootstrapOpsRepoFromCli(prisma as never, adapter)
+      : { status: "skipped" as const, reason: "--no-bootstrap" };
+
+    if (parsed.asJson) {
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ok: true,
+            provider: "github",
+            accountIdentifier: connection.accountIdentifier,
+            scopes: connection.scopes,
+            connectedAt: connection.connectedAt.toISOString(),
+            expiresAt: connection.expiresAt?.toISOString() ?? null,
+            bootstrap,
+          },
+          null,
+          2
+        )}\n`
+      );
+    } else {
+      process.stdout.write("[addroid auth github]\n\n");
+      process.stdout.write(`  connected     : ${connection.accountIdentifier}\n`);
+      process.stdout.write(`  scopes        : ${connection.scopes.join(", ") || "none"}\n`);
+      process.stdout.write("  token         : encrypted (oauth_tokens.accessTokenCiphertext)\n");
+      if (bootstrap.status === "created") {
+        process.stdout.write(`  ops repo      : ${bootstrap.owner}/${bootstrap.name}\n`);
+        process.stdout.write(`  default branch: ${bootstrap.defaultBranch}\n`);
+      } else {
+        process.stdout.write(`  ops repo      : ${bootstrap.status} (${bootstrap.reason})\n`);
+      }
+    }
+    return 0;
+  } catch (err) {
+    process.stderr.write(`[addroid auth github] ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    if (!opts.prismaOverride) {
+      await prisma.$disconnect().catch(() => undefined);
+    }
+  }
+}
+
+async function resolveGithubClientId(explicit?: string): Promise<string | null> {
+  const fromArgs = explicit?.trim();
+  if (fromArgs) return fromArgs;
+  const fromEnv =
+    process.env.ADDROID_GITHUB_CLIENT_ID?.trim() ||
+    process.env.ADDROID_GITHUB_OAUTH_CLIENT_ID?.trim();
+  if (fromEnv) return fromEnv;
+  const secrets = await readLocalSecrets().catch(() => null);
+  return secrets?.github?.oauth?.clientId?.trim() || null;
+}
+
+async function waitForGithubDeviceToken(opts: {
+  clientId: string;
+  deviceCode: string;
+  intervalSeconds: number;
+  timeoutMs: number;
+  fetchImpl: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<ExchangedToken> {
+  const started = Date.now();
+  let intervalMs = Math.max(1, opts.intervalSeconds) * 1000;
+  const sleep =
+    opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  while (Date.now() - started < opts.timeoutMs) {
+    await sleep(intervalMs);
+    const result = await pollDeviceToken({
+      clientId: opts.clientId,
+      deviceCode: opts.deviceCode,
+      fetchImpl: opts.fetchImpl,
+    });
+    if ("accessToken" in result) return result;
+    if (result.slowDownSeconds) intervalMs += result.slowDownSeconds * 1000;
+  }
+  throw new Error("Timed out waiting for GitHub device authorization.");
+}
+
+function lazyGithubApiClient(accessToken: string) {
+  let cached: Awaited<ReturnType<typeof createDefaultGithubApiClient>> | null = null;
+  const resolve = async () => {
+    cached ??= await createDefaultGithubApiClient(accessToken);
+    return cached;
+  };
+  return {
+    async getAuthenticatedUserLogin() {
+      return (await resolve()).getAuthenticatedUserLogin();
+    },
+    async createUserRepo(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["createUserRepo"]>[0]
+    ) {
+      return (await resolve()).createUserRepo(input);
+    },
+    async commitTemplateFiles(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["commitTemplateFiles"]>[0]
+    ) {
+      return (await resolve()).commitTemplateFiles(input);
+    },
+    async setBranchProtection(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["setBranchProtection"]>[0]
+    ) {
+      return (await resolve()).setBranchProtection(input);
+    },
+    async listPullRequests(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["listPullRequests"]>[0]
+    ) {
+      return (await resolve()).listPullRequests(input);
+    },
+    async createPullRequest(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["createPullRequest"]>[0]
+    ) {
+      return (await resolve()).createPullRequest(input);
+    },
+    async mergePullRequest(
+      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["mergePullRequest"]>[0]
+    ) {
+      return (await resolve()).mergePullRequest(input);
+    },
+  };
+}
+
+async function bootstrapOpsRepoFromCli(
+  prisma: {
+    workspace: {
+      findUnique(args: unknown): Promise<{
+        opsRepoId?: string | null;
+        opsRepo?: { owner: string; name: string } | null;
+      } | null>;
+    };
+    adAccount: {
+      findFirst(args: unknown): Promise<{ key: string; displayName: string } | null>;
+    };
+  },
+  adapter: MockGithubAdapter | OctokitGithubAdapter
+): Promise<
+  | {
+      status: "created";
+      owner: string;
+      name: string;
+      defaultBranch: string;
+      filesCommitted: number;
+      branchProtectionApplied: boolean;
+    }
+  | { status: "skipped"; reason: string }
+> {
+  const workspace = await ensureCliWorkspace(prisma as never);
+  const existing = await prisma.workspace.findUnique({
+    where: { id: workspace.id },
+    select: {
+      opsRepoId: true,
+      opsRepo: { select: { owner: true, name: true } },
+    },
+  });
+  if (existing?.opsRepoId) {
+    return {
+      status: "skipped",
+      reason: existing.opsRepo
+        ? `${existing.opsRepo.owner}/${existing.opsRepo.name} already linked`
+        : "ops repo already linked",
+    };
+  }
+  const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();
+  const desiredName = config.github?.opsRepo?.name ?? `addroid-ops-${config.workspace.slug}`;
+  const defaultBranch = config.github?.opsRepo?.defaultBranch ?? "main";
+  const account = await prisma.adAccount.findFirst({
+    where: { active: true },
+    orderBy: [{ createdAt: "asc" }],
+    select: { key: true, displayName: true },
+  });
+  const result = await adapter.bootstrapOpsRepo({
+    workspaceSlug: config.workspace.slug,
+    workspaceDisplayName: config.workspace.displayName,
+    initialAccountKey: account?.key ?? "default",
+    initialAccountDisplayName: account?.displayName ?? "Default Account",
+    desiredName,
+    defaultBranch,
+    visibility: "private",
+  });
+  await persistOpsRepoBootstrap(prisma as never, {
+    workspaceId: workspace.id,
+    owner: result.owner,
+    name: result.name,
+    defaultBranch: result.defaultBranch,
+    bootstrappedAt: new Date(result.bootstrappedAt),
+    filesCommitted: result.filesCommitted,
+    branchProtectionApplied: result.branchProtectionApplied,
+  });
+  return {
+    status: "created",
+    owner: result.owner,
+    name: result.name,
+    defaultBranch: result.defaultBranch,
+    filesCommitted: result.filesCommitted,
+    branchProtectionApplied: result.branchProtectionApplied,
+  };
 }
 
 function looksLikeApiKey(provider: ApiKeyLLMProviderName, apiKey: string): boolean {
@@ -1185,13 +1605,9 @@ function waitForMetaCallback(opts: {
 
 function resolveCodexCliRedirectUri(): URL | null {
   const explicit = process.env.ADDROID_CODEX_OAUTH_REDIRECT_URI;
-  const binding = resolveWebBinding(process.env);
   let uri: URL;
   try {
-    uri = new URL(
-      explicit ??
-        `http://${binding.hostname}:${binding.port}/api/oauth/codex/callback`
-    );
+    uri = new URL(explicit ?? DEFAULT_CODEX_CLI_REDIRECT_URI);
   } catch (err) {
     process.stderr.write(
       `[addroid auth llm] Codex redirect URI が不正です: ${(err as Error).message}\n`
@@ -1203,13 +1619,13 @@ function resolveCodexCliRedirectUri(): URL | null {
   if (!localHosts.has(hostname)) {
     process.stderr.write(
       "[addroid auth llm] CLI Codex OAuth callback は localhost の redirect URI のみ利用できます。\n" +
-        "  ADDROID_CODEX_OAUTH_REDIRECT_URI を http://127.0.0.1:<port>/api/oauth/codex/callback に設定してください。\n"
+        "  ADDROID_CODEX_OAUTH_REDIRECT_URI を http://localhost:<port>/auth/callback に設定してください。\n"
     );
     return null;
   }
-  if (uri.pathname !== "/api/oauth/codex/callback") {
+  if (uri.pathname !== "/auth/callback" && uri.pathname !== "/api/oauth/codex/callback") {
     process.stderr.write(
-      "[addroid auth llm] Codex redirect URI の path は /api/oauth/codex/callback にしてください。\n"
+      "[addroid auth llm] Codex redirect URI の path は /auth/callback にしてください。\n"
     );
     return null;
   }
@@ -1701,6 +2117,7 @@ function printHelp() {
       "Usage:",
       "  addroid auth meta [--token <access_token>] [--no-select-default] [--json]",
       "  addroid auth meta --oauth [--no-open] [--no-select-default] [--timeout-ms <ms>] [--json]",
+      "  addroid auth github [--client-id <id>] [--no-open] [--no-bootstrap] [--timeout-ms <ms>] [--json]",
       "  addroid auth slack [--xoxb <token>] [--xapp <token>] [--channel <id>] [--json]",
       "  addroid auth llm --provider <openai|anthropic> [--api-key <key>] [--model <model>] [--base-url <url>] [--json]",
       "  addroid auth llm --provider codex [--no-open] [--timeout-ms <ms>] [--json]",
@@ -1710,9 +2127,11 @@ function printHelp() {
       "  --token <token>    Meta Access Token。未指定時は非表示入力",
       "  --access-token <token> --token と同じ",
       "  --oauth            上級者向け: Meta OAuth callback 経路を使う",
-      "  --no-open          Meta OAuth URL をブラウザで自動オープンしない (--oauth 時のみ)",
+      "  --client-id <id>   GitHub OAuth App client id (未指定時は secrets.local.yaml / env)",
+      "  --no-open          OAuth URL をブラウザで自動オープンしない",
+      "  --no-bootstrap     GitHub 認証後の ops repository 自動作成をスキップ",
       "  --no-select-default Meta Ad Account 既定選択をスキップ",
-      "  --timeout-ms <ms>  OAuth callback 待機時間 (既定 180000, Meta --oauth / Codex OAuth 時)",
+      "  --timeout-ms <ms>  OAuth callback / device flow 待機時間 (既定 180000)",
       "  --xoxb <token>     Slack Bot User OAuth Token (xoxb-*)",
       "  --xapp <token>     Slack App-Level Token (xapp-*, Socket Mode 用)",
       "  --channel <id>     通知先チャンネル ID (Cxxxx / Gxxxx / Dxxxx)",
@@ -1726,12 +2145,15 @@ function printHelp() {
       "",
       "Environment fallbacks (フラグ未指定時に参照):",
       "  SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_NOTIFICATION_CHANNEL_ID",
+      "  ADDROID_GITHUB_CLIENT_ID, ADDROID_GITHUB_OAUTH_CLIENT_ID",
       "  OPENAI_API_KEY, ANTHROPIC_API_KEY, ADDROID_LLM_PROVIDER",
       "",
       "Notes:",
       "  - Meta の標準経路は Access Token 入力です。HTTPS callback URL は不要です。",
       "  - token 入力後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
       "  - OAuth callback は `addroid auth meta --oauth` の上級者向け経路として残しています。",
+      "  - GitHub は CLI では Device Flow、Web UI では既存の OAuth Code Flow を使います。どちらも provider=github として暗号化保存します。",
+      "  - GitHub 認証後、未連携なら private ops repository を作成し workspace に紐付けます。",
       "  - Codex OAuth は `addroid auth llm --provider codex` でブラウザ認証を開始し、localhost callback または callback URL 貼り付けで完了します。",
       "  - Slack 連携は完全に任意です。本コマンドを実行しない限り AdDroid は Slack 通信を行いません。",
       "  - Socket Mode 専用。public な webhook URL や request URL は登録しません。",

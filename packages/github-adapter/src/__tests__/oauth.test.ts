@@ -3,11 +3,14 @@ import assert from "node:assert/strict";
 import {
   ADDROID_REQUIRED_SCOPES,
   GITHUB_AUTHORIZE_URL,
+  GITHUB_DEVICE_CODE_URL,
   GITHUB_TOKEN_URL,
   OAuthExchangeError,
   buildAuthorizationUrl,
   exchangeCodeForToken,
   generateOAuthState,
+  pollDeviceToken,
+  requestDeviceCode,
   type OAuthClientConfig,
 } from "../index.js";
 
@@ -118,4 +121,85 @@ test("exchangeCodeForToken rejects when GitHub omits access_token", async () => 
     () => exchangeCodeForToken({ client: CLIENT, code: "x", fetchImpl: fakeFetch }),
     /did not return access_token/
   );
+});
+
+test("requestDeviceCode posts required scope and normalizes GitHub response", async () => {
+  let capturedUrl: string | undefined;
+  let capturedInit: RequestInit | undefined;
+  const fakeFetch: typeof fetch = async (url, init) => {
+    capturedUrl = String(url);
+    capturedInit = init;
+    return new Response(
+      JSON.stringify({
+        device_code: "device-123",
+        user_code: "ABCD-1234",
+        verification_uri: "https://github.com/login/device",
+        expires_in: 900,
+        interval: 7,
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const device = await requestDeviceCode({
+    clientId: CLIENT.clientId,
+    fetchImpl: fakeFetch,
+  });
+  assert.equal(capturedUrl, GITHUB_DEVICE_CODE_URL);
+  assert.equal(capturedInit?.method, "POST");
+  const body = new URLSearchParams(String(capturedInit?.body ?? ""));
+  assert.equal(body.get("client_id"), CLIENT.clientId);
+  assert.equal(body.get("scope"), ADDROID_REQUIRED_SCOPES.join(" "));
+  assert.deepEqual(device, {
+    deviceCode: "device-123",
+    userCode: "ABCD-1234",
+    verificationUri: "https://github.com/login/device",
+    expiresInSeconds: 900,
+    intervalSeconds: 7,
+  });
+});
+
+test("pollDeviceToken returns pending while GitHub authorization is incomplete", async () => {
+  const fakeFetch: typeof fetch = async () =>
+    new Response(JSON.stringify({ error: "authorization_pending" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  const result = await pollDeviceToken({
+    clientId: CLIENT.clientId,
+    deviceCode: "device-123",
+    fetchImpl: fakeFetch,
+  });
+  assert.deepEqual(result, { pending: true });
+});
+
+test("pollDeviceToken exchanges device code for access token", async () => {
+  let capturedBody = "";
+  const fakeFetch: typeof fetch = async (_url, init) => {
+    capturedBody = String(init?.body ?? "");
+    return new Response(
+      JSON.stringify({
+        access_token: "gho_device",
+        scope: "repo,read:user",
+        token_type: "bearer",
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+  const result = await pollDeviceToken({
+    clientId: CLIENT.clientId,
+    deviceCode: "device-123",
+    fetchImpl: fakeFetch,
+  });
+  const body = new URLSearchParams(capturedBody);
+  assert.equal(body.get("client_id"), CLIENT.clientId);
+  assert.equal(body.get("device_code"), "device-123");
+  assert.equal(
+    body.get("grant_type"),
+    "urn:ietf:params:oauth:grant-type:device_code"
+  );
+  assert.deepEqual(result, {
+    accessToken: "gho_device",
+    grantedScopes: ["repo", "read:user"],
+    tokenType: "bearer",
+  });
 });
