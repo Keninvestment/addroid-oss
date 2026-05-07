@@ -64,6 +64,7 @@ test("bin/addroid.cjs は実在し、--help を実行すると Usage を出し�
     "activate",
     "cron",
     "auth",
+    "chat",
   ]) {
     assert.match(stdout, new RegExp(`\\b${sub}\\b`), `Usage missing: ${sub}`);
   }

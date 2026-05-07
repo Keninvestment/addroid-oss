@@ -222,6 +222,8 @@ Codex OAuth を選ぶ場合、`init` は OpenAI Codex 互換の public OAuth cli
 既定 endpoint / model を `.env` に補完します。client id の入力は不要です。
 選択後はブラウザが自動で開き、認証完了後に CLI が続行します。localhost callback を
 自動検出できない場合は、ブラウザの callback URL 全体を CLI に貼り付ければ続行できます。
+初期セットアップ完了後、実 TTY ではそのまま `addroid chat` が起動します。
+自動起動したくない場合は `addroid init --interactive --no-chat` を使います。
 
 初期設定済みの credential を更新したい場合は、明示的に再認証します。
 
@@ -335,6 +337,7 @@ addroid/
 | `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
 | `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
 | `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
+| `addroid chat` | init 済み LLM credential を使う対話型 command chat |
 | `addroid doctor` | uv / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ / DATABASE_URL / ENCRYPTION_KEY / config を診断 |
 | `addroid up` | web (`127.0.0.1:3000`) と worker (pg-boss) を 1 監督プロセスで起動 |
 | `addroid down` | `addroid up` で起動した web/worker を停止 (pid file 経由) |

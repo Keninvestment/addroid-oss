@@ -105,6 +105,7 @@ interface InitOptions {
   reauthMeta: boolean;
   reauthGithub: boolean;
   reauthLlm: boolean;
+  noChat: boolean;
   projectName?: string;
   databaseUrl?: string;
   envFile?: string;
@@ -558,7 +559,22 @@ async function runInteractiveInit(
   out.push(...formatReadySteps({ metaCredentialReady, llmCredentialReady, githubCredentialReady, opsRepoReady }));
   out.push("");
   process.stdout.write(out.join("\n"));
+  if (shouldAutoStartChatAfterInit(opts, overrides, { llmCredentialReady })) {
+    const { runChatCommand } = await import("./chat.js");
+    return await runChatCommand([], { env });
+  }
   return 0;
+}
+
+function shouldAutoStartChatAfterInit(
+  opts: InitOptions,
+  overrides: InitCommandOverrides,
+  state: { llmCredentialReady: boolean }
+): boolean {
+  if (!state.llmCredentialReady) return false;
+  if (opts.noChat || opts.yes || opts.mockIntegrations) return false;
+  if (overrides.isTTY === false) return false;
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
 function formatReadySteps(opts: {
@@ -1836,6 +1852,7 @@ function parseInitArgs(args: string[]): InitOptions {
     reauthMeta: false,
     reauthGithub: false,
     reauthLlm: false,
+    noChat: false,
     help: false,
   };
   for (let i = 0; i < args.length; i += 1) {
@@ -1860,6 +1877,7 @@ function parseInitArgs(args: string[]): InitOptions {
     else if (a === "--reauth-meta") opts.reauthMeta = true;
     else if (a === "--reauth-github") opts.reauthGithub = true;
     else if (a === "--reauth-llm") opts.reauthLlm = true;
+    else if (a === "--no-chat") opts.noChat = true;
     else if (a === "--project-name") opts.projectName = next();
     else if (a.startsWith("--project-name=")) opts.projectName = a.slice("--project-name=".length);
     else if (a === "--database-url") opts.databaseUrl = next();
@@ -1898,6 +1916,7 @@ function printInitHelp(): void {
       "  --reauth-meta          既存 Meta token があっても `addroid auth meta` を実行",
       "  --reauth-github        既存 GitHub token / ops repo があっても `addroid auth github` を実行",
       "  --reauth-llm           既存 LLM credential があっても provider 選択から再認証",
+      "  --no-chat              セットアップ完了後に `addroid chat` を自動起動しない",
       "",
       "Interactive setup:",
       "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",

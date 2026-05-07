@@ -33,6 +33,7 @@ PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、�
 | `addroid init --interactive --reauth-meta` | Meta Access Token を再認証 |
 | `addroid init --interactive --reauth-github` | GitHub token / ops repo を再設定 |
 | `addroid init --interactive --reauth-llm` | LLM Provider を選び直して再認証 (OpenAI / Anthropic / Codex OAuth) |
+| `addroid chat` | init 済み LLM credential を使う対話型 command chat |
 | `addroid doctor` | 実行環境 (Node / uv / Python / Meta Ads CLI / PostgreSQL / DATABASE_URL / config / secrets / ENCRYPTION_KEY) を診断 |
 | `addroid up` | Web UI (127.0.0.1:3000) と Worker (pg-boss) を併走起動 (リポジトリ内でのみ意味があります) |
 | `addroid down` | `addroid up` で起動したプロセスを停止 |

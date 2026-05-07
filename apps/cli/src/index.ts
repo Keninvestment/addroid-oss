@@ -31,6 +31,7 @@ import { runCronCommand } from "./commands/cron.js";
 import { runAuthCommand } from "./commands/auth.js";
 import { runAccountsCommand } from "./commands/accounts.js";
 import { runBackupCommand, runRestoreCommand } from "./commands/backup.js";
+import { runChatCommand } from "./commands/chat.js";
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
@@ -68,6 +69,8 @@ async function main(argv: string[]): Promise<number> {
       return runCronCommand(rest);
     case "auth":
       return runAuthCommand(rest);
+    case "chat":
+      return runChatCommand(rest);
     case "accounts":
       return runAccountsCommand(rest);
     case "backup":
@@ -101,6 +104,7 @@ function printHelp() {
       "  activate  PAUSED 状態の Meta オブジェクトを ACTIVE に遷移 (Apply と別経路で監査)",
       "  cron      cron プリセットの list / enable / disable / set / run / logs (pg-boss + cron_schedules)",
       "  auth      provider 別の認証・トークン登録 (Meta / GitHub ops repo / LLM / Slack)",
+      "  chat      LLM を使った対話型 command chat (自然文で status / report / auth / cron などを実行)",
       "  accounts  Meta Ad Account の取得・登録・デフォルト確認/選択",
       "  backup    DATABASE_URL の DB を pg_dump で ~/.addroid/backups に保存 (Prisma + pg-boss を含む)",
       "  restore   pg_restore --clean --if-exists でダンプを復元 (実行前に `addroid down` を推奨)",
