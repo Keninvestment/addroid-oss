@@ -79,7 +79,7 @@ export default async function SelectAccountPage({
           {accounts.length === 0 ? (
             <EmptyState
               title="選択できる Ad Account がありません。"
-              description="CLI で `addroid auth meta` を再実行するか、手動で Ad Account を追加してください。"
+              description="CLI で `addroid connect meta` を再実行するか、手動で Ad Account を追加してください。"
               action={
                 <Link className="btn btn--primary" href="/accounts">
                   Accounts

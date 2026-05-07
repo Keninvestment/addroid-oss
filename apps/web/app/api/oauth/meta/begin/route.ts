@@ -5,7 +5,7 @@
 //   - mock : `addroid.invalid` の URL は実在しないので、内部 callback に code=mock-<state>
 //            でループバックさせ、ローカルだけで OAuth が完結する。
 //   - real : Facebook の authorize URL に 302 リダイレクトする。
-//   - token: Access Token 標準経路。OAuth は CLI の `addroid auth meta --oauth` のみ。
+//   - token: Access Token 標準経路。OAuth は詳細 CLI の `addroid auth meta --oauth` のみ。
 //   - stub : 暗号化境界が未設定。`/accounts` へ理由付きで戻す。
 
 import { NextResponse } from "next/server";
@@ -22,7 +22,7 @@ export async function GET(request: Request) {
         new URL(
           `/accounts?oauth=error&reason=${encodeURIComponent(
             choice === "token"
-              ? "Manual Access Token mode is active. Run `addroid auth meta` in your terminal, or use `addroid auth meta --oauth` only after configuring an HTTPS OAuth callback."
+              ? "Manual Access Token mode is active. Run `addroid connect meta` in your terminal, or use the detailed `addroid auth meta --oauth` command only after configuring an HTTPS OAuth callback."
               : "Meta token encryption is not configured. Run addroid init to set ENCRYPTION_KEY."
           )}`,
           url

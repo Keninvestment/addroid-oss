@@ -92,7 +92,7 @@ export default async function CronSchedulesPage() {
             empty={
               <EmptyState
                 title="登録済みのスケジュールはまだありません。"
-                description="addroid up でデフォルトプリセットが登録されます。"
+                description="addroid start でデフォルトプリセットが登録されます。"
               />
             }
             columns={[

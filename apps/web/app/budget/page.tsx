@@ -923,7 +923,7 @@ export default async function BudgetGuardPage() {
           ) : !scheduleRow ? (
             <EmptyState
               title="budget_guard スケジュールはまだ登録されていません"
-              description="addroid up を実行すると、budget_guard を含む cron preset が登録されます。"
+              description="addroid start を実行すると、budget_guard を含む schedule preset が登録されます。"
             />
           ) : (
             <KeyValueList items={scheduleItems} />

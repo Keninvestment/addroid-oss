@@ -1,6 +1,6 @@
 // AdDroid OSS — POST /api/cron/[name]/run (this implementation).
 //
-// /cron 行の "今すぐ実行" ボタンから呼ばれる。CLI の `addroid cron run` と同じく、
+// /cron 行の "今すぐ実行" ボタンから呼ばれる。CLI の `addroid schedule run` と同じく、
 // pg-boss に 1 回限りのジョブを enqueue するだけで、実際の実行は worker プロセス側で
 // 行われる (worker 未起動時は queue に積まれ、worker 起動後にハンドラへ流れる)。
 //

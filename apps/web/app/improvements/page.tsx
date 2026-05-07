@@ -1094,7 +1094,7 @@ export default async function ImprovementsPage() {
           ) : !scheduleRow ? (
             <EmptyState
               title="improvement_pr スケジュールはまだ登録されていません"
-              description="addroid up を実行すると、improvement_pr を含む cron preset が登録されます。"
+              description="addroid start を実行すると、improvement_pr を含む schedule preset が登録されます。"
             />
           ) : (
             <KeyValueList items={scheduleItems} />
@@ -1182,7 +1182,7 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="Recent improvement_pr cron runs"
+          title="Recent improvement_pr schedule runs"
           subtitle={
             !dbReady
               ? "Prisma スキーマ未反映"

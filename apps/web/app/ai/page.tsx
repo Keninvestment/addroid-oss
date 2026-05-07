@@ -348,10 +348,9 @@ export default async function AiPage() {
                 />
               )}
               <CodeBlock>
-                {`npm run addroid -- auth llm --provider openai
-npm run addroid -- auth llm --provider anthropic
-# Codex OAuth を使う場合は ADDROID_CODEX_* 設定後に次の URL を開く
-http://127.0.0.1:3000/api/oauth/codex/begin`}
+                {`addroid connect ai --provider openai
+addroid connect ai --provider anthropic
+addroid connect ai --provider codex`}
               </CodeBlock>
             </div>
           </Panel>

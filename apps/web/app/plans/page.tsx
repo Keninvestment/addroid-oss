@@ -167,7 +167,7 @@ export default async function PlansPage() {
           ) : rows.length === 0 ? (
             <EmptyState
               title="Plan 履歴はまだありません。"
-              description="CLI (addroid plan --dry-run --persist), CI ワークフロー, または上の Ad-hoc Dry-run で実行すると記録されます。"
+              description="CLI (addroid submit --save), CI ワークフロー, または上の Ad-hoc Dry-run で実行すると記録されます。"
             />
           ) : (
             <table className="data-table plan-history">

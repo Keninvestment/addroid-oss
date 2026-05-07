@@ -100,7 +100,7 @@ export default async function SetupPage() {
         state: "info",
         label: "Slack 未設定 (任意)",
         detail:
-          "AdDroid は Slack なしでも動作します。Slack 通知や /adops を使う場合のみ、addroid auth slack で接続してください。",
+          "AdDroid は Slack なしでも動作します。Slack 通知や /adops を使う場合のみ、addroid connect slack で接続してください。",
       };
     }
     if (!slackInstallation.hasAppToken) {
@@ -108,7 +108,7 @@ export default async function SetupPage() {
         state: "warn",
         label: "Slack 接続済み (Socket Mode 用 app token なし)",
         detail:
-          "xoxb- bot token は登録されていますが、xapp- app-level token が未登録のため Socket Mode が使えません。addroid auth slack を再実行して app token を登録してください。",
+          "xoxb- bot token は登録されていますが、xapp- app-level token が未登録のため Socket Mode が使えません。addroid connect slack を再実行して app token を登録してください。",
       };
     }
     const teamName = slackInstallation.metadata?.teamName ?? slackInstallation.accountIdentifier;
@@ -233,9 +233,9 @@ npm run db:push`}
                 label: "初期化と起動 (推奨)",
                 value: (
                   <CodeBlock>
-                    {`npm run addroid -- init     # ~/.addroid/config.yaml と storage / logs / run を冪等に作成
-npm run addroid -- doctor   # 依存と DB 接続を診断
-npm run addroid -- up       # web (127.0.0.1:3000) + worker (pg-boss) を 1 監督プロセスで起動`}
+                    {`addroid init      # 初期設定と接続を対話で完了
+addroid status    # 接続・起動状態を確認
+addroid start     # Web UI (127.0.0.1:3000) + worker を起動`}
                   </CodeBlock>
                 ),
               },
@@ -266,12 +266,12 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
           {!dbReady ? (
             <EmptyState
               title="DB スキーマ未反映"
-              description="npm run db:push を実行した後、npm run addroid -- doctor を実行すると検査結果がここに表示されます。"
+              description="npm run db:push を実行した後、addroid status または詳細診断の addroid doctor を実行すると検査結果がここに表示されます。"
             />
           ) : !lastDoctor ? (
             <EmptyState
               title="addroid doctor の実行履歴はまだありません。"
-              description="ターミナルで npm run addroid -- doctor (または addroid doctor) を実行すると、最新の検査結果がここに表示されます。"
+              description="ターミナルで addroid status を実行してください。詳細診断が必要な場合は addroid doctor を実行すると、最新の検査結果がここに表示されます。"
             />
           ) : (
             <KeyValueList
@@ -338,7 +338,7 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
           {!slackInstallation ? (
             <EmptyState
               title="Slack は任意です。AdDroid は Slack なしでも動作します。"
-              description="Slack 通知や /adops を有効にしたい場合のみ、ターミナルで npm run addroid -- auth slack (または addroid auth slack) を実行して xoxb- / xapp- / signing_secret と通知チャンネル ID を登録してください。Socket Mode のみを使用するため、公開 URL や webhook は必要ありません。"
+              description="Slack 通知や /adops を有効にしたい場合のみ、ターミナルで addroid connect slack を実行して xoxb- / xapp- / signing_secret と通知チャンネル ID を登録してください。Socket Mode のみを使用するため、公開 URL や webhook は必要ありません。"
             />
           ) : (
             <KeyValueList
@@ -425,8 +425,8 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                   label: "再接続 / 切断",
                   value: (
                     <CodeBlock>
-                      {`npm run addroid -- auth slack            # トークン更新 + Socket Mode 接続テスト
-npm run addroid -- auth slack --disconnect # トークン削除 (任意)`}
+                      {`addroid connect slack              # トークン更新 + Socket Mode 接続テスト
+addroid connect slack --disconnect # トークン削除 (任意)`}
                     </CodeBlock>
                   ),
                 },

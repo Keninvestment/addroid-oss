@@ -1,7 +1,7 @@
 // AdDroid OSS — Web 側 Cron 操作ヘルパ (this implementation).
 //
 // `/api/cron/[name]/toggle | schedule | run` の 3 ハンドラから共有される server-side
-// 実装層。CLI (`addroid cron enable | disable | set | run`) と同じ動作を Web 経路で
+// 実装層。CLI (`addroid schedule enable | disable | set | run`) と同じ動作を Web 経路で
 // 提供する。
 //
 // 受入基準 (this implementation / acceptance):

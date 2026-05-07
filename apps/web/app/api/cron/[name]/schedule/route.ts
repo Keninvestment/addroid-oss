@@ -1,6 +1,6 @@
 // AdDroid OSS — POST /api/cron/[name]/schedule (this implementation).
 //
-// /cron 行の cron 式エディタから呼ばれる。CLI の `addroid cron set` と同じく、
+// /cron 行の cron 式エディタから呼ばれる。CLI の `addroid schedule set` と同じく、
 // 永続化前に validateCronExpression で 5 フィールド標準 crontab 構文を厳格に
 // 検証する (disabled なプリセットでも cron_schedules.cron に malformed な値が
 // 残らないことを保証する)。enabled なら pg-boss schedule も再登録する。

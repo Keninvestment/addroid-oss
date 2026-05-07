@@ -1,6 +1,6 @@
 // AdDroid OSS — POST /api/cron/[name]/toggle (this implementation).
 //
-// /cron 行の "enabled" トグルから呼ばれる。CLI の `addroid cron enable | disable` と
+// /cron 行の "enabled" トグルから呼ばれる。CLI の `addroid schedule enable | disable` と
 // 同じ DB + pg-boss 更新を行い、audit_logs に `cron.enabled_via_web` /
 // `cron.disabled_via_web` を残す (actor は server 側で固定)。
 

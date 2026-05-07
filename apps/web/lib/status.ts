@@ -86,7 +86,7 @@ export async function inspectWorker(): Promise<SubsystemStatus> {
     if (count === 0) {
       return {
         state: "warn",
-        message: "worker が起動していません。addroid up または npm run dev:worker を実行してください。",
+        message: "worker が起動していません。addroid start を実行してください。",
       };
     }
     return {

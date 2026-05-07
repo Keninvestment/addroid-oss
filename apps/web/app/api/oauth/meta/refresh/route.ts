@@ -39,7 +39,7 @@ export async function POST() {
         {
           ok: false,
           error:
-            "Meta OAuth refresh is not configured for the active auth mode. Use `addroid auth meta` to replace a manual token, or configure OAuth client settings for `--oauth`.",
+            "Meta OAuth refresh is not configured for the active auth mode. Use `addroid connect meta` to replace a manual token, or configure OAuth client settings for the detailed `addroid auth meta --oauth` command.",
         },
         { status: 400 }
       );

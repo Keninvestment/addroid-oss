@@ -68,7 +68,7 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
         </span>
         <span>
           Access Token 方式では OAuth refresh は使いません。更新する場合は CLI で{" "}
-          <code className="inline-code">addroid auth meta</code> を再実行してください。
+          <code className="inline-code">addroid connect meta</code> を再実行してください。
         </span>
       </div>
     );

@@ -193,7 +193,7 @@ export default async function AccountsPage({
               description={
                 adapterChoice === "stub"
                   ? `Meta token support が未設定です: ${adapterReason}。addroid init で ENCRYPTION_KEY を設定してください。`
-                  : "CLI で `addroid auth meta` を実行し、Meta Access Token を暗号化保存してください。OAuth callback を使う場合のみ下のボタンを利用できます。"
+                  : "CLI で `addroid connect meta` を実行し、Meta Access Token を暗号化保存してください。OAuth callback を使う場合のみ下のボタンを利用できます。"
               }
               action={
                 adapterChoice === "real" || adapterChoice === "mock" ? (
