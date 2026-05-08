@@ -5,6 +5,7 @@
 
 import { resolveAddroidPaths, readAddroidConfig } from "@addroid/config";
 import { isProcessAlive, readUpState } from "../lib/processes.js";
+import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
 
 interface DoctorRow {
   ranAt: Date;
@@ -39,6 +40,15 @@ export async function runStatus(args: string[]): Promise<number> {
       `  web bind      : ${config.web?.hostname ?? "127.0.0.1"}:${config.web?.port ?? 3000}`
     );
   }
+  lines.push("");
+
+  const service = await getAddroidServiceStatus().catch((err) => ({
+    platform: "unsupported" as const,
+    installed: false,
+    running: false,
+    detail: (err as Error).message,
+  }));
+  lines.push(...formatServiceStatus(service));
   lines.push("");
 
   const state = await readUpState(paths);

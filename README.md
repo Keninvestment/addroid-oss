@@ -5,8 +5,10 @@ Ads YAML をリポジトリの単一ソースとして扱い、AI が広告案�
 GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取得・予算監視・改善提案を
 自動実行します。
 
-> **Status:** Initial OSS release candidate. `npm install` / `addroid init` /
-> `addroid start` の 3 コマンドでローカル起動が完結します。`addroid init` は uv /
+> **Status:** Initial OSS release candidate. `npm install` / `addroid init` で
+> セットアップと常駐サービス登録が完結します。必要に応じて `addroid start` で
+> 常駐サービスを起動・修復できます。セットアップ後の通常操作は
+> `addroid chat` に自然文で依頼します。`addroid init` は uv /
 > Python / Meta Ads CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
 > Meta 広告アカウントを実際に利用するには Meta Access Token が必須です。未設定でも core
 > ヘルスチェックは通りますが、Apply / Activate / レポート取得はできません。
@@ -95,7 +97,7 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 | macOS 13+ (darwin x86_64 / arm64) | **対応** | 主開発環境。Homebrew 経由で PostgreSQL / Python 3.12+ を導入する想定 |
 | Linux (x86_64 / arm64, glibc) | **対応** | Ubuntu 22.04+ / Debian 12+ / Fedora 39+ で動作 |
 | Windows + WSL2 (Ubuntu 22.04+) | **対応 (推奨)** | WSL2 内の Linux として扱う。Windows native との混在不可 |
-| Windows native (PowerShell / cmd.exe) | **非対応** | `0600` パーミッション、`pg_dump` の dynamic-link、`addroid start` の shell 起動が成立しないため対応しません。WSL2 を使用してください |
+| Windows native (PowerShell / cmd.exe) | **非対応** | `0600` パーミッション、`pg_dump` の dynamic-link、常駐サービスの POSIX 前提が成立しないため対応しません。WSL2 を使用してください |
 | その他 (FreeBSD, Alpine musl, etc.) | 動作未検証 | 詳細診断コマンド `addroid doctor` は `warn` として通過させますが動作保証は行いません |
 
 `addroid doctor` の `platform` チェックがこの分類を runtime で再確認します
@@ -184,17 +186,44 @@ npm install
 #    初回は local bin 経由で起動し、init 中に `addroid` コマンドをリンクします。
 npx --no-install addroid init
 
-# 3. init 後は短い addroid コマンドを使えます
-addroid status
+# 3. init 後はチャットに自然文で依頼できます
+addroid chat
 
 # 4. init で接続をスキップした場合だけ、後から個別に接続
 #    Meta は Ad Account 選択、GitHub は ops repository 作成まで行います。
+#    AI は chat / 改善提案 / 自然言語タスクに必要です。
 addroid connect meta
 addroid connect github
+addroid connect ai
 
-# 5. web (127.0.0.1:3000) と worker (pg-boss) を起動
+# 5. Web UI や自動実行が動いていない場合だけ、常駐サービスを起動・修復
 addroid start
 ```
+
+### init 後の使い方
+
+非エンジニアの通常利用では、コマンドを覚える必要はありません。`addroid init` が完了したら、
+まず `addroid chat` を開き、やりたいことをそのまま日本語で入力してください。
+
+例:
+
+```text
+昨日の広告レポートを見せて
+今月の予算消化が速すぎるキャンペーンを確認して
+改善案を作って GitHub PR にして
+入稿ファイルに問題がないかチェックして
+毎朝9時に前日のレポートを作るようにして
+今使っている Meta 広告アカウントを確認して
+Meta の接続をやり直したい
+```
+
+チャットは現在の接続状態を確認し、必要な AdDroid 操作を選んで実行します。危険な操作や
+直接 Meta を書き換える操作は行わず、入稿・変更は GitHub PR、検証、dry-run 変更予定の確認を
+経由します。画面で操作したい場合は `addroid open` で Web UI を開けます。
+
+`addroid chat` が AI 未接続と表示した場合は `addroid connect ai`、Meta 未接続と表示した場合は
+`addroid connect meta` を実行してください。接続状態をまとめて確認したい場合は
+`addroid status` を使います。
 
 `addroid init` は対話型 wizard として動作します。依存が不足している場合は、実行する
 コマンドを見せた上で個別に確認します。Meta token / GitHub / LLM Provider が未設定の場合は、
@@ -236,13 +265,13 @@ deny policy、暗号化済み LLM credential を共有します。
 
 ```bash
 # Meta Access Token を再登録
-addroid init --interactive --reauth-meta
+addroid connect meta
 
 # GitHub token / ops repo を再設定
-addroid init --interactive --reauth-github
+addroid connect github
 
 # LLM Provider を選び直して再接続 (Codex app-server / OpenAI / Anthropic)
-addroid init --interactive --reauth-llm
+addroid connect ai
 ```
 
 CI や手元の自動検証では次を使えます。
@@ -288,7 +317,8 @@ campaign / adset です。`ad` は直接予算を持たないため、親 adset 
 `npm run link:cli` を一度実行すると、以後は `npx --no-install addroid status` ではなく
 `addroid status` と入力できます。npm package として
 導入する場合は `npm install -g @addroid/cli` でも同じ `addroid` コマンドが入ります。
-worker のみ別プロセスに分離して水平スケールしたい場合は `addroid start --separate-worker` を使います。
+worker のみ別プロセスに分離して水平スケールしたい場合は、前景実行の
+`addroid start --foreground --separate-worker` を使います。
 低レベルなデバッグ用途で個別に起動したい
 場合のみ `npm run dev` / `npm run dev:worker` を直接呼び出せます。その場合は root の
 `.env.local` を shell に export してから起動してください。
@@ -341,9 +371,9 @@ addroid/
 | `npm install` | ワークスペース全体の依存解決 |
 | `npm run link:cli` | この checkout の CLI を `addroid` コマンドとしてリンク |
 | `addroid init` | 対話型初期セットアップ。初期設定済みなら既存 credential を保持して状態表示のみ |
-| `addroid chat` | init 済み LLM credential と `AGENTS.md` を使う対話型 agent chat |
-| `addroid start` | Web UI (`127.0.0.1:3000`) と worker を起動 |
-| `addroid stop` | 起動中の Web UI / worker を停止 |
+| `addroid chat` | 通常利用の入口。自然文でレポート、予算確認、改善提案、入稿チェック、接続確認を依頼 |
+| `addroid start` | 常駐サービスをインストールして起動・修復。Web UI と worker はサービス内で動作 |
+| `addroid stop` | 常駐サービスを停止 |
 | `addroid open` | Web UI を開く / URL を表示 |
 | `addroid status` | 接続・起動状態を確認 |
 | `addroid connect meta` | Meta Access Token を登録し、広告アカウントを選択 |

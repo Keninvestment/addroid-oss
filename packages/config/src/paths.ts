@@ -18,6 +18,10 @@ export interface AddroidPaths {
   pidFile: string;
   webLogFile: string;
   workerLogFile: string;
+  serviceLogFile: string;
+  serviceErrLogFile: string;
+  serviceEnvFile: string;
+  serviceWrapperFile: string;
   /**
    * `addroid up` の既定モード (web + worker を 1 プロセス併走) で、CLI 自身の
    * stdout/stderr を tee する先。`--separate-worker` の場合は web/worker 各ログに分かれる。
@@ -91,6 +95,10 @@ export function resolveAddroidPaths(env: NodeJS.ProcessEnv = process.env): Addro
     pidFile: path.join(runDir, "up.json"),
     webLogFile: path.join(logsDir, "web.log"),
     workerLogFile: path.join(logsDir, "worker.log"),
+    serviceLogFile: path.join(logsDir, "service.log"),
+    serviceErrLogFile: path.join(logsDir, "service.err.log"),
+    serviceEnvFile: path.join(runDir, "service.env"),
+    serviceWrapperFile: path.join(runDir, "service-runner.sh"),
     upLogFile: path.join(logsDir, "up.log"),
   };
 }

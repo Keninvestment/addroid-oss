@@ -111,7 +111,7 @@ describe("addroid up", () => {
     await withCleanHome({}, async () => {
       const { code, out } = await capture(() => runUp(["--help"]));
       assert.equal(code, 0);
-      assert.match(out.stdout, /Usage:\s+addroid start/);
+      assert.match(out.stdout, /Usage:\s+addroid up/);
       assert.match(out.stdout, /--separate-worker/);
       assert.match(out.stdout, /localhost-bound and outbound-only/);
     });
@@ -151,7 +151,7 @@ describe("addroid up", () => {
       const { code, out } = await capture(() => runUp(["--bogus-flag"]));
       assert.equal(code, 0);
       assert.match(out.stderr, /unknown argument: --bogus-flag/);
-      assert.match(out.stdout, /Usage:\s+addroid start/);
+      assert.match(out.stdout, /Usage:\s+addroid up/);
     });
   });
 });

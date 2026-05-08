@@ -124,13 +124,14 @@ URL は localhost / loopback のみ許可されます。
 後から接続し直す場合:
 
 ```bash
-npm run addroid -- init --interactive --reauth-llm
+npm run addroid -- connect ai
 
 # Codex app-server だけを直接再接続したい場合
 npm run addroid -- connect ai --provider codex
 ```
 
-Web UI から接続する場合は、`addroid start` 後に `/ai` の "Codex を接続" を押します。
+Web UI から接続する場合は、`addroid start` で常駐サービスを起動してから
+`addroid open` で Web UI を開き、`/ai` の "Codex を接続" を押します。
 この場合も Codex token は AdDroid には保存されません。
 
 ---

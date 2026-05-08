@@ -228,6 +228,16 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
       assert.match(out.stdout, /already initialized/);
       assert.match(out.stdout, /Meta Token\s+: configured/);
       assert.match(out.stdout, /LLM Provider\s+: codex/);
+      assert.match(out.stdout, /よく使うコマンド:/);
+      assert.match(out.stdout, /addroid chat\s+# チャットで/);
+      assert.match(out.stdout, /addroid start\s+# 常駐サービス/);
+      assert.match(out.stdout, /addroid open\s+# Web UI/);
+      assert.match(out.stdout, /接続を直すとき:/);
+      assert.match(out.stdout, /addroid connect meta/);
+      assert.match(out.stdout, /addroid connect github/);
+      assert.match(out.stdout, /addroid connect ai/);
+      assert.doesNotMatch(out.stdout, /Maintenance:/);
+      assert.doesNotMatch(out.stdout, /addroid init --interactive --reauth-llm/);
       assert.deepEqual(authCalls, []);
       assert.ok(fs.existsSync(path.join(home, "config.yaml")));
     } finally {
@@ -239,7 +249,7 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
   });
 });
 
-test("init --reauth-llm は既存 LLM があっても provider 選択から Codex app-server を再接続できる", async () => {
+test("init --reauth-llm は初期セットアップをやり直さず LLM だけ再接続できる", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
     const prevDb = process.env.DATABASE_URL;
@@ -261,7 +271,10 @@ test("init --reauth-llm は既存 LLM があっても provider 選択から Code
           ],
           {
             isTTY: true,
-            prompt: async (_question, defaultValue = "") => defaultValue,
+            prompt: async (question, defaultValue = "") => {
+              assert.doesNotMatch(question, /この AdDroid インスタンスの名前|DATABASE_URL/);
+              return defaultValue;
+            },
             selectOption: async () => "codex-app-server",
             runAuthCommand: async (args) => {
               authCalls.push(args);
@@ -277,7 +290,8 @@ test("init --reauth-llm は既存 LLM があっても provider 選択から Code
       );
 
       assert.equal(code, 0, out.stdout + out.stderr);
-      assert.match(out.stdout, /Meta Token\s+: already configured/);
+      assert.match(out.stdout, /指定された接続だけ再認証します/);
+      assert.doesNotMatch(out.stdout, /この AdDroid インスタンスの名前/);
       assert.match(out.stdout, /Codex config\s+:/);
       assert.match(out.stdout, /LLM Provider setup:/);
       assert.match(out.stdout, /configuring Codex app-server/);

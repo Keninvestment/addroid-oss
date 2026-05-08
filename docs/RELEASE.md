@@ -21,7 +21,8 @@
 | その他 npm package | `@addroid/web` / `@addroid/worker` / `@addroid/*` | **非公開** (`private: true`) |
 
 OSS adopter / fork operator はリポジトリを `git clone` し、`npm install`、
-`npm run addroid -- init`、`npm run addroid -- up` で起動できます。
+`npm run addroid -- init` で初期設定と常駐サービス登録まで進められます。
+必要に応じて `npm run addroid -- start` で常駐サービスを起動・修復できます。
 `npm install -g @addroid/cli` は CLI bin の配布単位であり、postinstall では非破壊の
 next-step message だけを表示します。`@addroid/cli` 単体ではフルコンソールは動かず、
 リポジトリの web / worker / prisma に依存します (CLI は init / doctor / validate / plan /

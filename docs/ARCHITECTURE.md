@@ -2,9 +2,9 @@
 
 ## 1. プロセスモデル
 
-AdDroid OSS の既定モデルは **1 プロセスで web + worker** を併走させる構成です。
-将来の `addroid start --separate-worker` で水平スケールできるよう、コードベースは
-最初から分離可能な境界に保ちます。
+AdDroid OSS の既定モデルは、OS の常駐サービス内で **1 プロセスの web + worker** を
+併走させる構成です。前景実行の `addroid start --foreground --separate-worker` で
+水平スケールできるよう、コードベースは最初から分離可能な境界に保ちます。
 
 ```
 +----------------------------------------------------+
@@ -207,7 +207,7 @@ UI は `apps/web/components` の小さな in-house primitives と
 
 | 想定要件 | 対応 |
 |---|---|
-| ワーカー水平スケール | `addroid start --separate-worker` で `apps/worker` を別プロセスとして spawn (web は引き続き CLI 内、worker のみ別プロセス化) |
+| ワーカー水平スケール | 前景実行の `addroid start --foreground --separate-worker` で `apps/worker` を別プロセスとして spawn (web は引き続き CLI 内、worker のみ別プロセス化) |
 | 多人数運用 | the current implementation の範囲外。SSO 等は将来の独立コントラクト |
 | 多テナント | 当面 1 ワークスペース 1 ホスト。多テナントは別契約で扱う |
 | Meta sandbox / mock harness | `ADDROID_META_OAUTH_MOCK=1` で `MockMetaAdapter` に固定 (E2E / smoke-test 用) |

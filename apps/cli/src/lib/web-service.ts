@@ -4,9 +4,9 @@ import path from "node:path";
 import {
   ensureAddroidPaths,
   resolveWebBinding,
-  type AddroidPaths,
 } from "@addroid/config";
 import { isProcessAlive, readUpState } from "./processes.js";
+import { startAddroidService } from "./service.js";
 
 export interface WebUiStartResult {
   url: string;
@@ -48,7 +48,7 @@ export async function ensureWebUiStarted(opts: {
     };
   }
 
-  const started = startWebUiInBackground(paths, env);
+  const started = await startWebUiInBackground(env);
   if (!started.ok) {
     return {
       url,
@@ -101,13 +101,19 @@ async function waitForWebUi(
   return false;
 }
 
-function startWebUiInBackground(
-  paths: AddroidPaths,
+async function startWebUiInBackground(
   env: NodeJS.ProcessEnv
-): { ok: true } | { ok: false; error: string } {
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await startAddroidService();
+    return { ok: true };
+  } catch {
+    // Fall back to the foreground runner as a detached process for dev checkouts
+    // where launchd/systemd is not available (for example CI or WSL without systemd).
+  }
   const entry = process.argv[1];
   if (!entry) return { ok: false, error: "cannot resolve current addroid entrypoint" };
-  const child = spawn(process.execPath, [...process.execArgv, path.resolve(entry), "start"], {
+  const child = spawn(process.execPath, [...process.execArgv, path.resolve(entry), "up"], {
     cwd: process.cwd(),
     detached: true,
     env: {

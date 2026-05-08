@@ -32,6 +32,8 @@ import { runAuthCommand } from "./commands/auth.js";
 import { runAccountsCommand } from "./commands/accounts.js";
 import { runBackupCommand, runRestoreCommand } from "./commands/backup.js";
 import { runChatCommand } from "./commands/chat.js";
+import { runServiceCommand } from "./commands/service.js";
+import { runStartCommand, runStopCommand } from "./commands/service-public.js";
 import {
   runAccountCommand,
   runConnectCommand,
@@ -58,9 +60,9 @@ async function main(argv: string[]): Promise<number> {
     case "init":
       return runInit(rest);
     case "start":
-      return runUp(rest);
+      return runStartCommand(rest);
     case "stop":
-      return runDown(rest);
+      return runStopCommand(rest);
     case "open":
       return runOpenCommand(rest);
     case "status":
@@ -85,6 +87,8 @@ async function main(argv: string[]): Promise<number> {
       return runDoctor(rest);
     case "logs":
       return runLogs(rest);
+    case "service":
+      return runServiceCommand(rest);
     case "restore":
       return runRestoreCommand(rest);
     case "validate":
@@ -121,8 +125,8 @@ function printHelp() {
       "Commands:",
       "  chat      自然文で操作する対話型 agent chat",
       "  init      初期設定・不足設定の案内",
-      "  start     Web UI と自動処理を起動",
-      "  stop      起動中の Web UI と自動処理を停止",
+      "  start     常駐サービスを起動・修復",
+      "  stop      常駐サービスを停止",
       "  open      Web UI を開く / URL を表示",
       "  status    接続・起動状態を確認",
       "  connect   Meta / GitHub / AI / Slack を接続・再接続",
@@ -134,7 +138,7 @@ function printHelp() {
       "  version   CLI バージョン",
       "  help      このヘルプ",
       "",
-      "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, restore.",
+      "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, restore, service, up.",
       "All operations are localhost-bound and outbound-only.",
       "",
     ].join("\n")

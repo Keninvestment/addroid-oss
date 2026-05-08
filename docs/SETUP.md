@@ -11,7 +11,8 @@
 ### 1.0 サポート対象プラットフォーム
 
 AdDroid OSS は POSIX 前提 (`0600` パーミッション、`pg_dump` / `pg_restore`、
-shell 経由で起動する web/worker プロセス) で動作します。サポート対象は次の通りです。
+常駐サービスまたは前景実行で起動する web/worker プロセス) で動作します。
+サポート対象は次の通りです。
 
 | OS | 状態 | 備考 |
 |---|---|---|
@@ -123,8 +124,9 @@ cp .env.example .env
 `.env.local` を併用した場合、`addroid` CLI と Next.js は `.env.local` を `.env` より
 優先して読みます (Next.js の慣例どおり)。`addroid` CLI は `packages/config/src/env-files.ts`
 の `loadEnvFilesFromRepoRoot()` で読み込み、shell に export 済みの値は上書きしません。
-`npm run addroid -- up` は CLI がリポジトリ root の `.env` / `.env.local` を読み込んでから
-web / worker に渡します。低レベルなデバッグで `npm run dev` を直接使う場合は、
+`npm run addroid -- start` と前景実行の `npm run addroid -- up` は CLI がリポジトリ root の
+`.env` / `.env.local` を読み込んでから web / worker に渡します。
+低レベルなデバッグで `npm run dev` を直接使う場合は、
 Next.js の cwd が `apps/web` になるため root の `.env.local` が自動では読まれません。
 root の値を使うときは `set -a; source .env.local; set +a; npm run dev` のように shell へ
 export してから起動してください。
@@ -214,19 +216,21 @@ npm run addroid -- init     # 対話型 wizard: .env / DB / ~/.addroid / Prisma 
 
 # 実際の Meta 広告アカウントと入稿用 ops repo は init 内で接続します。
 # init でスキップした場合だけ、後から個別に実行します。
-npm run addroid -- auth meta
-npm run addroid -- auth github
-npm run addroid -- up       # web (127.0.0.1:3000) + worker (pg-boss) を 1 プロセスで起動
+npm run addroid -- connect meta
+npm run addroid -- connect github
+npm run addroid -- start    # 常駐サービスを起動・修復
 ```
 
 `addroid` を `npm install -g @addroid/cli` で導入済みであれば `addroid init` /
 `addroid status` / `addroid start` をそのまま呼び出せます。詳細診断の `addroid doctor` は任意の
-診断コマンドで、セットアップ後や起動前の確認に使います。既定モードでは Next.js (web) と
-pg-boss (worker) を CLI と同じ 1 プロセス内で併走させ、`SIGINT` / `SIGTERM` で graceful
-shutdown します。別ターミナルで worker を起動する必要はありません。
+診断コマンドで、セットアップ後や起動前の確認に使います。`addroid init` は対話端末で
+完了した場合、macOS は LaunchAgent、Linux / WSL2 は systemd user service として
+AdDroid を登録し、Web UI と pg-boss worker をログイン時に自動起動します。
+`addroid start` はこの常駐サービスをインストールして起動・修復します。
 
-将来的に worker を別ホストへ水平スケールしたい場合は `addroid start --separate-worker`
-で worker のみ別プロセスに spawn できます (web は引き続き CLI 内で起動)。
+前景で動作確認したい場合は `addroid start --foreground` を使います。worker を別ホストへ
+水平スケールしたい場合は `addroid start --foreground --separate-worker` で worker のみ
+別プロセスに spawn できます (web は引き続き CLI 内で起動)。
 
 ### 個別起動 (任意・デバッグ用途)
 
@@ -372,13 +376,13 @@ addroid backup --out ~/.addroid/backups/pre-restore.dump
 # 3. 確認プロンプト付きで復元
 addroid restore ~/.addroid/backups/<file>.dump
 
-# 4. 起動して doctor で接続確認
+# 4. 常駐サービスを起動・修復して status で接続確認
 addroid start
 addroid status
 ```
 
 CI / 自動化では `--yes` で確認プロンプトをスキップできます。
-`addroid start` が動いているのを承知の上で強制実行する場合は `--force-while-up` を
+AdDroid の worker が動いているのを承知の上で強制実行する場合は `--force-while-up` を
 指定してください (非推奨。worker が DB を触ると pg-boss スキーマが破損する
 可能性があります)。
 

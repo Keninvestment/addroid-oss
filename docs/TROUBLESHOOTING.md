@@ -20,7 +20,7 @@ AdDroid OSS は **macOS / Linux / WSL2 (Windows Subsystem for Linux 2)** のみ�
 
 - `secrets.local.yaml` を `0600` パーミッションで保護する POSIX 前提
 - `pg_dump` / `pg_restore` の dynamic-link / dlopen 前提
-- `addroid start` が起動する web/worker プロセスの shell / signal 前提 (`SIGINT` / `SIGTERM`)
+- 常駐サービスが起動する web/worker プロセスの POSIX shell / signal 前提
 
 ### 0.1 `addroid doctor` が `[error] platform` を返す
 
@@ -259,7 +259,7 @@ ADDROID_META_ADS_CLI_MOCK=1 addroid doctor
 
 ---
 
-## 6. `addroid start` 関連
+## 6. 常駐サービス / `addroid start` 関連
 
 ### 6.1 `EADDRINUSE: address already in use 127.0.0.1:3000`
 
@@ -269,11 +269,11 @@ ADDROID_META_ADS_CLI_MOCK=1 addroid doctor
 # 既存プロセス確認
 lsof -nP -iTCP:3000 -sTCP:LISTEN
 
-# AdDroid 自身を起動済みなら down で停止
-npm run addroid -- down
+# AdDroid 自身を起動済みなら stop で停止
+addroid stop
 
 # どうしてもポートを変えたい場合 (任意)
-ADDROID_WEB_PORT=3100 npm run addroid -- up
+ADDROID_WEB_PORT=3100 addroid start --foreground
 ```
 
 `ADDROID_WEB_HOSTNAME` を `0.0.0.0` 等に変更してはいけません。outbound-only /
@@ -291,12 +291,12 @@ ps -ef | grep -E "next dev|apps/worker" | grep -v grep
 rm -f ~/.addroid/run/up.json
 ```
 
-`addroid start` の中断 (kill -9 等) で pid file が残ることがあります。
+`addroid start --foreground` の中断 (kill -9 等) で pid file が残ることがあります。
 ファイルを消した上で再度 `addroid start` を実行してください。
 
 ### 6.3 `addroid status` が `[stopped]` を表示し続ける
 
-`addroid start` 起動中の親プロセスが終了した可能性があります。
+常駐サービス、または `addroid start --foreground` 起動中の親プロセスが終了した可能性があります。
 `~/.addroid/run/up.json` を削除し、`addroid start` を再実行してください。
 
 ---
@@ -473,12 +473,12 @@ AdDroid は PostgreSQL 16+ 必須なので、クライアントも 16 以上に�
 ### 12.3 `pg_restore: error: relation "..." already exists`
 
 `--clean --if-exists` で既存テーブルを drop しているはずなのに発生する場合、
-`addroid start` が並行して走っていてスキーマを再作成している可能性があります。
+AdDroid の常駐サービスが並行して走っていてスキーマを再作成している可能性があります。
 `addroid stop` で停止してから再度 `addroid restore` を実行してください。
 
-### 12.4 `addroid restore` が `addroid start が起動中です` 相当で停止する
+### 12.4 `addroid restore` が AdDroid 起動中として停止する
 
-設計通りの挙動です。`addroid stop` で worker / web を停止してから再実行して
+設計通りの挙動です。`addroid stop` で常駐サービスを停止してから再実行して
 ください。CI 等で起動中に強制実行する必要がある場合のみ `--force-while-up` を
 指定してください (pg-boss スキーマが破損するリスクあり)。
 

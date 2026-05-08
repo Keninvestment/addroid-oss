@@ -199,7 +199,7 @@ function parseArgs(args: string[]): ParsedArgs {
 function printUsage() {
   process.stdout.write(
     [
-      "Usage: addroid start [--separate-worker]",
+      "Usage: addroid up [--separate-worker]",
       "",
       "  (default)            web と worker を CLI と同じプロセスで併走 (the current implementation 既定モデル)",
       "  --separate-worker    worker を別プロセスとして spawn する (将来の水平スケール経路)",

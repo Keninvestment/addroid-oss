@@ -40,6 +40,7 @@ import {
   type CheckResult,
 } from "../lib/checks.js";
 import { resolveRepoRoot } from "../lib/paths.js";
+import { formatServiceStatus, installAddroidService } from "../lib/service.js";
 
 const SECRETS_STUB =
   "# AdDroid OSS — local-only secrets. THIS FILE IS GITIGNORED.\n" +
@@ -105,6 +106,7 @@ interface InitOptions {
   reauthGithub: boolean;
   reauthLlm: boolean;
   noChat: boolean;
+  noService: boolean;
   projectName?: string;
   databaseUrl?: string;
   envFile?: string;
@@ -182,9 +184,13 @@ export async function runInit(
 
   if (!interactive && hasReauthIntent(opts)) {
     process.stderr.write(
-      "[addroid init] --reauth-* は対話入力またはブラウザ認証を伴います。`--interactive` で再実行してください。\n"
+      "[addroid init] --reauth-* は対話入力またはブラウザ認証を伴います。端末から `addroid connect meta|github|ai` を実行してください。\n"
     );
     return 2;
+  }
+
+  if (interactive && shouldRunReauthOnly(opts)) {
+    return runReauthOnly(opts, overrides);
   }
 
   if (interactive) {
@@ -192,7 +198,8 @@ export async function runInit(
       const result = await safeScaffoldAddroid({ projectName: opts.projectName });
       if (!result) return 1;
       const auth = await readInitAuthState(env, overrides);
-      printAlreadyInitializedResult(result, auth);
+      const serviceSetupLines = await maybeInstallServiceAfterInit(opts, overrides);
+      await printAlreadyInitializedResult(result, auth, serviceSetupLines);
       return 0;
     }
     return runInteractiveInit(opts, overrides);
@@ -223,6 +230,19 @@ function shouldRunNonInteractiveSetup(opts: InitOptions): boolean {
 
 function hasReauthIntent(opts: InitOptions): boolean {
   return opts.reauthMeta || opts.reauthGithub || opts.reauthLlm;
+}
+
+function shouldRunReauthOnly(opts: InitOptions): boolean {
+  return Boolean(
+    hasReauthIntent(opts) &&
+      !opts.yes &&
+      !opts.installDeps &&
+      !opts.dbPush &&
+      !opts.projectName &&
+      !opts.databaseUrl &&
+      !opts.mockIntegrations &&
+      !opts.force
+  );
 }
 
 function hasSetupIntent(opts: InitOptions): boolean {
@@ -330,6 +350,68 @@ async function runNonInteractiveSetup(
   lines.push("  6. addroid start");
   lines.push("");
   process.stdout.write(lines.join("\n"));
+  return 0;
+}
+
+async function runReauthOnly(
+  opts: InitOptions,
+  overrides: InitCommandOverrides
+): Promise<number> {
+  const env = overrides.env ?? process.env;
+  const prompt = overrides.prompt ?? defaultPrompt;
+  const selectOption =
+    overrides.selectOption ??
+    (overrides.prompt ? buildPromptSelect(prompt) : defaultSelectOption);
+  const runAuthCommand =
+    overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+  const out: string[] = [
+    "[addroid init]",
+    "",
+    "指定された接続だけ再認証します。config / secrets / .env の初期セットアップはやり直しません。",
+    "次回からは `addroid connect meta` / `addroid connect github` / `addroid connect ai` を使えます。",
+    "",
+  ];
+  const flush = () => {
+    if (out.length === 0) return;
+    process.stdout.write(out.join("\n") + "\n");
+    out.length = 0;
+  };
+
+  if (opts.reauthMeta) {
+    out.push("Meta setup:");
+    out.push("  `addroid connect meta` と同じ Access Token 登録 + Ad Account 選択を実行します。");
+    flush();
+    const code = await withRuntimeEnv(env, () => runAuthCommand(["meta"]));
+    if (code !== 0) return code;
+  }
+
+  if (opts.reauthLlm) {
+    const configured = await maybeConfigureLLMProvider({
+      prompt,
+      selectOption,
+      out,
+      assumeYes: false,
+      runAuthCommand: overrides.runAuthCommand,
+      env,
+      envFile: opts.envFile,
+    });
+    flush();
+    if (!configured) return 1;
+  }
+
+  if (opts.reauthGithub) {
+    out.push("");
+    out.push("GitHub setup:");
+    out.push("  `addroid connect github` と同じ GitHub 認証 + ops repo 確認を実行します。");
+    flush();
+    const code = await withRuntimeEnv(env, () => runAuthCommand(["github"]));
+    if (code !== 0) return code;
+  }
+
+  out.push("");
+  out.push("Ready.");
+  out.push("  1. addroid status");
+  flush();
   return 0;
 }
 
@@ -497,7 +579,7 @@ async function runInteractiveInit(
       out.push("");
       out.push("Meta Access Token setup:");
       out.push("  Meta Token    : already configured");
-      out.push("                  再認証する場合は `addroid init --reauth-meta` または `addroid connect meta` を実行してください。");
+      out.push("                  再認証する場合は `addroid connect meta` を実行してください。");
     } else {
       const configured = await maybeConfigureMetaAccessToken({
         out,
@@ -525,7 +607,7 @@ async function runInteractiveInit(
       out.push("");
       out.push("LLM Provider setup:");
       out.push(`  LLM Provider  : already configured (${auth.llmProviders.join(", ")})`);
-      out.push("                  再認証する場合は `addroid init --reauth-llm` で provider を選び直してください。");
+      out.push("                  再認証する場合は `addroid connect ai` で provider を選び直してください。");
     } else {
       llmConfigured = await maybeConfigureLLMProvider({
         prompt,
@@ -589,9 +671,19 @@ async function runInteractiveInit(
     }
   }
 
+  const serviceSetupLines = await maybeInstallServiceAfterInit(opts, overrides);
+  if (serviceSetupLines.length > 0) {
+    out.push("");
+    out.push(...serviceSetupLines);
+  }
   out.push("");
   out.push("Ready.");
-  out.push(...formatReadySteps({ metaCredentialReady, llmCredentialReady, githubCredentialReady, opsRepoReady }));
+  out.push(...formatReadySteps({
+    metaCredentialReady,
+    llmCredentialReady,
+    githubCredentialReady,
+    opsRepoReady,
+  }));
   out.push("");
   process.stdout.write(out.join("\n"));
   if (shouldAutoStartChatAfterInit(opts, overrides, { llmCredentialReady })) {
@@ -612,13 +704,37 @@ function shouldAutoStartChatAfterInit(
   return Boolean(process.stdin.isTTY && process.stdout.isTTY);
 }
 
+async function maybeInstallServiceAfterInit(
+  opts: InitOptions,
+  overrides: InitCommandOverrides
+): Promise<string[]> {
+  if (opts.noService || opts.yes || opts.mockIntegrations) return [];
+  if (overrides.isTTY === false) return [];
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return [];
+  try {
+    const status = await installAddroidService();
+    return [
+      "常駐サービス:",
+      ...formatServiceStatus(status),
+      "  note          : 以後は macOS / Linux / WSL2 のログイン時に自動起動します。",
+    ];
+  } catch (err) {
+    return [
+      "常駐サービス:",
+      `  service       : install skipped (${(err as Error).message})`,
+      "  hint          : 後で `addroid start` を実行すると常駐サービスを作成・起動できます。",
+    ];
+  }
+}
+
 function formatReadySteps(opts: {
   metaCredentialReady: boolean;
   llmCredentialReady: boolean;
   githubCredentialReady: boolean;
   opsRepoReady: boolean;
 }): string[] {
-  const steps: string[] = ["addroid status"];
+  const lines = formatCommonCommandGuide();
+  const steps: string[] = [];
   if (!opts.metaCredentialReady) {
     steps.push("addroid connect meta                 # Meta Access Token 入力 + Ad Account 選択");
   }
@@ -628,8 +744,26 @@ function formatReadySteps(opts: {
   if (!opts.githubCredentialReady || !opts.opsRepoReady) {
     steps.push("addroid connect github               # GitHub 認証 + ops repo 作成");
   }
-  steps.push("addroid start");
-  return steps.map((step, i) => `  ${i + 1}. ${step}`);
+  if (steps.length > 0) {
+    lines.push("");
+    lines.push("未完了の接続:");
+    lines.push(...steps.map((step) => `  ${step}`));
+  }
+  return lines;
+}
+
+function formatCommonCommandGuide(): string[] {
+  return [
+    "よく使うコマンド:",
+    "  addroid chat       # チャットで日次レポート、予算確認、改善提案、入稿チェックを依頼",
+    "  addroid start      # 常駐サービスを起動・修復",
+    "  addroid open       # Web UI をブラウザで開く",
+    "  addroid status     # 接続状態と起動状態を確認",
+    "  addroid report     # 日次レポートを今すぐ作成",
+    "  addroid submit     # 入稿ファイルを検証し、反映前の変更予定を確認",
+    "  addroid account    # 利用する Meta 広告アカウントを確認・選択",
+    "  addroid schedule   # 定期実行タスクを確認・設定",
+  ];
 }
 
 async function maybeEnsureCliCommand(opts: {
@@ -1976,7 +2110,11 @@ function printScaffoldResult(result: ScaffoldResult): void {
   process.stdout.write(lines.join("\n"));
 }
 
-function printAlreadyInitializedResult(result: ScaffoldResult, auth: InitAuthState): void {
+async function printAlreadyInitializedResult(
+  result: ScaffoldResult,
+  auth: InitAuthState,
+  serviceSetupLines: string[] = []
+): Promise<void> {
   const lines = [
     "[addroid init]",
     "",
@@ -1995,12 +2133,33 @@ function printAlreadyInitializedResult(result: ScaffoldResult, auth: InitAuthSta
     lines.push(`  auth check    : skipped (${auth.detail})`);
   }
   lines.push("");
-  lines.push("Maintenance:");
-  lines.push("  addroid status");
-  lines.push("  addroid init --interactive --force       # 初期セットアップを明示的に再実行");
-  lines.push("  addroid init --interactive --reauth-meta # Meta token を再認証");
-  lines.push("  addroid init --interactive --reauth-github # GitHub token / ops repo を再設定");
-  lines.push("  addroid init --interactive --reauth-llm  # LLM provider を選び直して再認証");
+  if (serviceSetupLines.length > 0) {
+    const [, ...serviceLines] =
+      serviceSetupLines[0] === "常駐サービス:" ? serviceSetupLines : ["", ...serviceSetupLines];
+    lines.push("Service:");
+    lines.push(...serviceLines);
+  } else {
+    lines.push("Service:");
+    const service = await import("../lib/service.js")
+      .then((mod) => mod.getAddroidServiceStatus())
+      .catch((err) => ({
+        platform: "unsupported" as const,
+        installed: false,
+        running: false,
+        detail: (err as Error).message,
+      }));
+    lines.push(...formatServiceStatus(service));
+  }
+  lines.push("");
+  lines.push(...formatCommonCommandGuide());
+  lines.push("");
+  lines.push("接続を直すとき:");
+  lines.push("  addroid connect meta       # Meta token を再認証");
+  lines.push("  addroid connect github     # GitHub token / ops repo を再設定");
+  lines.push("  addroid connect ai         # LLM provider を選び直して再認証");
+  lines.push("");
+  lines.push("初期設定をやり直すとき:");
+  lines.push("  addroid init --force       # 初期セットアップ全体を明示的に再確認");
   lines.push("");
   process.stdout.write(lines.join("\n"));
 }
@@ -2128,6 +2287,7 @@ function parseInitArgs(args: string[]): InitOptions {
     reauthGithub: false,
     reauthLlm: false,
     noChat: false,
+    noService: false,
     help: false,
   };
   for (let i = 0; i < args.length; i += 1) {
@@ -2153,6 +2313,7 @@ function parseInitArgs(args: string[]): InitOptions {
     else if (a === "--reauth-github") opts.reauthGithub = true;
     else if (a === "--reauth-llm") opts.reauthLlm = true;
     else if (a === "--no-chat") opts.noChat = true;
+    else if (a === "--no-service") opts.noService = true;
     else if (a === "--project-name") opts.projectName = next();
     else if (a.startsWith("--project-name=")) opts.projectName = a.slice("--project-name=".length);
     else if (a === "--database-url") opts.databaseUrl = next();
@@ -2170,11 +2331,11 @@ function printInitHelp(): void {
       "addroid init — first-run setup wizard",
       "",
       "Usage:",
-      "  addroid init [--interactive]",
+      "  addroid init",
       "  addroid init --non-interactive --yes [--project-name NAME] [--database-url URL]",
       "",
       "Options:",
-      "  --interactive          対話型ウィザードを強制",
+      "  --interactive          対話型ウィザードを強制 (通常の端末では省略可)",
       "  --non-interactive      対話せず実行。単独指定時は ~/.addroid scaffold のみ作成",
       "  --yes, -y              既定値で .env・DB を初期化し、確認を省略",
       "  --project-name NAME    workspace 名を設定",
@@ -2188,10 +2349,11 @@ function printInitHelp(): void {
       "  --mock-integrations    初回検証用に mock フラグを .env に追加",
       "  --skip-link-cli        `addroid` コマンドの checkout link をスキップ",
       "  --force                初期化済み検出を無視してセットアップ確認を再実行",
-      "  --reauth-meta          既存 Meta token があっても Meta 接続を再実行",
-      "  --reauth-github        既存 GitHub token / ops repo があっても GitHub 接続を再実行",
-      "  --reauth-llm           既存 LLM credential があっても provider 選択から再認証",
+      "  --reauth-meta          互換用: Meta 接続だけを再実行。通常は `addroid connect meta`",
+      "  --reauth-github        互換用: GitHub 接続だけを再実行。通常は `addroid connect github`",
+      "  --reauth-llm           互換用: LLM 接続だけを再実行。通常は `addroid connect ai`",
       "  --no-chat              セットアップ完了後に `addroid chat` を自動起動しない",
+      "  --no-service           セットアップ完了後の常駐サービス自動インストールをスキップ",
       "",
       "Interactive setup:",
       "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",
