@@ -8,8 +8,10 @@ import assert from "node:assert/strict";
 import {
   computeKpiDeltas,
   microsToMajor,
+  resolveDailyReportTimeZone,
   runDailyReportOnce,
   subtractOneUtcDay,
+  toDateStringInTimeZone,
   toKpiSet,
   toUtcDateString,
   type DailyReportAdAccountSnapshot,
@@ -83,6 +85,7 @@ const ACCOUNT: DailyReportAdAccountSnapshot = {
   displayName: "Primary",
   metaAccountId: "act_111",
   currency: "JPY",
+  timezoneName: "Asia/Tokyo",
 };
 
 function makeRow(
@@ -227,6 +230,25 @@ test("toUtcDateString is UTC-stable", () => {
   assert.equal(toUtcDateString(new Date("2026-05-02T23:59:00Z")), "2026-05-02");
 });
 
+test("toDateStringInTimeZone derives the local calendar date", () => {
+  const instant = new Date("2026-05-02T23:30:00Z");
+  assert.equal(toDateStringInTimeZone(instant, "UTC"), "2026-05-02");
+  assert.equal(toDateStringInTimeZone(instant, "Asia/Tokyo"), "2026-05-03");
+  assert.equal(
+    toDateStringInTimeZone(new Date("2026-05-02T02:30:00Z"), "America/Los_Angeles"),
+    "2026-05-01"
+  );
+});
+
+test("resolveDailyReportTimeZone prefers account timezone over fallback", () => {
+  assert.equal(
+    resolveDailyReportTimeZone("America/Los_Angeles", "Asia/Tokyo"),
+    "America/Los_Angeles"
+  );
+  assert.equal(resolveDailyReportTimeZone(null, "Asia/Tokyo"), "Asia/Tokyo");
+  assert.equal(resolveDailyReportTimeZone("not/a-zone", "UTC"), "UTC");
+});
+
 // ---------------------------------------------------------------------
 // runDailyReportOnce — orchestration
 // ---------------------------------------------------------------------
@@ -254,6 +276,58 @@ test("runDailyReportOnce returns no_account when ad_account is missing", async (
   assert.equal(insights.calls.length, 0);
   assert.equal(store.upsertCalls.length, 0);
   assert.equal(analyst.calls.length, 0);
+});
+
+test("runDailyReportOnce derives metricDate from the Meta account timezone", async () => {
+  const insights = new FakeInsightsProvider({
+    current: [makeRow("account", "act_111")],
+    prior: [],
+    source: "mock",
+  });
+  const store = new FakeSnapshotStore({
+    ...ACCOUNT,
+    timezoneName: "Asia/Tokyo",
+  });
+  const analyst = new FakeAnalystRunner(makeAnalystResult());
+  const summary = await runDailyReportOnce({
+    workspaceId: "ws-1",
+    mode: "report_only",
+    accountKey: "primary",
+    now: () => new Date("2026-05-02T23:30:00Z"),
+    fallbackTimeZone: "UTC",
+    insightsProvider: insights,
+    store,
+    analyst,
+  });
+  assert.equal(summary.metricDate, "2026-05-03");
+  assert.equal(summary.priorMetricDate, "2026-05-02");
+  assert.equal(summary.metricTimeZone, "Asia/Tokyo");
+  assert.equal(insights.calls[0]!.metricDate, "2026-05-03");
+});
+
+test("runDailyReportOnce falls back to the user timezone when account timezone is missing", async () => {
+  const insights = new FakeInsightsProvider({
+    current: [makeRow("account", "act_111")],
+    prior: [],
+    source: "mock",
+  });
+  const store = new FakeSnapshotStore({
+    ...ACCOUNT,
+    timezoneName: null,
+  });
+  const analyst = new FakeAnalystRunner(makeAnalystResult());
+  const summary = await runDailyReportOnce({
+    workspaceId: "ws-1",
+    mode: "report_only",
+    accountKey: "primary",
+    now: () => new Date("2026-05-02T02:30:00Z"),
+    fallbackTimeZone: "America/Los_Angeles",
+    insightsProvider: insights,
+    store,
+    analyst,
+  });
+  assert.equal(summary.metricDate, "2026-05-01");
+  assert.equal(summary.metricTimeZone, "America/Los_Angeles");
 });
 
 test("runDailyReportOnce stores 4-level snapshots and emits AI commentary + top improvements", async () => {

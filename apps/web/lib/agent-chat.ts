@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { spawn } from "node:child_process";
+import cronParser from "cron-parser";
 import {
   buildAgentContext,
   runAgentTurn,
@@ -9,14 +10,17 @@ import {
 import { getCryptoBoundary } from "@addroid/config";
 import type { LLMProvider } from "@addroid/llm-provider";
 import { Prisma } from "@addroid/db";
-import { CRON_PRESETS, type CronPresetName } from "@addroid/queue";
+import {
+  CRON_PRESETS,
+  validateCronExpression,
+  type CronPresetName,
+} from "@addroid/queue";
 import { prisma } from "./prisma";
 import { ensureWebWorkspace } from "./github-runtime";
 import { loadDashboardStatus } from "./status";
 import {
   runCronNow,
-  setCronSchedule,
-  toggleCron,
+  setCronScheduleEnabled,
 } from "./cron-actions";
 import { selectLLMProviderForWorker } from "../../worker/src/lib/llm-runtime";
 import {
@@ -75,6 +79,7 @@ export async function runWebAgentChat(
     provider: selection.provider,
     agentContext,
     purpose: "web:dashboard-chat",
+    surface: "web-chat",
   });
 
   const executions: WebAgentExecution[] = [];
@@ -223,6 +228,10 @@ export async function executeWebAgentTool(
         return connectServiceResult(tool.toolArgs, tool.display);
       case "get_report":
         return await runReportTool(tool.toolArgs, tool.display, webUrl);
+      case "create_scheduled_agent_task":
+        return await createScheduledAgentTaskTool(tool.toolArgs, tool.display);
+      case "set_schedule_enabled":
+        return await setScheduleEnabledTool(tool.toolArgs, tool.display);
       case "manage_schedule":
         return await manageScheduleTool(tool.toolArgs, tool.display);
       case "check_submission":
@@ -330,7 +339,7 @@ async function runReportTool(
   webUrl: string
 ): Promise<WebAgentExecution> {
   const preset = reportPreset(typeof args.kind === "string" ? args.kind : "daily");
-  const metricDate = readOptionalString(args.metricDate) ?? readOptionalString(args.metric_date);
+  const metricDate = resolveMetricDateArg(args);
   const result = await runCronNow(preset, metricDate ? { metricDate } : undefined);
   if (!result.ok) {
     return {
@@ -371,6 +380,84 @@ async function runReportTool(
   };
 }
 
+async function createScheduledAgentTaskTool(
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const prompt = readRequiredString(args.prompt, "prompt");
+  const cron = readRequiredString(args.cron, "cron");
+  const title = readOptionalString(args.title) ?? undefined;
+  const runNow = args.runNow === true;
+  const validation = validateCronExpression(cron);
+  if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
+  const workspace = await ensureWebWorkspace();
+  const taskTitle = title ?? deriveAgentTaskTitle(prompt);
+  const nextRunAt = runNow ? new Date() : computeNextRunAt(cron);
+  const task = await prisma.agentTask.create({
+    data: {
+      workspaceId: workspace.id,
+      title: taskTitle,
+      prompt,
+      cron,
+      enabled: true,
+      nextRunAt,
+      createdBy: "agent:web-chat",
+    },
+    select: {
+      id: true,
+      title: true,
+      prompt: true,
+      cron: true,
+      enabled: true,
+      nextRunAt: true,
+    },
+  });
+  await recordAgentAudit(
+    workspace.id,
+    "agent_task.created_via_chat",
+    { title: taskTitle, cron, prompt, runNow },
+    "agent:web-chat"
+  );
+  const queued = runNow ? await runCronNow("agent_tasks") : null;
+  return {
+    display,
+    status: queued && !queued.ok ? "error" : "ok",
+    message: queued && !queued.ok
+      ? queued.error
+      : `Agent task を設定しました。次回実行: ${task.nextRunAt ? task.nextRunAt.toISOString() : "未定"}`,
+    data: { task, queued },
+  };
+}
+
+function computeNextRunAt(cron: string, currentDate = new Date()): Date {
+  return cronParser.parseExpression(cron, { currentDate }).next().toDate();
+}
+
+function deriveAgentTaskTitle(prompt: string): string {
+  const first = prompt.replace(/\s+/g, " ").trim();
+  return first.length <= 40 ? first : `${first.slice(0, 39)}…`;
+}
+
+async function setScheduleEnabledTool(
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const preset = reportPreset(readRequiredString(args.preset, "preset"));
+  const cron = readOptionalString(args.cron);
+  const result = await setCronScheduleEnabled(preset, {
+    cron,
+    enabled: args.enabled === true,
+  });
+  return result.ok
+    ? {
+        display,
+        status: "ok",
+        message: `${preset} を ${result.enabled ? "ON" : "OFF"} にしました。cron=${result.cron}`,
+        data: result,
+      }
+    : { display, status: "error", message: result.error };
+}
+
 async function manageScheduleTool(
   args: Record<string, unknown>,
   display: string
@@ -403,19 +490,6 @@ async function manageScheduleTool(
     const result = await runCronNow(preset);
     return result.ok
       ? { display, status: "ok", message: `${preset} を実行キューに積みました。`, data: result }
-      : { display, status: "error", message: result.error };
-  }
-  if (action === "enable" || action === "disable") {
-    const result = await toggleCron(preset, action === "enable");
-    return result.ok
-      ? { display, status: "ok", message: `${preset} を ${result.enabled ? "ON" : "OFF"} にしました。`, data: result }
-      : { display, status: "error", message: result.error };
-  }
-  if (action === "set") {
-    const cron = typeof args.cron === "string" ? args.cron : "";
-    const result = await setCronSchedule(preset, cron);
-    return result.ok
-      ? { display, status: "ok", message: `${preset} の schedule を ${result.cron} にしました。`, data: result }
       : { display, status: "error", message: result.error };
   }
   return {
@@ -1285,6 +1359,42 @@ function readOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function readRequiredString(value: unknown, key: string): string {
+  const text = readOptionalString(value);
+  if (!text) throw new Error(`${key} が指定されていません。`);
+  return text;
+}
+
+function resolveMetricDateArg(args: Record<string, unknown>): string | null {
+  const explicit = readOptionalString(args.metricDate) ?? readOptionalString(args.metric_date);
+  if (explicit) return explicit;
+  const relative =
+    readOptionalString(args.metricDateRelative) ??
+    readOptionalString(args.metric_date_relative);
+  if (!relative) return null;
+  const normalized = relative.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "today") return dateStringInRuntimeTimeZone(0);
+  if (normalized === "yesterday") return dateStringInRuntimeTimeZone(-1);
+  throw new Error("metricDateRelative は today / yesterday のいずれかで指定してください。");
+}
+
+function dateStringInRuntimeTimeZone(offsetDays: number): string {
+  const timeZone =
+    process.env.ADDROID_USER_TIMEZONE?.trim() ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === "year")?.value ?? "1970");
+  const m = Number(parts.find((p) => p.type === "month")?.value ?? "01");
+  const d = Number(parts.find((p) => p.type === "day")?.value ?? "01");
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
 function readNullableNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -1355,6 +1465,8 @@ function reportPreset(value: string): CronPresetName {
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
+              : v === "agent" || v === "agent_task" || v === "agent_tasks"
+                ? "agent_tasks"
               : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";

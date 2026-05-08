@@ -151,8 +151,10 @@ export {
 export {
   computeKpiDeltas,
   microsToMajor,
+  resolveDailyReportTimeZone,
   runDailyReportOnce,
   subtractOneUtcDay,
+  toDateStringInTimeZone,
   toKpiSet,
   toUtcDateString,
   type DailyReportAdAccountSnapshot,

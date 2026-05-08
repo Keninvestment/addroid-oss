@@ -19,3 +19,13 @@ export {
   type AgentToolName,
   type AgentToolResult,
 } from "./runtime.js";
+
+export {
+  AGENT_TOOL_MANIFEST,
+  getAgentToolsForSurface,
+  isToolAllowedOnSurface,
+  renderToolManifestForPrompt,
+  type AgentSurface,
+  type AgentToolDefinition,
+  type AgentToolEffect,
+} from "./manifest.js";

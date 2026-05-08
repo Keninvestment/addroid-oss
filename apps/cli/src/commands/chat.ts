@@ -17,7 +17,6 @@ import {
   resolveWebBinding,
 } from "@addroid/config";
 import type {
-  LLMCompletionRequest,
   LLMProvider,
 } from "@addroid/llm-provider";
 import {
@@ -54,47 +53,6 @@ type ChatCommandName =
   | "activate"
   | "backup";
 
-type ChatToolName =
-  | "diagnose"
-  | "check_status"
-  | "list_ad_accounts"
-  | "sync_ad_accounts"
-  | "select_ad_account"
-  | "connect_service"
-  | "get_report"
-  | "check_submission"
-  | "manage_schedule"
-  | "show_logs"
-  | "stop_services"
-  | "start_delivery"
-  | "backup_data"
-  | "open_web_ui"
-  | "query_meta_ads";
-
-interface ChatToolCall {
-  name: string;
-  args?: Record<string, unknown>;
-  why?: string;
-}
-
-interface ChatAgentResponse {
-  message?: string;
-  tools?: ChatToolCall[];
-}
-
-interface ChatCommandPlan {
-  command: ChatCommandName;
-  args?: string[];
-  why?: string;
-}
-
-interface LegacyChatPlan {
-  type: "answer" | "commands";
-  message?: string;
-  summary?: string;
-  commands?: ChatCommandPlan[];
-}
-
 interface ParsedChatArgs {
   help: boolean;
   once?: string;
@@ -109,14 +67,6 @@ export interface ChatCommandOverrides {
   output?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   agentContext?: AgentContext;
-}
-
-interface ResolvedTool {
-  tool: ChatToolName;
-  command: ChatCommandName | null;
-  args: string[];
-  display: string;
-  why: string;
 }
 
 interface ChatMemoryTurn {
@@ -333,6 +283,7 @@ async function handleChatInput(
         agentContext,
         model: opts.model,
         purpose: "cli:chat-agent",
+        surface: "cli-chat",
       })
     );
   } catch (err) {
@@ -381,7 +332,8 @@ async function handleChatInput(
     }
     opts.out.write(`> ${tool.display}${tool.why ? `  # ${tool.why}` : ""}\n`);
     if (tool.command === null) {
-      opts.out.write(`${opts.agentContext.webUrl}\n`);
+      opts.out.write(`unsupported local tool: ${tool.tool}\n`);
+      lastCode = 1;
       toolSummaries.push(`${tool.tool}: ok`);
       continue;
     }
@@ -510,6 +462,12 @@ async function executeUserFacingTool(
   if (tool.tool === "check_submission") {
     return { handled: true, code: await runSubmissionCheckForChat(tool, opts) };
   }
+  if (tool.tool === "create_scheduled_agent_task") {
+    return { handled: true, code: await createScheduledAgentTaskForChat(tool, opts) };
+  }
+  if (tool.tool === "set_schedule_enabled") {
+    return { handled: true, code: await setScheduleEnabledForChat(tool, opts) };
+  }
   if (tool.tool === "open_web_ui") {
     opts.out.write(`Web UI を開くにはこちらを使ってください:\n${opts.agentContext.webUrl}\n`);
     return { handled: true, code: 0 };
@@ -544,7 +502,7 @@ async function runDailyReportForChat(
   let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
   try {
     ctx = await prepareChatCronContext(opts.env);
-    const metricDate = readMetaStringArg(tool.toolArgs, "metricDate", "metric_date");
+    const metricDate = resolveMetricDateArg(tool.toolArgs);
     const jobId = await ctx.boss.send("daily_report", metricDate ? { metricDate } : {});
     if (!jobId) {
       opts.out.write(
@@ -585,6 +543,144 @@ async function runDailyReportForChat(
       return 130;
     }
     opts.out.write(`日次レポートを取得できませんでした: ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function createScheduledAgentTaskForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
+  }
+): Promise<number> {
+  if (!opts.env.DATABASE_URL) {
+    opts.out.write("Agent task を作成できません。先に `addroid init` を完了してください。\n");
+    return 2;
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const prompt = readRequiredToolString(tool.toolArgs, "prompt");
+    const cron = readRequiredToolString(tool.toolArgs, "cron");
+    const title = readMetaStringArg(tool.toolArgs, "title") ?? deriveAgentTaskTitle(prompt);
+    const runNow = tool.toolArgs.runNow === true;
+    const { validateCronExpression } = await import("@addroid/queue");
+    const validation = validateCronExpression(cron);
+    if (!validation.ok) {
+      opts.out.write(`Agent task を作成できません。cron 式が不正です: ${validation.reason}\n`);
+      return 2;
+    }
+    ctx = await prepareChatCronContext(opts.env);
+    const nextRunAt = runNow ? new Date() : await computeNextRunAt(cron);
+    const task = await ctx.prisma.agentTask.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        title,
+        prompt,
+        cron,
+        enabled: true,
+        nextRunAt,
+        createdBy: "agent:cli-chat",
+      },
+      select: { id: true, title: true, prompt: true, cron: true, nextRunAt: true },
+    });
+    await ctx.prisma.auditLog.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        actor: "agent:cli-chat",
+        action: "agent_task.created_via_chat",
+        target: `agent_task:${task.id}`,
+        metadata: { title, cron, prompt, runNow },
+      },
+    }).catch(() => undefined);
+    let jobId: string | null = null;
+    if (runNow) {
+      jobId = await ctx.boss.send("agent_tasks", {
+        manual: true,
+        requestedBy: "agent:cli-chat",
+        requestedAt: new Date().toISOString(),
+      });
+    }
+    opts.out.write(
+      [
+        "Agent task を設定しました。",
+        `- 実行内容: ${task.prompt}`,
+        `- schedule: ${task.cron}`,
+        `- 次回実行: ${task.nextRunAt ? task.nextRunAt.toISOString() : "(未定)"}`,
+        ...(jobId ? [`- 今すぐ実行: queued (${jobId})`] : []),
+        `確認: ${opts.agentContext.webUrl}/cron`,
+        "",
+      ].join("\n")
+    );
+    return 0;
+  } catch (err) {
+    opts.out.write(`Agent task を作成できませんでした: ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function setScheduleEnabledForChat(
+  tool: ReadyAgentTool,
+  opts: { out: NodeJS.WritableStream; env: NodeJS.ProcessEnv }
+): Promise<number> {
+  if (!opts.env.DATABASE_URL) {
+    opts.out.write("Schedule を更新できません。先に `addroid init` を完了してください。\n");
+    return 2;
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const { CRON_PRESETS, validateCronExpression } = await import("@addroid/queue");
+    const preset = normalizePresetName(readRequiredToolString(tool.toolArgs, "preset"));
+    const presetDef = CRON_PRESETS.find((p) => p.name === preset);
+    if (!presetDef) throw new Error(`未知の preset です: ${preset}`);
+    const enabled = tool.toolArgs.enabled === true;
+    const requestedCron = readMetaStringArg(tool.toolArgs, "cron");
+    if (requestedCron) {
+      const validation = validateCronExpression(requestedCron);
+      if (!validation.ok) {
+        opts.out.write(`Schedule を更新できません。cron 式が不正です: ${validation.reason}\n`);
+        return 2;
+      }
+    }
+    ctx = await prepareChatCronContext(opts.env);
+    const existing = await ctx.prisma.cronSchedule.findUnique({
+      where: { workspaceId_name: { workspaceId: ctx.workspaceId, name: preset } },
+      select: { cron: true, enabled: true },
+    });
+    const cron = requestedCron ?? existing?.cron ?? presetDef.cron;
+    if (enabled) await ctx.boss.schedule(preset, cron);
+    else await ctx.boss.unschedule(preset);
+    await ctx.prisma.cronSchedule.update({
+      where: { workspaceId_name: { workspaceId: ctx.workspaceId, name: preset } },
+      data: { cron, enabled },
+    });
+    await ctx.prisma.auditLog.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        actor: "agent:cli-chat",
+        action: "cron.schedule_set_via_chat",
+        target: `cron_schedule:${preset}`,
+        ref: preset,
+        metadata: { preset, cron, enabled, previousCron: existing?.cron ?? null, previousEnabled: existing?.enabled ?? null },
+      },
+    }).catch(() => undefined);
+    opts.out.write(
+      [
+        "Schedule を更新しました。",
+        `- preset: ${preset}`,
+        `- cron: ${cron}`,
+        `- 状態: ${enabled ? "ON" : "OFF"}`,
+        "",
+      ].join("\n")
+    );
+    return 0;
+  } catch (err) {
+    opts.out.write(`Schedule を更新できませんでした: ${(err as Error).message}\n`);
     return 1;
   } finally {
     await ctx?.close().catch(() => undefined);
@@ -1363,6 +1459,61 @@ function readMetaStringArg(args: Record<string, unknown>, ...keys: string[]): st
   return null;
 }
 
+function readRequiredToolString(args: Record<string, unknown>, key: string): string {
+  const value = readOptionalString(args[key]);
+  if (!value) throw new Error(`${key} が指定されていません`);
+  return value;
+}
+
+function resolveMetricDateArg(args: Record<string, unknown>): string | null {
+  const explicit = readMetaStringArg(args, "metricDate", "metric_date");
+  if (explicit) return explicit;
+  const relative = readMetaStringArg(args, "metricDateRelative", "metric_date_relative");
+  if (!relative) return null;
+  const normalized = relative.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "today") return dateStringInRuntimeTimeZone(0);
+  if (normalized === "yesterday") return dateStringInRuntimeTimeZone(-1);
+  throw new Error(`metricDateRelative は today / yesterday のいずれかで指定してください`);
+}
+
+async function computeNextRunAt(cron: string): Promise<Date> {
+  const { default: cronParser } = await import("cron-parser");
+  return cronParser.parseExpression(cron).next().toDate();
+}
+
+function deriveAgentTaskTitle(prompt: string): string {
+  const first = prompt.replace(/\s+/g, " ").trim();
+  return first.length <= 40 ? first : `${first.slice(0, 39)}…`;
+}
+
+function normalizePresetName(value: string): string {
+  const v = value.trim().toLowerCase().replace(/-/g, "_");
+  if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
+  if (v === "budget" || v === "budget_guard") return "budget_guard";
+  if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
+  if (v === "github" || v === "github_poll") return "github_poll";
+  if (v === "retention" || v === "retention_sweep") return "retention_sweep";
+  if (v === "agent" || v === "agent_task" || v === "agent_tasks") return "agent_tasks";
+  return v;
+}
+
+function dateStringInRuntimeTimeZone(offsetDays: number): string {
+  const timeZone =
+    process.env.ADDROID_USER_TIMEZONE?.trim() ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === "year")?.value ?? "1970");
+  const m = Number(parts.find((p) => p.type === "month")?.value ?? "01");
+  const d = Number(parts.find((p) => p.type === "day")?.value ?? "01");
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
 function optionalMetaEnum<T extends string>(
   args: Record<string, unknown>,
   key: string,
@@ -1611,380 +1762,6 @@ function formatElapsed(ms: number): string {
   return `${seconds}s`;
 }
 
-function safeResolveTool(
-  tool: Required<ChatToolCall>,
-  out: NodeJS.WritableStream
-): ResolvedTool | null {
-  try {
-    const resolved = resolveTool(tool);
-    if (!resolved) out.write(`unsupported tool: ${tool.name}\n`);
-    return resolved;
-  } catch (err) {
-    out.write(`invalid tool: ${tool.name} (${(err as Error).message})\n`);
-    return null;
-  }
-}
-
-async function buildAgentResponseWithLlm(
-  input: string,
-  provider: LLMProvider,
-  agentContext: AgentContext,
-  model?: string
-): Promise<ChatAgentResponse> {
-  const req: LLMCompletionRequest = {
-    ...(model ? { model } : {}),
-    temperature: 0.2,
-    maxOutputTokens: 1_500,
-    purpose: "cli:chat-agent",
-    messages: [
-      {
-        role: "system",
-        content: buildChatSystemPrompt(agentContext),
-      },
-      {
-        role: "user",
-        content: input,
-      },
-    ],
-  };
-  const res = await provider.complete(req);
-  return parseAgentResponse(res.content);
-}
-
-function buildChatSystemPrompt(agentContext: AgentContext): string {
-  return [
-    "You are AdDroid CLI chat agent.",
-    "Respond in Japanese. Be concise and operational.",
-    "You may answer normally when no tool is needed.",
-    "When an AdDroid operation should run, return ONLY strict JSON with this schema:",
-    '{"message":"short Japanese message","tools":[{"name":"get_report","args":{"kind":"daily"},"why":"short reason"}]}',
-    "Do not wrap JSON in markdown.",
-    "Available tool names:",
-    "- diagnose: args {}",
-    "- check_status: args {}",
-    "- list_ad_accounts: args {json?: boolean}",
-    "- sync_ad_accounts: args {selectDefault?: boolean,json?: boolean}",
-    "- select_ad_account: args {adAccountId?: string,key?: string,json?: boolean}",
-    "- connect_service: args {service:'meta'|'github'|'ai'|'slack', aiProvider?:'codex'|'openai'|'anthropic'}",
-    "- get_report: args {kind?:'daily'|'budget'|'improvement', metricDate?:'YYYY-MM-DD'}",
-    "- check_submission: args {root?: string,base?: string,account?: string,save?: boolean}",
-    "- manage_schedule: args {action:'list'|'enable'|'disable'|'run'|'logs'|'set', preset?:'daily'|'budget'|'improvement'|'github'|'retention', cron?: string, limit?: number}",
-    "- show_logs: args {target?:'up'|'web'|'worker'|'all', lines?: number}",
-    "- stop_services: args {}",
-    "- start_delivery: args {hierarchyId:string,note?:string,json?:boolean}",
-    "- backup_data: args {}",
-    "- open_web_ui: args {}",
-    "- query_meta_ads: read-only Meta Ads CLI query. args {resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
-    "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
-    "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD when the user asks for a specific or relative report date. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
-    "For performance analysis, request the fields needed for the user's question. For frequency ask for frequency. For CPA/CV/conversion checks request spend plus actions and, when useful, cost_per_action_type/action_values. Do not rely on display text for automation decisions; tool executors keep raw structured rows.",
-    "Never request arbitrary shell, restore, destructive git, direct DB writes, direct Meta mutation outside audited paths, or secret display.",
-    "Actual ad submission must go through ops repo validation, dry-run plan, GitHub PR review/merge, and worker apply.",
-    "Agent context:",
-    agentContext.content,
-  ].join("\n");
-}
-
-function parseAgentResponse(content: string): ChatAgentResponse {
-  const trimmed = content.trim();
-  const jsonText = tryExtractJsonObject(trimmed);
-  if (!jsonText) return { message: trimmed, tools: [] };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText) as unknown;
-  } catch {
-    return { message: trimmed, tools: [] };
-  }
-  if (isLegacyPlan(parsed)) return legacyPlanToAgentResponse(parsed);
-  if (!isRecord(parsed)) return { message: trimmed, tools: [] };
-  const message = typeof parsed.message === "string" ? parsed.message : "";
-  const tools = Array.isArray(parsed.tools)
-    ? parsed.tools.flatMap((t) => (isRecord(t) ? [toolFromRecord(t)] : []))
-    : [];
-  return { message, tools };
-}
-
-function tryExtractJsonObject(text: string): string | null {
-  if (text.startsWith("{") && text.endsWith("}")) return text;
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
-  return text.slice(start, end + 1);
-}
-
-function isLegacyPlan(value: unknown): value is LegacyChatPlan {
-  if (!isRecord(value)) return false;
-  return value.type === "answer" || value.type === "commands";
-}
-
-function legacyPlanToAgentResponse(plan: LegacyChatPlan): ChatAgentResponse {
-  if (plan.type === "answer") return { message: plan.message ?? "", tools: [] };
-  return {
-    message: plan.summary ?? "",
-    tools: (plan.commands ?? []).map((c) => ({
-      name: `legacy:${c.command}`,
-      args: {
-        args: Array.isArray(c.args) ? c.args : [],
-      },
-      why: c.why ?? "",
-    })),
-  };
-}
-
-function toolFromRecord(record: Record<string, unknown>): ChatToolCall {
-  const args = isRecord(record.args) ? record.args : {};
-  return {
-    name: String(record.name ?? ""),
-    args,
-    why: typeof record.why === "string" ? record.why : "",
-  };
-}
-
-function normalizeToolCall(tool: ChatToolCall): Required<ChatToolCall> {
-  return {
-    name: tool.name.trim(),
-    args: sanitizeToolArgs(tool.args ?? {}),
-    why: tool.why ?? "",
-  };
-}
-
-function sanitizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === "string") out[key] = value.trim();
-    else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
-    else if (Array.isArray(value)) out[key] = value.map((v) => String(v));
-  }
-  return out;
-}
-
-function resolveTool(tool: Required<ChatToolCall>): ResolvedTool | null {
-  if (tool.name.startsWith("legacy:")) {
-    return resolveLegacyCommand(tool);
-  }
-  const name = normalizeToolName(tool.name);
-  switch (name) {
-    case "diagnose":
-      return commandTool(name, "doctor", [], tool.why);
-    case "check_status":
-      return commandTool(name, "status", [], tool.why);
-    case "list_ad_accounts":
-      return commandTool(name, "account", boolArgs([], tool.args, ["json"]), tool.why);
-    case "sync_ad_accounts":
-      return commandTool(
-        name,
-        "account",
-        boolArgs(["sync"], tool.args, ["selectDefault", "json"], {
-          selectDefault: "--select-default",
-        }),
-        tool.why
-      );
-    case "select_ad_account":
-      return commandTool(name, "account", buildSelectAccountArgs(tool.args), tool.why);
-    case "connect_service":
-      return commandTool(name, "connect", buildConnectArgs(tool.args), tool.why);
-    case "get_report":
-      return commandTool(name, "report", buildReportArgs(tool.args), tool.why);
-    case "check_submission":
-      return commandTool(name, "submit", buildSubmitArgs(tool.args), tool.why);
-    case "manage_schedule":
-      return commandTool(name, "schedule", buildScheduleArgs(tool.args), tool.why);
-    case "show_logs":
-      return commandTool(name, "logs", buildLogsArgs(tool.args), tool.why);
-    case "stop_services":
-      return commandTool(name, "stop", [], tool.why);
-    case "start_delivery":
-      return commandTool(name, "activate", buildActivateArgs(tool.args), tool.why);
-    case "backup_data":
-      return commandTool(name, "backup", [], tool.why);
-    case "open_web_ui":
-      return {
-        tool: name,
-        command: null,
-        args: [],
-        display: "open Web UI",
-        why: tool.why,
-      };
-    default:
-      return null;
-  }
-}
-
-function resolveLegacyCommand(tool: Required<ChatToolCall>): ResolvedTool | null {
-  const command = tool.name.slice("legacy:".length) as ChatCommandName;
-  const args = Array.isArray(tool.args.args) ? tool.args.args.map(String) : [];
-  const normalized = normalizeLegacyCommand(command, args);
-  if (!normalized) return null;
-  return commandTool(tool.name as ChatToolName, normalized.command, normalized.args, tool.why);
-}
-
-function normalizeLegacyCommand(
-  command: ChatCommandName,
-  args: string[]
-): { command: ChatCommandName; args: string[] } | null {
-  if (args.some(hasUnsafeShellChars)) return null;
-  if (command === "activate") return args.length > 0 ? { command, args } : null;
-  if (command === "backup") return args.length === 0 ? { command, args } : null;
-  if (["doctor", "status", "logs", "stop", "submit", "schedule", "connect", "account", "report"].includes(command)) {
-    return { command, args };
-  }
-  return null;
-}
-
-function commandTool(
-  tool: ChatToolName,
-  command: ChatCommandName,
-  args: string[],
-  why: string
-): ResolvedTool {
-  if (args.some(hasUnsafeShellChars)) {
-    throw new Error(`unsafe characters in ${tool} args`);
-  }
-  return {
-    tool,
-    command,
-    args,
-    display: `addroid ${command}${args.length ? ` ${args.join(" ")}` : ""}`,
-    why,
-  };
-}
-
-function buildSelectAccountArgs(args: Record<string, unknown>): string[] {
-  const out = boolArgs(["choose", "--yes"], args, ["json"]);
-  pushOptionalString(out, "--ad-account-id", args, "adAccountId");
-  pushOptionalString(out, "--key", args, "key");
-  return out;
-}
-
-function buildConnectArgs(args: Record<string, unknown>): string[] {
-  const service = requireEnum(args, "service", ["meta", "github", "ai", "slack"]);
-  const out: string[] = [service];
-  if (service === "ai") {
-    const aiProvider = optionalEnum(args, "aiProvider", ["codex", "openai", "anthropic"]);
-    if (aiProvider) out.push("--provider", aiProvider);
-  }
-  return out;
-}
-
-function buildReportArgs(args: Record<string, unknown>): string[] {
-  const kind = optionalEnum(args, "kind", ["daily", "budget", "improvement"]);
-  return kind ? [kind] : [];
-}
-
-function buildSubmitArgs(args: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  pushOptionalString(out, "--root", args, "root");
-  pushOptionalString(out, "--base", args, "base");
-  pushOptionalString(out, "--account", args, "account");
-  if (args.save === true) out.push("--save");
-  return out;
-}
-
-function buildScheduleArgs(args: Record<string, unknown>): string[] {
-  const action = requireEnum(args, "action", ["list", "enable", "disable", "run", "logs", "set"]);
-  const out: string[] = [action];
-  if (action !== "list") {
-    out.push(requireEnum(args, "preset", ["daily", "budget", "improvement", "github", "retention"]));
-  }
-  if (action === "set") out.push(requireString(args, "cron"));
-  const limit = optionalPositiveInt(args, "limit");
-  if (limit !== null) out.push("--limit", String(limit));
-  return out;
-}
-
-function buildLogsArgs(args: Record<string, unknown>): string[] {
-  const target = optionalEnum(args, "target", ["up", "web", "worker", "all"]);
-  const out: string[] = target ? [target] : [];
-  const lines = optionalPositiveInt(args, "lines");
-  if (lines !== null) out.push("--lines", String(lines));
-  return out;
-}
-
-function buildActivateArgs(args: Record<string, unknown>): string[] {
-  const out = [requireString(args, "hierarchyId")];
-  pushOptionalString(out, "--note", args, "note");
-  if (args.json === true) out.push("--json");
-  return out;
-}
-
-function boolArgs(
-  base: string[],
-  args: Record<string, unknown>,
-  keys: string[],
-  aliases: Record<string, string> = {}
-): string[] {
-  const out = [...base];
-  for (const key of keys) {
-    if (args[key] === true) out.push(aliases[key] ?? `--${kebab(key)}`);
-  }
-  return out;
-}
-
-function requireString(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${key} is required`);
-  }
-  return value.trim();
-}
-
-function requireEnum<T extends string>(
-  args: Record<string, unknown>,
-  key: string,
-  values: T[]
-): T {
-  const value = requireString(args, key);
-  if (!values.includes(value as T)) {
-    throw new Error(`${key} must be one of ${values.join(", ")}`);
-  }
-  return value as T;
-}
-
-function optionalEnum<T extends string>(
-  args: Record<string, unknown>,
-  key: string,
-  values: T[]
-): T | null {
-  const value = args[key];
-  if (value === undefined || value === null || value === "") return null;
-  if (typeof value !== "string" || !values.includes(value as T)) {
-    throw new Error(`${key} must be one of ${values.join(", ")}`);
-  }
-  return value as T;
-}
-
-function optionalPositiveInt(args: Record<string, unknown>, key: string): number | null {
-  const value = args[key];
-  if (value === undefined || value === null || value === "") return null;
-  const n = typeof value === "number" ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${key} must be a positive integer`);
-  return Math.floor(n);
-}
-
-function pushOptionalString(
-  out: string[],
-  flag: string,
-  args: Record<string, unknown>,
-  key: string
-): void {
-  const value = args[key];
-  if (typeof value === "string" && value.trim() !== "") {
-    out.push(flag, value.trim());
-  }
-}
-
-function hasUnsafeShellChars(value: string): boolean {
-  return /[;&|`$<>]/.test(value);
-}
-
-function normalizeToolName(value: string): ChatToolName {
-  return value.trim().toLowerCase().replace(/[\s-]+/g, "_") as ChatToolName;
-}
-
-function kebab(value: string): string {
-  return value.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -2092,7 +1869,7 @@ function printSplash(
   }
   out.write(color("├" + "─".repeat(width - 2) + "┤\n", "frame", out));
   out.write(`│ ${padRight('Try "日次レポートを取得", "入稿前チェック", or type /', width - 4)} │\n`);
-  out.write(`│ ${padRight("/ でコマンド候補を表示、/exit で終了", width - 4)} │\n`);
+  out.write(`│ ${padRight("Enter で送信、Shift+Enter で改行、/exit で終了", width - 4)} │\n`);
   out.write(color("╰" + "─".repeat(width - 2) + "╯\n\n", "frame", out));
 }
 
@@ -2105,6 +1882,13 @@ function shouldUseRichPrompt(
       (out as NodeJS.WriteStream).isTTY &&
       typeof (input as NodeJS.ReadStream).setRawMode === "function"
   );
+}
+
+export function __testReadChatLine(
+  input: NodeJS.ReadableStream,
+  out: NodeJS.WritableStream
+): Promise<string> {
+  return readChatLine(input, out);
 }
 
 function readChatLine(
@@ -2120,6 +1904,7 @@ function readChatLine(
 
   const slashMatches = () => {
     if (!value.startsWith("/")) return [];
+    if (value.includes("\n")) return [];
     if (/\s/.test(value)) return [];
     const needle = value.trim().toLowerCase();
     if (needle === "/") return [...SLASH_COMMANDS];
@@ -2137,7 +1922,17 @@ function readChatLine(
     const lines: string[] = [];
     lines.push(color("╭─ addroid " + "─".repeat(Math.max(0, width - 12)) + "╮", "frame", out));
     const cursor = color("▌", "cursor", out);
-    lines.push(color("│", "frame", out) + ` ${padRight(`${color(">", "muted", out)} ${value}${cursor}`, inner)} ` + color("│", "frame", out));
+    const inputLines = value.split("\n");
+    if (inputLines.length === 0) inputLines.push("");
+    for (let i = 0; i < inputLines.length; i += 1) {
+      const prefix = i === 0 ? `${color(">", "muted", out)} ` : "  ";
+      const suffix = i === inputLines.length - 1 ? cursor : "";
+      lines.push(
+        color("│", "frame", out) +
+          ` ${padRight(`${prefix}${inputLines[i]}${suffix}`, inner)} ` +
+          color("│", "frame", out)
+      );
+    }
     lines.push(color("╰" + "─".repeat(width - 2) + "╯", "frame", out));
     if (matches.length > 0) {
       lines.push(color("  commands", "muted", out));
@@ -2153,10 +1948,12 @@ function readChatLine(
   };
 
   return new Promise((resolve, reject) => {
+    const keyboardProtocolEnabled = enableModifiedKeyReporting(out);
     const cleanup = () => {
       stdin.off("data", onData);
       stdin.setRawMode(false);
       stdin.pause();
+      if (keyboardProtocolEnabled) out.write("\u001b[<u");
       if (renderedLines > 0) {
         readlineControl.moveCursor(out, 0, -renderedLines);
         readlineControl.cursorTo(out, 0);
@@ -2178,7 +1975,13 @@ function readChatLine(
         finish("/exit");
         return;
       }
-      if (text === "\r" || text === "\n") {
+      if (isModifiedEnter(text)) {
+        value += "\n";
+        selected = 0;
+        render();
+        return;
+      }
+      if (isPlainEnter(text)) {
         const matches = slashMatches();
         if (matches.length > 0 && value.startsWith("/")) {
           finish(matches[selected]?.command ?? value);
@@ -2220,6 +2023,24 @@ function readChatLine(
     stdin.on("data", onData);
     render();
   });
+}
+
+function isPlainEnter(text: string): boolean {
+  return text === "\r" || text === "\n" || text === "\r\n";
+}
+
+function isModifiedEnter(text: string): boolean {
+  return (
+    text === "\u001b[13;2u" ||
+    text === "\u001b[13;2~" ||
+    text === "\u001b[27;2;13~"
+  );
+}
+
+function enableModifiedKeyReporting(out: NodeJS.WritableStream): boolean {
+  if (!(out as NodeJS.WriteStream).isTTY) return false;
+  out.write("\u001b[>1u");
+  return true;
 }
 
 type ColorRole = "accent" | "brand" | "cursor" | "frame" | "link" | "muted" | "robot";
@@ -2319,6 +2140,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "Notes:",
       "  - init で接続済みの Codex app-server / OpenAI / Anthropic credential を使います。",
       "  - 入力欄で `/` を押すと利用できるコマンド候補を表示します。",
+      "  - 対話入力では Enter で送信、Shift+Enter で改行します。",
       "  - `/report`, `/submit`, `/connect github`, `/account`, `/schedule`, `/open`, `/status` を直接実行できます。",
       "  - LLM は AGENTS.md と主要 docs を参照して AdDroid tool を直接実行します。",
       "  - 任意 shell / restore / 破壊的 git / secret 表示 / approval 迂回の Meta 変更は拒否します。",

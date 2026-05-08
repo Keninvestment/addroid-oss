@@ -65,7 +65,7 @@ export interface DailyReportInsightsRow {
 
 export interface DailyReportInsightsRequest {
   accountKey: string;
-  /** 対象期間の終了日 (YYYY-MM-DD, UTC)。 */
+  /** 対象期間の終了日 (YYYY-MM-DD)。 */
   metricDate: string;
   /** prior period (= metricDate の 1 日前) を取り込むかどうか。 */
   includePriorPeriod: boolean;
@@ -128,6 +128,8 @@ export interface DailyReportAdAccountSnapshot {
   metaAccountId: string | null;
   /** 表示通貨 (UI / commentary 用)。 */
   currency: string;
+  /** Meta ad account の IANA timezone (例: Asia/Tokyo)。なければ null。 */
+  timezoneName?: string | null;
 }
 
 export interface DailyReportSnapshotStore {
@@ -222,7 +224,11 @@ export interface RunDailyReportOptions {
   mode: DailyReportExecutionMode;
   /** 当該 workspace に紐付く ad_account のキー (`ads/accounts/<key>`)。 */
   accountKey: string;
-  /** 対象日 (YYYY-MM-DD)。既定 now() の UTC 日付。 */
+  /**
+   * 対象日 (YYYY-MM-DD)。
+   * 省略時は Meta ad account timezone、fallbackTimeZone、実行環境 timezone、UTC
+   * の順で timezone を決め、そのローカル日付を使う。
+   */
   metricDate?: string;
   insightsProvider: DailyReportInsightsProvider;
   store: DailyReportSnapshotStore;
@@ -232,6 +238,8 @@ export interface RunDailyReportOptions {
    * 取得)。partial 上書きは `mergeBreakdownsPolicy` 経由で完全な値に正規化される。
    */
   breakdownsPolicy?: Partial<BreakdownsPolicy> | null;
+  /** account timezone が無い場合に使うユーザー/実行環境 timezone。 */
+  fallbackTimeZone?: string | null;
   /** test seam: 現在時刻。 */
   now?: () => Date;
 }
@@ -272,6 +280,8 @@ export interface DailyReportSummary {
   currency: string | null;
   metricDate: string;
   priorMetricDate: string;
+  /** metricDate を決定した IANA timezone。明示 metricDate 指定時も記録用に解決する。 */
+  metricTimeZone: string;
   insightsSource: DailyReportInsightsResponse["source"];
   /** account 集計の KPI (UI ヘッダ用)。 */
   current: DailyReportKpiSet;
@@ -313,13 +323,19 @@ export async function runDailyReportOnce(
   opts: RunDailyReportOptions
 ): Promise<DailyReportSummary> {
   const now = opts.now ?? (() => new Date());
-  const metricDate = opts.metricDate ?? toUtcDateString(now());
-  const priorMetricDate = subtractOneUtcDay(metricDate);
 
   const account = await opts.store.findAdAccount({
     workspaceId: opts.workspaceId,
     accountKey: opts.accountKey,
   });
+  const metricTimeZone = resolveDailyReportTimeZone(
+    account?.timezoneName,
+    opts.fallbackTimeZone
+  );
+  const metricDate =
+    opts.metricDate ?? toDateStringInTimeZone(now(), metricTimeZone);
+  const priorMetricDate = subtractOneUtcDay(metricDate);
+
   if (!account) {
     return {
       status: "no_account",
@@ -329,6 +345,7 @@ export async function runDailyReportOnce(
       currency: null,
       metricDate,
       priorMetricDate,
+      metricTimeZone,
       insightsSource: "unavailable",
       current: ZERO_KPIS,
       prior: ZERO_KPIS,
@@ -408,6 +425,7 @@ export async function runDailyReportOnce(
       currency: account.currency,
       metricDate,
       priorMetricDate,
+      metricTimeZone,
       insightsSource: insights.source,
       current,
       prior,
@@ -446,6 +464,7 @@ export async function runDailyReportOnce(
       currency: account.currency,
       metricDate,
       priorMetricDate,
+      metricTimeZone,
       insightsSource: insights.source,
       current,
       prior,
@@ -477,6 +496,7 @@ export async function runDailyReportOnce(
     currency: account.currency,
     metricDate,
     priorMetricDate,
+    metricTimeZone,
     insightsSource: insights.source,
     current,
     prior,
@@ -627,13 +647,58 @@ function insightsRowToRaw(row: DailyReportInsightsRow): JsonValue {
 
 /**
  * UTC 基準で `Date` を `YYYY-MM-DD` にする。
- * daily_report の metricDate は cron 実行日 (UTC) を 1 日単位で扱う。
  */
 export function toUtcDateString(d: Date): string {
   const y = d.getUTCFullYear();
   const m = (d.getUTCMonth() + 1).toString().padStart(2, "0");
   const day = d.getUTCDate().toString().padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+/**
+ * IANA timezone 基準で `Date` を `YYYY-MM-DD` にする。
+ */
+export function toDateStringInTimeZone(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  if (!year || !month || !day) {
+    return toUtcDateString(d);
+  }
+  return `${year}-${month}-${day}`;
+}
+
+export function resolveDailyReportTimeZone(
+  accountTimeZone?: string | null,
+  fallbackTimeZone?: string | null
+): string {
+  const candidates = [
+    accountTimeZone,
+    fallbackTimeZone,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    "UTC",
+  ];
+  for (const candidate of candidates) {
+    if (isValidTimeZone(candidate)) return candidate.trim();
+  }
+  return "UTC";
+}
+
+function isValidTimeZone(value: string | null | undefined): value is string {
+  const trimmed = value?.trim();
+  if (!trimmed) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: trimmed });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

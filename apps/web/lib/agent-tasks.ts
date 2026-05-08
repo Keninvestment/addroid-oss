@@ -9,6 +9,8 @@ export interface CreateAgentTaskInput {
   title?: string;
   prompt: string;
   cron: string;
+  createdBy?: string;
+  nextRunAt?: Date;
 }
 
 export function computeNextRunAt(cron: string, currentDate = new Date()): Date {
@@ -26,7 +28,7 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
   }
   const workspace = await ensureWebWorkspace();
   const title = input.title?.trim() || deriveTaskTitle(prompt);
-  const nextRunAt = computeNextRunAt(cron);
+  const nextRunAt = input.nextRunAt ?? computeNextRunAt(cron);
   const task = await prisma.agentTask.create({
     data: {
       workspaceId: workspace.id,
@@ -35,7 +37,7 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
       cron,
       enabled: true,
       nextRunAt,
-      createdBy: "user:web-ui",
+      createdBy: input.createdBy ?? "user:web-ui",
     },
     select: {
       id: true,
@@ -50,7 +52,7 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
     .create({
       data: {
         workspaceId: workspace.id,
-        actor: "user:web-ui",
+        actor: input.createdBy ?? "user:web-ui",
         action: "agent_task.created",
         target: `agent_task:${task.id}`,
         metadata: { title, cron, prompt } as Prisma.InputJsonValue,
@@ -112,7 +114,11 @@ export async function runAgentTaskNow(id: string) {
       auditAction: "agent_task.chat_run_via_web",
       auditActor: "agent:scheduled-task",
     });
-    const failed = !result.ok || result.executions.some((e) => e.status === "error");
+    const failed =
+      !result.ok ||
+      result.executions.some((e) =>
+        e.status === "error" || e.status === "denied" || e.status === "unsupported"
+      );
     await prisma.agentTaskRun.update({
       where: { id: run.id },
       data: {
@@ -121,7 +127,9 @@ export async function runAgentTaskNow(id: string) {
         message: result.message,
         toolCalls: result.executions as unknown as Prisma.InputJsonValue,
         errorMessage: failed
-          ? result.executions.find((e) => e.status === "error")?.message ?? "agent task failed"
+          ? result.executions.find((e) =>
+              e.status === "error" || e.status === "denied" || e.status === "unsupported"
+            )?.message ?? "agent task failed"
           : null,
       },
     });

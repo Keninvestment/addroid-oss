@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { PassThrough, Writable } from "node:stream";
 
-import { runChatCommand } from "../commands/chat.js";
+import { __testReadChatLine, runChatCommand } from "../commands/chat.js";
 import type {
   LLMCompletionRequest,
   LLMCompletionResult,
@@ -11,6 +12,29 @@ import type {
 interface Captured {
   stdout: string;
   stderr: string;
+}
+
+class FakeTtyInput extends PassThrough {
+  isTTY = true;
+  rawMode = false;
+  setRawMode(value: boolean): this {
+    this.rawMode = value;
+    return this;
+  }
+}
+
+class FakeTtyOutput extends Writable {
+  isTTY = true;
+  columns = 80;
+  output = "";
+  override _write(
+    chunk: Buffer | string,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void
+  ): void {
+    this.output += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    callback();
+  }
 }
 
 async function capture(
@@ -93,6 +117,20 @@ test("chat --help は使い方と例を表示する", async () => {
   assert.equal(code, 0);
   assert.match(out.stdout, /addroid chat/);
   assert.match(out.stdout, /日次レポート/);
+});
+
+test("rich chat prompt は Shift+Enter を改行、Enter を送信として扱う", async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const answerPromise = __testReadChatLine(input, output);
+
+  input.write("hello");
+  input.write("\u001b[13;2u");
+  input.write("world");
+  input.write("\r");
+
+  assert.equal(await answerPromise, "hello\nworld");
+  assert.equal(input.rawMode, false);
 });
 
 test("chat --once は LLM の command plan を addroid command として実行する", async () => {

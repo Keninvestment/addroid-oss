@@ -55,6 +55,8 @@ export function createPrismaDailyReportSnapshotStore(
           key: true,
           displayName: true,
           metaAccountId: true,
+          currency: true,
+          timezoneName: true,
         },
       });
       if (!row) return null;
@@ -63,10 +65,8 @@ export function createPrismaDailyReportSnapshotStore(
         key: row.key,
         displayName: row.displayName,
         metaAccountId: row.metaAccountId,
-        // 通貨は ad_accounts に未保存 (Meta から fetch する必要があり、
-        // the current implementation 範囲外)。`brand.yaml` 由来の運用通貨を後で混ぜるため、
-        // ここでは "JPY" を既定にする (Meta の Mock account A が JPY のため)。
-        currency: "JPY",
+        currency: row.currency ?? "JPY",
+        timezoneName: row.timezoneName,
       };
     },
 

@@ -303,6 +303,8 @@ addroid init --install-deps
 `ADDROID_META_CLI_BIN` が未設定の開発環境では mock insights に戻ります。CLI で取得できない
 柔軟な breakdown / attribution window が必要な場合は、Meta Access Token 登録済みの状態で
 `ADDROID_META_GRAPH_INSIGHTS_FALLBACK=1` を設定すると Graph API の read-only fallback を使えます。
+取得日の timezone は Meta ad account の `timezone_name` を優先し、取得できない場合は
+`ADDROID_USER_TIMEZONE` / 実行環境 timezone / UTC の順にフォールバックします。
 
 自然言語の自動運用リクエストは、直接 Meta を変更せず、まず
 `workflows/automation-rules.yaml` と同形の DSL に変換してから評価します。例:

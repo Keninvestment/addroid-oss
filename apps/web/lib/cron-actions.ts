@@ -245,6 +245,78 @@ export async function setCronSchedule(
   };
 }
 
+export type SetScheduleEnabledResult =
+  | {
+      ok: true;
+      cron: string;
+      enabled: boolean;
+    }
+  | {
+      ok: false;
+      status: number;
+      error: string;
+    };
+
+export async function setCronScheduleEnabled(
+  presetName: CronPresetName,
+  input: { cron?: string | null; enabled: boolean }
+): Promise<SetScheduleEnabledResult> {
+  const requestedCron = input.cron?.trim() || null;
+  if (requestedCron) {
+    const validation = validateCronExpression(requestedCron);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        status: 400,
+        error: `cron 式が不正です: ${validation.reason}`,
+      };
+    }
+  }
+
+  let ctx: PreparedContext;
+  try {
+    ctx = await prepareContext();
+  } catch (err) {
+    return {
+      ok: false,
+      status: 503,
+      error: `pg-boss / DB に接続できません: ${(err as Error).message}`,
+    };
+  }
+  const { boss, workspaceId } = ctx;
+  const preset = CRON_PRESETS.find((p) => p.name === presetName)!;
+  const existing = await prisma.cronSchedule.findUnique({
+    where: { workspaceId_name: { workspaceId, name: presetName } },
+    select: { cron: true, enabled: true },
+  });
+  const cron = requestedCron ?? existing?.cron ?? preset.cron;
+
+  try {
+    if (input.enabled) await boss.schedule(presetName, cron);
+    else await boss.unschedule(presetName);
+  } catch (err) {
+    return {
+      ok: false,
+      status: 502,
+      error: `pg-boss schedule 更新に失敗しました: ${(err as Error).message}`,
+    };
+  }
+
+  await prisma.cronSchedule.update({
+    where: { workspaceId_name: { workspaceId, name: presetName } },
+    data: { cron, enabled: input.enabled },
+  });
+  await recordAudit(workspaceId, "cron.schedule_set_via_web_chat", presetName, {
+    preset: presetName,
+    cron,
+    enabled: input.enabled,
+    previousCron: existing?.cron ?? null,
+    previousEnabled: existing?.enabled ?? null,
+  });
+
+  return { ok: true, cron, enabled: input.enabled };
+}
+
 // =====================================================================
 // run (manual one-off run)
 // =====================================================================

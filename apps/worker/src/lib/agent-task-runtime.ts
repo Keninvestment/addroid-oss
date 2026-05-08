@@ -69,6 +69,7 @@ export async function runDueAgentTasks(
         provider: opts.provider,
         agentContext,
         purpose: "worker:agent-task",
+        surface: "scheduled-agent",
       });
       const executions = [];
       for (const tool of turn.toolResults) {
@@ -80,7 +81,9 @@ export async function runDueAgentTasks(
           webUrl: agentContext.webUrl,
         }));
       }
-      const hasFailure = executions.some((e) => e.status === "error");
+      const hasFailure = executions.some((e) =>
+        e.status === "error" || e.status === "denied" || e.status === "unsupported"
+      );
       await opts.prisma.agentTaskRun.update({
         where: { id: run.id },
         data: {
@@ -89,7 +92,9 @@ export async function runDueAgentTasks(
           message: turn.message,
           toolCalls: executions as Prisma.InputJsonValue,
           errorMessage: hasFailure
-            ? executions.find((e) => e.status === "error")?.message ?? "agent task failed"
+            ? executions.find((e) =>
+                e.status === "error" || e.status === "denied" || e.status === "unsupported"
+              )?.message ?? "agent task failed"
             : null,
         },
       });
@@ -181,7 +186,7 @@ async function executeWorkerAgentTool(opts: {
         const preset = reportPreset(
           typeof readyTool.toolArgs.kind === "string" ? readyTool.toolArgs.kind : "daily"
         );
-        const metricDate = readStringArg(readyTool.toolArgs, "metricDate", "metric_date");
+        const metricDate = resolveMetricDateArg(readyTool.toolArgs);
         const jobId = await opts.boss.send(preset, {
           ...(metricDate ? { metricDate } : {}),
           manual: true,
@@ -318,6 +323,34 @@ function readStringArg(args: Record<string, unknown>, ...keys: string[]): string
   return null;
 }
 
+function resolveMetricDateArg(args: Record<string, unknown>): string | null {
+  const explicit = readStringArg(args, "metricDate", "metric_date");
+  if (explicit) return explicit;
+  const relative = readStringArg(args, "metricDateRelative", "metric_date_relative");
+  if (!relative) return null;
+  const normalized = relative.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "today") return dateStringInRuntimeTimeZone(0);
+  if (normalized === "yesterday") return dateStringInRuntimeTimeZone(-1);
+  throw new Error("metricDateRelative は today / yesterday のいずれかで指定してください");
+}
+
+function dateStringInRuntimeTimeZone(offsetDays: number): string {
+  const timeZone =
+    process.env.ADDROID_USER_TIMEZONE?.trim() ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === "year")?.value ?? "1970");
+  const m = Number(parts.find((p) => p.type === "month")?.value ?? "01");
+  const d = Number(parts.find((p) => p.type === "day")?.value ?? "01");
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
+}
+
 function reportPreset(value: string): CronPresetName {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   const name =
@@ -331,6 +364,8 @@ function reportPreset(value: string): CronPresetName {
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
+              : v === "agent" || v === "agent_task" || v === "agent_tasks"
+                ? "agent_tasks"
               : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";

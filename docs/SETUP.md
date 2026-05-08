@@ -146,6 +146,7 @@ export してから起動してください。
 | `ADDROID_HOME` | 任意。`~/.addroid` の代わりに使う作業ディレクトリ |
 | `ADDROID_WEB_HOSTNAME` | 任意。Web UI バインドアドレス。既定: `127.0.0.1` |
 | `ADDROID_WEB_PORT` | 任意。Web UI ポート。既定: `3000` |
+| `ADDROID_USER_TIMEZONE` | 任意。Meta ad account の `timezone_name` が無い場合に daily_report の取得日を決める IANA timezone。未設定時は実行環境 timezone、最後に UTC |
 
 `ENCRYPTION_KEY` の生成例:
 

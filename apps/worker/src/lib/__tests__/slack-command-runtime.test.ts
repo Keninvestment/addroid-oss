@@ -167,6 +167,7 @@ function buildDailyReportSummary(
     currency: "JPY",
     metricDate: FAKE_METRIC,
     priorMetricDate: "2026-05-01",
+    metricTimeZone: "Asia/Tokyo",
     insightsSource: "mock",
     current: {
       spend: 0,

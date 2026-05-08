@@ -9,6 +9,7 @@ AdDroid is a localhost-bound, outbound-only operator console for GitOps-driven M
 - Connect or reconnect Meta, GitHub, AI, and Slack through AdDroid connect flows.
 - Sync, list, and select Meta ad accounts.
 - Run business tasks by intent: daily report, budget check, improvement proposal, GitHub polling, and retention cleanup.
+- Create and enable scheduled natural-language Agent tasks for recurring business requests such as daily reports or periodic checks.
 - Check submissions by validating ops files and showing the dry-run change plan.
 - Create database backups.
 - Stop local AdDroid processes.
@@ -22,6 +23,8 @@ AdDroid is a localhost-bound, outbound-only operator console for GitOps-driven M
 - Web UI, CLI chat, and scheduled Agent tasks share the same encrypted credential stores and the same Agent runtime. Never reveal tokens, API keys, OAuth codes, refresh tokens, or decrypted secret values.
 - Prefer user-facing command names in explanations: `connect`, `account`, `report`, `submit`, `schedule`, `start`, `stop`, and `open`. Low-level commands are for CI or troubleshooting only.
 - Dashboard chat and scheduled Agent tasks should preserve LLM flexibility: understand the user's natural language, inspect current AdDroid state, and choose supported tools at runtime. Do not convert natural language into arbitrary shell commands.
+- Chat should normally execute allowed requests through AdDroid tools, not merely suggest commands. If the request is safe and supported, complete the action and report the result.
+- For recurring natural-language business requests, store the natural-language prompt and cron as an Agent task instead of only changing a fixed pg-boss preset schedule. Change preset schedules only when the user explicitly asks to manage an existing preset.
 - Scheduled Agent tasks store the natural-language prompt and schedule. At each run, reinterpret the prompt with the current `AGENTS.md`, tool manifest, and runtime snapshot, then execute allowed AdDroid tools through the same deny policy as CLI chat.
 
 ## Safety Rules

@@ -5,6 +5,14 @@ import {
   isDeniedAgentRequest,
   type AgentPolicyDecision,
 } from "./policy.js";
+import {
+  isToolAllowedOnSurface,
+  renderToolManifestForPrompt,
+  type AgentSurface,
+  type AgentToolName,
+} from "./manifest.js";
+
+export type { AgentSurface, AgentToolName } from "./manifest.js";
 
 export type AgentCommandName =
   | "doctor"
@@ -18,23 +26,6 @@ export type AgentCommandName =
   | "stop"
   | "activate"
   | "backup";
-
-export type AgentToolName =
-  | "diagnose"
-  | "check_status"
-  | "list_ad_accounts"
-  | "sync_ad_accounts"
-  | "select_ad_account"
-  | "connect_service"
-  | "get_report"
-  | "check_submission"
-  | "manage_schedule"
-  | "show_logs"
-  | "stop_services"
-  | "start_delivery"
-  | "backup_data"
-  | "open_web_ui"
-  | "query_meta_ads";
 
 export interface AgentToolCall {
   name: string;
@@ -73,19 +64,6 @@ interface ChatAgentResponse {
   tools?: AgentToolCall[];
 }
 
-interface ChatCommandPlan {
-  command: AgentCommandName;
-  args?: string[];
-  why?: string;
-}
-
-interface LegacyChatPlan {
-  type: "answer" | "commands";
-  message?: string;
-  summary?: string;
-  commands?: ChatCommandPlan[];
-}
-
 export const SLASH_COMMANDS = [
   { command: "/help", description: "使い方と例を表示" },
   { command: "/status", description: "接続・起動状態を確認" },
@@ -105,6 +83,7 @@ export async function runAgentTurn(opts: {
   agentContext: AgentContext;
   model?: string;
   purpose?: string;
+  surface?: AgentSurface;
 }): Promise<AgentResponse> {
   const requestPolicy = isDeniedAgentRequest(opts.input);
   if (!requestPolicy.allowed) {
@@ -121,6 +100,7 @@ export async function runAgentTurn(opts: {
   );
 
   const toolResults: AgentToolResult[] = [];
+  const surface = opts.surface ?? "cli-chat";
   for (const rawTool of response.tools ?? []) {
     const normalized = normalizeToolCall(rawTool);
     const policy = evaluateAgentToolPolicy(normalized.name, normalized.args);
@@ -129,6 +109,14 @@ export async function runAgentTurn(opts: {
         status: "denied",
         toolName: normalized.name,
         reason: policy.reason ?? "policy denied",
+      });
+      continue;
+    }
+    if (!isToolAllowedOnSurface(normalized.name, surface)) {
+      toolResults.push({
+        status: "unsupported",
+        toolName: normalized.name,
+        reason: `tool is not available on ${surface}`,
       });
       continue;
     }
@@ -150,6 +138,7 @@ async function buildAgentResponseWithLlm(opts: {
   agentContext: AgentContext;
   model?: string;
   purpose?: string;
+  surface?: AgentSurface;
 }): Promise<ChatAgentResponse> {
   const req: LLMCompletionRequest = {
     ...(opts.model ? { model: opts.model } : {}),
@@ -159,7 +148,10 @@ async function buildAgentResponseWithLlm(opts: {
     messages: [
       {
         role: "system",
-        content: buildAgentSystemPrompt(opts.agentContext),
+        content: buildAgentSystemPrompt(
+          opts.agentContext,
+          opts.surface ?? "cli-chat"
+        ),
       },
       {
         role: "user",
@@ -190,7 +182,10 @@ function formatLlmFailure(err: unknown): string {
   return `${message}${status}${code}`;
 }
 
-export function buildAgentSystemPrompt(agentContext: AgentContext): string {
+export function buildAgentSystemPrompt(
+  agentContext: AgentContext,
+  surface: AgentSurface = "cli-chat"
+): string {
   return [
     "You are AdDroid local agent.",
     "Respond in Japanese. Be concise and operational.",
@@ -198,24 +193,12 @@ export function buildAgentSystemPrompt(agentContext: AgentContext): string {
     "When an AdDroid operation should run, return ONLY strict JSON with this schema:",
     '{"message":"short Japanese message","tools":[{"name":"get_report","args":{"kind":"daily"},"why":"short reason"}]}',
     "Do not wrap JSON in markdown.",
-    "Available tool names:",
-    "- diagnose: args {}",
-    "- check_status: args {}",
-    "- list_ad_accounts: args {json?: boolean}",
-    "- sync_ad_accounts: args {selectDefault?: boolean,json?: boolean}",
-    "- select_ad_account: args {adAccountId?: string,key?: string,json?: boolean}",
-    "- connect_service: args {service:'meta'|'github'|'ai'|'slack', aiProvider?:'codex'|'openai'|'anthropic'}",
-    "- get_report: args {kind?:'daily'|'budget'|'improvement', metricDate?:'YYYY-MM-DD'}",
-    "- check_submission: args {root?: string,base?: string,account?: string,save?: boolean}",
-    "- manage_schedule: args {action:'list'|'enable'|'disable'|'run'|'logs'|'set', preset?:'daily'|'budget'|'improvement'|'github'|'retention', cron?: string, limit?: number}",
-    "- show_logs: args {target?:'up'|'web'|'worker'|'all', lines?: number}",
-    "- stop_services: args {}",
-    "- start_delivery: args {hierarchyId:string,note?:string,json?:boolean}",
-    "- backup_data: args {}",
-    "- open_web_ui: args {}",
-    "- query_meta_ads: read-only Meta Ads CLI query. args {resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
+    `Current surface: ${surface}`,
+    "Available tools for this surface:",
+    renderToolManifestForPrompt(surface),
     "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
-    "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD when the user asks for a specific or relative report date. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
+    "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD for explicit calendar dates and metricDateRelative for relative dates. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
+    "When the user asks to do something periodically, create a scheduled natural-language Agent task unless they explicitly mention changing an existing preset schedule. Do not merely print a command.",
     "Meta Ads CLI capability note: supported read path is `meta --output json ads ...`. `insights get` supports --date-preset/--since/--until/--time-increment/--breakdown/--fields/--campaign-id/--adset-id/--ad-id/--sort/--limit. For hierarchy detail, list campaign/adset/ad IDs first, then query insights by the ID filter. Product feed/item/set list requires catalogId. Catalog and dataset list can use businessId.",
     "For performance analysis, request the fields needed for the user's question. For frequency ask for frequency. For CPA/CV/conversion checks request spend plus actions and, when useful, cost_per_action_type/action_values. Do not rely on display text for automation decisions; tool executors keep raw structured rows.",
     "Meta Ads CLI also has mutation commands such as campaign/adset/ad/creative/catalog/product create/update/delete and dataset connect/disconnect/assign-user, but chat must not run those directly. Use check_submission for dry-run review and start_delivery only for the audited activation path.",
@@ -237,7 +220,6 @@ function parseAgentResponse(content: string): ChatAgentResponse {
   } catch {
     return { message: trimmed, tools: [] };
   }
-  if (isLegacyPlan(parsed)) return legacyPlanToAgentResponse(parsed);
   if (!isRecord(parsed)) return { message: trimmed, tools: [] };
   const message = typeof parsed.message === "string" ? parsed.message : "";
   const tools = Array.isArray(parsed.tools)
@@ -252,25 +234,6 @@ function tryExtractJsonObject(text: string): string | null {
   const end = text.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
   return text.slice(start, end + 1);
-}
-
-function isLegacyPlan(value: unknown): value is LegacyChatPlan {
-  if (!isRecord(value)) return false;
-  return value.type === "answer" || value.type === "commands";
-}
-
-function legacyPlanToAgentResponse(plan: LegacyChatPlan): ChatAgentResponse {
-  if (plan.type === "answer") return { message: plan.message ?? "", tools: [] };
-  return {
-    message: plan.summary ?? "",
-    tools: (plan.commands ?? []).map((c) => ({
-      name: `legacy:${c.command}`,
-      args: {
-        args: Array.isArray(c.args) ? c.args : [],
-      },
-      why: c.why ?? "",
-    })),
-  };
 }
 
 function toolFromRecord(record: Record<string, unknown>): AgentToolCall {
@@ -323,9 +286,6 @@ function safeResolveTool(tool: Required<AgentToolCall>): AgentToolResult {
 function resolveTool(
   tool: Required<AgentToolCall>
 ): Omit<Extract<AgentToolResult, { status: "ready" }>, "status"> | null {
-  if (tool.name.startsWith("legacy:")) {
-    return resolveLegacyCommand(tool);
-  }
   const name = normalizeToolName(tool.name);
   switch (name) {
     case "diagnose":
@@ -352,6 +312,24 @@ function resolveTool(
       return commandTool(name, "report", buildReportArgs(tool.args), tool.args, tool.why);
     case "check_submission":
       return commandTool(name, "submit", buildSubmitArgs(tool.args), tool.args, tool.why);
+    case "create_scheduled_agent_task":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "create scheduled Agent task",
+        why: tool.why,
+      };
+    case "set_schedule_enabled":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "set preset schedule",
+        why: tool.why,
+      };
     case "manage_schedule":
       return commandTool(name, "schedule", buildScheduleArgs(tool.args), tool.args, tool.why);
     case "show_logs":
@@ -383,29 +361,6 @@ function resolveTool(
     default:
       return null;
   }
-}
-
-function resolveLegacyCommand(
-  tool: Required<AgentToolCall>
-): Omit<Extract<AgentToolResult, { status: "ready" }>, "status"> | null {
-  const command = tool.name.slice("legacy:".length) as AgentCommandName;
-  const args = Array.isArray(tool.args.args) ? tool.args.args.map(String) : [];
-  const normalized = normalizeLegacyCommand(command, args);
-  if (!normalized) return null;
-  return commandTool(tool.name as AgentToolName, normalized.command, normalized.args, tool.args, tool.why);
-}
-
-function normalizeLegacyCommand(
-  command: AgentCommandName,
-  args: string[]
-): { command: AgentCommandName; args: string[] } | null {
-  if (args.some(hasUnsafeShellChars)) return null;
-  if (command === "activate") return args.length > 0 ? { command, args } : null;
-  if (command === "backup") return args.length === 0 ? { command, args } : null;
-  if (["doctor", "status", "logs", "stop", "submit", "schedule", "connect", "account", "report"].includes(command)) {
-    return { command, args };
-  }
-  return null;
 }
 
 function commandTool(
@@ -460,12 +415,11 @@ function buildSubmitArgs(args: Record<string, unknown>): string[] {
 }
 
 function buildScheduleArgs(args: Record<string, unknown>): string[] {
-  const action = requireEnum(args, "action", ["list", "enable", "disable", "run", "logs", "set"]);
+  const action = requireEnum(args, "action", ["list", "run", "logs"]);
   const out: string[] = [action];
   if (action !== "list") {
-    out.push(requireEnum(args, "preset", ["daily", "budget", "improvement", "github", "retention"]));
+    out.push(requireEnum(args, "preset", ["daily", "budget", "improvement", "github", "retention", "agent_tasks"]));
   }
-  if (action === "set") out.push(requireString(args, "cron"));
   const limit = optionalPositiveInt(args, "limit");
   if (limit !== null) out.push("--limit", String(limit));
   return out;

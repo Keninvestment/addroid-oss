@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 
 interface DailyReportSnapshot {
   metricDate: string;
+  metricTimeZone: string;
   accountKey: string;
   status: string;
   spend: number | null;
@@ -34,6 +35,7 @@ function readDailyReportSnapshot(value: unknown): DailyReportSnapshot | null {
     typeof x === "number" && Number.isFinite(x) ? x : null;
   return {
     metricDate: typeof v.metricDate === "string" ? v.metricDate : "",
+    metricTimeZone: typeof v.metricTimeZone === "string" ? v.metricTimeZone : "UTC",
     accountKey: v.accountKey,
     status: v.status,
     currency: typeof v.currency === "string" ? v.currency : null,
@@ -289,6 +291,10 @@ export default async function DashboardPage() {
                   {
                     label: "Account",
                     value: <InlineCode>{dailyReport.accountKey}</InlineCode>,
+                  },
+                  {
+                    label: "Timezone",
+                    value: <InlineCode>{dailyReport.metricTimeZone}</InlineCode>,
                   },
                   {
                     label: "Spend",

@@ -76,6 +76,8 @@ export interface SlackCommandHandlersDeps {
   dailyReportStore: DailyReportSnapshotStore;
   dailyReportInsights: DailyReportInsightsProvider;
   dailyReportAnalyst: DailyReportAnalystRunner;
+  /** account timezone が無い場合のユーザー/実行環境 timezone。 */
+  userTimeZone?: string | null;
 
   // budget_guard ワークフロー境界。
   budgetGuardStore: BudgetGuardStore;
@@ -334,6 +336,7 @@ async function handleReport(
             workspaceId: deps.workspaceId,
             mode: effectiveMode,
             accountKey: acc.key,
+            fallbackTimeZone: deps.userTimeZone,
             insightsProvider: deps.dailyReportInsights,
             store: deps.dailyReportStore,
             analyst: deps.dailyReportAnalyst,
@@ -750,4 +753,3 @@ async function resolveActivateTarget(
   if (byNodeKey) return byNodeKey.id;
   return null;
 }
-

@@ -49,6 +49,7 @@ interface DailyReportSummary {
   currency: string | null;
   metricDate: string;
   priorMetricDate: string;
+  metricTimeZone: string;
   insightsSource: string;
   current: KpiSet;
   prior: KpiSet;
@@ -167,6 +168,7 @@ function parseDailyReportSummary(output: unknown): DailyReportSummary | null {
     currency: typeof output.currency === "string" ? output.currency : null,
     metricDate: readString(output.metricDate),
     priorMetricDate: readString(output.priorMetricDate),
+    metricTimeZone: readString(output.metricTimeZone, "UTC"),
     insightsSource: readString(output.insightsSource, "unavailable"),
     current: readKpi(output.current),
     prior: readKpi(output.prior),
@@ -542,6 +544,10 @@ export default async function ReportsDailyPage() {
                 : ""}
             </span>
           ),
+        },
+        {
+          label: "Timezone",
+          value: <InlineCode>{latestSucceeded.summary.metricTimeZone}</InlineCode>,
         },
         {
           label: "Currency",

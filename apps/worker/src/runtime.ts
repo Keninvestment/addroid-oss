@@ -245,6 +245,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     provider: llmSelection.provider,
     workspaceId: workspace.id,
   });
+  const userTimeZone = resolveRuntimeUserTimeZone(process.env);
 
   // Regression fix: budget_guard / improvement_pr cron も同じ
   // LLM Provider 経由で AI を呼び出す。runtime 側は store + agent runner を
@@ -355,6 +356,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     mode: effectiveMode,
                     accountKey: acc.key,
                     ...(requestedMetricDate ? { metricDate: requestedMetricDate } : {}),
+                    fallbackTimeZone: userTimeZone,
                     insightsProvider: dailyReportInsights,
                     store: dailyReportStore,
                     analyst: dailyReportAnalyst,
@@ -1210,6 +1212,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     dailyReportStore,
     dailyReportInsights,
     dailyReportAnalyst,
+    userTimeZone,
     budgetGuardStore,
     budgetGuardAuditRunner: createBudgetGuardAuditRunner({
       provider: llmSelection.provider,
@@ -1388,6 +1391,7 @@ function dailyReportSummaryToPayload(summary: DailyReportSummary): JsonValue {
     currency: summary.currency,
     metricDate: summary.metricDate,
     priorMetricDate: summary.priorMetricDate,
+    metricTimeZone: summary.metricTimeZone,
     insightsSource: summary.insightsSource,
     mode: summary.mode,
     snapshotIds: summary.snapshotIds,
@@ -1621,6 +1625,26 @@ function readMetricDateFromCronJobData(data: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
+}
+
+function resolveRuntimeUserTimeZone(env: NodeJS.ProcessEnv): string {
+  const candidates = [
+    env.ADDROID_USER_TIMEZONE,
+    env.TZ,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    "UTC",
+  ];
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (!trimmed) continue;
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: trimmed });
+      return trimmed;
+    } catch {
+      // Keep trying less-specific fallbacks.
+    }
+  }
+  return "UTC";
 }
 
 async function loadLatestPerformanceSnapshotIds(
