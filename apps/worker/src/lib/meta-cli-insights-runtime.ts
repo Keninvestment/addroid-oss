@@ -4,6 +4,7 @@
 // while using the official CLI command surface as the primary read path.
 
 import { spawn as nodeSpawn } from "node:child_process";
+import { CiphertextFormatError } from "@addroid/config";
 import {
   fetchInsights,
   MetaCliMissingTokenError,
@@ -42,6 +43,7 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
   private readonly fields: string[];
   private readonly conversionActionTypes: string[];
   private readonly timeoutMs: number;
+  private readonly maxNodesPerLevel: number;
 
   constructor(opts: MetaCliDailyReportInsightsProviderOptions) {
     this.runner = opts.runner;
@@ -70,6 +72,7 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
       "omni_purchase",
     ];
     this.timeoutMs = opts.timeoutMs ?? 120_000;
+    this.maxNodesPerLevel = Number(process.env.ADDROID_META_CLI_DAILY_REPORT_MAX_NODES ?? 50);
   }
 
   async fetchInsights(
@@ -88,9 +91,10 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
     const current: DailyReportInsightsRow[] = [];
     const prior: DailyReportInsightsRow[] = [];
     const details: string[] = [];
+    const errors: string[] = [];
 
-    try {
-      for (const level of levels) {
+    for (const level of levels) {
+      try {
         const currentResult = await this.fetchPeriod({
           accountKey: req.accountKey,
           adAccountId,
@@ -110,13 +114,17 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
           prior.push(...priorResult.rows);
           details.push(priorResult.detail);
         }
+      } catch (err) {
+        errors.push(`${level}: ${summarizeCliInsightsError(err)}`);
       }
-    } catch (err) {
+    }
+
+    if (current.length === 0 && prior.length === 0 && errors.length > 0) {
       return {
         current: [],
         prior: [],
         source: "unavailable",
-        detail: summarizeCliInsightsError(err),
+        detail: errors.join("; "),
       };
     }
 
@@ -124,7 +132,7 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
       current,
       prior,
       source: "meta_ads_cli",
-      detail: details.filter(Boolean).join("; "),
+      detail: [...details.filter(Boolean), ...errors.map((e) => `partial failure ${e}`)].join("; "),
     };
   }
 
@@ -134,6 +142,47 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
     level: DailyReportNodeType;
     metricDate: string;
   }): Promise<{ rows: DailyReportInsightsRow[]; detail: string }> {
+    if (input.level === "account") {
+      const result = await this.runInsights(input, {});
+      return {
+        rows: parseInsightsRows(result, input.level, this.conversionActionTypes),
+        detail: `${input.level}/${input.metricDate}: ${result.exitClass}`,
+      };
+    }
+
+    const nodes = await this.listNodes(input, input.level);
+    const rows: DailyReportInsightsRow[] = [];
+    for (const node of nodes.slice(0, this.maxNodesPerLevel)) {
+      const filter =
+        input.level === "campaign"
+          ? { campaignId: node.id }
+          : input.level === "adset"
+            ? { adsetId: node.id }
+            : { adId: node.id };
+      const result = await this.runInsights(input, filter);
+      const payload = withFilterIdentity(
+        parseJson(result.stdout),
+        input.level,
+        node.id,
+        node.name
+      );
+      rows.push(...parseInsightsPayload(payload, input.level, this.conversionActionTypes));
+    }
+    return {
+      rows,
+      detail: `${input.level}/${input.metricDate}: ${nodes.length} node(s) listed, ${Math.min(nodes.length, this.maxNodesPerLevel)} queried`,
+    };
+  }
+
+  private async runInsights(
+    input: {
+      accountKey: string;
+      adAccountId?: string | null;
+      level: DailyReportNodeType;
+      metricDate: string;
+    },
+    filter: { campaignId?: string; adsetId?: string; adId?: string }
+  ): Promise<MetaCliExecutionResult> {
     const args = [
       "--output",
       "json",
@@ -141,13 +190,17 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
       "insights",
       "get",
       "--fields",
-      this.fields.join(","),
-      "--level",
-      input.level,
-      "--time-range",
-      JSON.stringify({ since: input.metricDate, until: input.metricDate }),
-      "--no-input",
+      this.compatibleFields().join(","),
+      "--since",
+      input.metricDate,
+      "--until",
+      input.metricDate,
+      "--limit",
+      "100",
     ];
+    if (filter.campaignId) args.push("--campaign-id", filter.campaignId);
+    if (filter.adsetId) args.push("--adset-id", filter.adsetId);
+    if (filter.adId) args.push("--ad-id", filter.adId);
     const result = await this.runner.run({
       accountKey: input.accountKey,
       adAccountId: input.adAccountId ?? null,
@@ -155,14 +208,64 @@ export class MetaCliDailyReportInsightsProvider implements DailyReportInsightsPr
       timeoutMs: this.timeoutMs,
     });
     if (result.exitClass !== "success") {
-      throw new Error(
-        `meta ads insights get failed for ${input.level}/${input.metricDate}: ${result.exitClass}`
-      );
+      throw new Error(formatCliFailure(`meta ads insights get failed for ${input.level}/${input.metricDate}`, result));
     }
-    return {
-      rows: parseInsightsRows(result, input.level, this.conversionActionTypes),
-      detail: `${input.level}/${input.metricDate}: ${result.exitClass}`,
-    };
+    return result;
+  }
+
+  private async listNodes(
+    input: {
+      accountKey: string;
+      adAccountId?: string | null;
+    },
+    level: Exclude<DailyReportNodeType, "account">
+  ): Promise<Array<{ id: string; name: string | null }>> {
+    const resource = level === "campaign" ? "campaign" : level === "adset" ? "adset" : "ad";
+    const result = await this.runner.run({
+      accountKey: input.accountKey,
+      adAccountId: input.adAccountId ?? null,
+      args: ["--output", "json", "ads", resource, "list"],
+      timeoutMs: this.timeoutMs,
+    });
+    if (result.exitClass !== "success") {
+      throw new Error(formatCliFailure(`meta ads ${resource} list failed`, result));
+    }
+    return extractArray(parseJson(result.stdout))
+      .filter(isRecord)
+      .flatMap((row) => {
+        const id =
+          stringField(row, "id") ??
+          (level === "campaign"
+            ? stringField(row, "campaign_id")
+            : level === "adset"
+              ? stringField(row, "adset_id")
+              : stringField(row, "ad_id"));
+        if (!id) return [];
+        return [{ id, name: stringField(row, "name") ?? inferDisplayName(row, level) }];
+      });
+  }
+
+  private compatibleFields(): string[] {
+    const allowed = new Set([
+      "spend",
+      "impressions",
+      "clicks",
+      "ctr",
+      "cpc",
+      "reach",
+      "conversions",
+      "actions",
+      "frequency",
+      "campaign_id",
+      "campaign_name",
+      "adset_id",
+      "adset_name",
+      "ad_id",
+      "ad_name",
+      "account_id",
+      "account_name",
+    ]);
+    return this.fields.filter((field) => allowed.has(field));
   }
 }
 
@@ -355,6 +458,34 @@ function parseInsightsRows(
   return parseInsightsPayload(payload, fallbackLevel, conversionActionTypes);
 }
 
+function withFilterIdentity(
+  payload: unknown,
+  level: DailyReportNodeType,
+  id: string,
+  name: string | null
+): unknown {
+  const rows = extractArray(payload);
+  const patched = rows.map((row) => {
+    if (!isRecord(row)) return row;
+    const out: Record<string, unknown> = { ...row };
+    if (level === "campaign") {
+      out.campaign_id ??= id;
+      if (name) out.campaign_name ??= name;
+    } else if (level === "adset") {
+      out.adset_id ??= id;
+      if (name) out.adset_name ??= name;
+    } else if (level === "ad") {
+      out.ad_id ??= id;
+      if (name) out.ad_name ??= name;
+    }
+    return out;
+  });
+  if (isRecord(payload) && Array.isArray(payload.data)) {
+    return { ...payload, data: patched };
+  }
+  return patched;
+}
+
 function parseInsightsPayload(
   payload: unknown,
   fallbackLevel: DailyReportNodeType,
@@ -494,8 +625,21 @@ function summarizeCliInsightsError(err: unknown): string {
   if (err instanceof MetaCliMissingTokenError) {
     return "Meta access token is missing; reconnect Meta.";
   }
+  if (
+    err instanceof CiphertextFormatError ||
+    (err instanceof Error && /ciphertext authentication failed|wrong key/i.test(err.message))
+  ) {
+    return "Meta access token cannot be decrypted with the current ENCRYPTION_KEY. Run `addroid connect meta` to reconnect Meta.";
+  }
   if (err instanceof MetaCliUnsupportedOperationError) {
     return "Meta Ads CLI insights operation is not in the verified command matrix.";
   }
   return err instanceof Error ? err.message : "Meta Ads CLI insights failed.";
+}
+
+function formatCliFailure(prefix: string, result: MetaCliExecutionResult): string {
+  const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n").trim();
+  return detail
+    ? `${prefix}: ${result.exitClass}. ${detail.slice(0, 800)}`
+    : `${prefix}: ${result.exitClass}`;
 }

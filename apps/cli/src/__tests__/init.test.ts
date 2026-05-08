@@ -212,6 +212,12 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
           confirm: async () => {
             throw new Error("confirm should not run for already initialized default init");
           },
+          runCommand: (cmd, args) => {
+            if (cmd === "sh" && args.join(" ").includes("command -v addroid")) {
+              return { status: 0, stdout: "/usr/local/bin/addroid\n", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
           runAuthCommand: async (args) => {
             authCalls.push(args);
             return 0;
@@ -240,6 +246,60 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
       assert.doesNotMatch(out.stdout, /addroid init --interactive --reauth-llm/);
       assert.deepEqual(authCalls, []);
       assert.ok(fs.existsSync(path.join(home, "config.yaml")));
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
+test("init は初期設定済みでも addroid コマンド未検出なら checkout CLI link を案内して実行する", async () => {
+  await withTempHome(async (home) => {
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    process.env.DATABASE_URL = "postgresql://addroid:secret@localhost:5432/addroid";
+    process.env.ENCRYPTION_KEY = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw=";
+    try {
+      {
+        const { code } = await capture(() => runInit([], { isTTY: false }));
+        assert.equal(code, 0);
+      }
+
+      const calls: string[] = [];
+      const { code, out } = await capture(() =>
+        runInit([], {
+          isTTY: true,
+          confirm: async () => true,
+          runCommand: (cmd, args) => {
+            calls.push([cmd, ...args].join(" "));
+            if (cmd === "sh" && args.join(" ").includes("command -v addroid")) {
+              return { status: 1, stdout: "", stderr: "" };
+            }
+            if (cmd === "npm" && args.join(" ") === "link --workspace apps/cli") {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 0, stdout: "", stderr: "" };
+          },
+          readAuthState: async () => ({
+            checked: true,
+            metaConnected: true,
+            metaAccountSelected: true,
+            githubConnected: true,
+            opsRepoLinked: true,
+            llmProviders: ["codex"],
+          }),
+        })
+      );
+
+      assert.equal(code, 0, out.stdout + out.stderr);
+      assert.ok(calls.includes("sh -c command -v addroid"));
+      assert.ok(calls.includes("npm link --workspace apps/cli"));
+      assert.match(out.stdout, /already initialized/);
+      assert.match(out.stdout, /CLI command setup:/);
+      assert.match(out.stdout, /addroid\s+: linked/);
+      assert.match(out.stdout, /addroid chat\s+# チャットで/);
     } finally {
       if (prevDb === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = prevDb;

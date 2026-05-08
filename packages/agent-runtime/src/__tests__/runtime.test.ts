@@ -6,9 +6,9 @@ import type {
   LLMConnectionMeta,
   LLMProvider,
 } from "@addroid/llm-provider";
-import { runAgentTurn } from "../runtime.js";
+import { evaluateAgentToolPolicy, runAgentTurn } from "../runtime.js";
 
-test("runAgentTurn falls back to a safe daily report tool when LLM returns 429", async () => {
+test("runAgentTurn does not infer natural-language tools when LLM returns 429", async () => {
   const provider = new ThrowingProvider("chat completions endpoint returned HTTP 429", 429);
   const result = await runAgentTurn({
     input: "日次レポートを取得して",
@@ -21,14 +21,27 @@ test("runAgentTurn falls back to a safe daily report tool when LLM returns 429",
     purpose: "test",
   });
 
-  assert.match(result.message, /定型操作として実行します/);
-  assert.equal(result.toolResults.length, 1);
-  const tool = result.toolResults[0]!;
-  assert.equal(tool.status, "ready");
-  if (tool.status === "ready") {
-    assert.equal(tool.tool, "get_report");
-    assert.deepEqual(tool.toolArgs, { kind: "daily" });
-  }
+  assert.match(result.message, /操作は実行しませんでした/);
+  assert.equal(result.toolResults.length, 0);
+});
+
+test("query_meta_ads policy allows read-only catalog/product queries and denies mutations", () => {
+  assert.equal(
+    evaluateAgentToolPolicy("query_meta_ads", { resource: "product_feed", action: "list", catalogId: "123" }).allowed,
+    true
+  );
+  assert.equal(
+    evaluateAgentToolPolicy("query_meta_ads", { resource: "catalog", action: "get", id: "123" }).allowed,
+    true
+  );
+  const denied = evaluateAgentToolPolicy("query_meta_ads", {
+    resource: "campaign",
+    action: "update",
+    id: "123",
+    status: "ACTIVE",
+  });
+  assert.equal(denied.allowed, false);
+  assert.match(denied.reason ?? "", /read-only/);
 });
 
 class ThrowingProvider implements LLMProvider {

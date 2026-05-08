@@ -58,6 +58,43 @@ export function evaluateAgentToolPolicy(
       reason: `denied tool: ${toolName}`,
     };
   }
+  if (normalizedName === "query_meta_ads") {
+    const resource = typeof args.resource === "string" ? normalizeToken(args.resource) : "";
+    const action = typeof args.action === "string" ? normalizeToken(args.action) : "get";
+    const allowedResources = new Set([
+      "insights",
+      "adaccount",
+      "campaign",
+      "adset",
+      "ad",
+      "creative",
+      "catalog",
+      "dataset",
+      "page",
+      "product_feed",
+      "product_item",
+      "product_set",
+    ]);
+    const allowedActions = new Set(["get", "list", "current"]);
+    if (!allowedResources.has(resource) || !allowedActions.has(action)) {
+      return {
+        allowed: false,
+        reason: "query_meta_ads only allows read-only Meta Ads CLI list/get/current operations",
+      };
+    }
+    if (action === "current" && resource !== "adaccount") {
+      return {
+        allowed: false,
+        reason: "query_meta_ads current is only available for adaccount",
+      };
+    }
+    if (resource === "insights" && action !== "get") {
+      return {
+        allowed: false,
+        reason: "query_meta_ads insights only supports get",
+      };
+    }
+  }
   const text = JSON.stringify({ toolName, args });
   for (const pattern of DANGEROUS_TEXT_PATTERNS) {
     if (pattern.test(text)) {

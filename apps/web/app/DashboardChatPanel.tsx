@@ -60,7 +60,7 @@ export function DashboardChatPanel() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: slashToNaturalText(text) }),
+        body: JSON.stringify({ input: text }),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
       const executions = body.executions ?? [];
@@ -178,18 +178,6 @@ export function DashboardChatPanel() {
       </form>
     </section>
   );
-}
-
-function slashToNaturalText(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed === "/status") return "ステータスを確認して";
-  if (trimmed === "/report") return "日次レポートを取得して";
-  if (trimmed === "/submit") return "入稿前チェックを実行して";
-  if (trimmed === "/connect") return "接続状態を確認して必要な接続画面を案内して";
-  if (trimmed === "/account") return "広告アカウント一覧を確認して";
-  if (trimmed === "/schedule") return "schedule 一覧を確認して";
-  if (trimmed === "/open") return "Web UI の URL を表示して";
-  return value;
 }
 
 function makeId(): string {

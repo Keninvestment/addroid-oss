@@ -33,7 +33,8 @@ export type AgentToolName =
   | "stop_services"
   | "start_delivery"
   | "backup_data"
-  | "open_web_ui";
+  | "open_web_ui"
+  | "query_meta_ads";
 
 export interface AgentToolCall {
   name: string;
@@ -171,110 +172,14 @@ async function buildAgentResponseWithLlm(opts: {
 }
 
 function buildFallbackAgentResponse(input: string, err: unknown): ChatAgentResponse {
-  const tools = inferFallbackTools(input);
+  void input;
   const errorMessage = formatLlmFailure(err);
-  if (tools.length === 0) {
-    return {
-      message:
-        `LLM による解釈に失敗しました: ${errorMessage}\n` +
-        "LLM が一時的に混雑している可能性があります。/status, /report, /submit などの定型操作は再入力できます。",
-      tools: [],
-    };
-  }
   return {
     message:
-      `LLM が一時的に利用できないため、定型操作として実行します: ${tools
-        .map((t) => t.name)
-        .join(", ")}\n` +
-      `詳細: ${errorMessage}`,
-    tools,
+      `LLM による解釈に失敗したため、操作は実行しませんでした: ${errorMessage}\n` +
+      "少し待って同じ内容をもう一度送るか、接続状態を確認してください。",
+    tools: [],
   };
-}
-
-function inferFallbackTools(input: string): AgentToolCall[] {
-  const text = normalizeIntentText(input);
-  if (!text) return [];
-  if (text === "/report" || hasAny(text, ["日次レポート", "daily report", "daily_report"])) {
-    return [
-      {
-        name: "get_report",
-        args: { kind: "daily" },
-        why: "LLM unavailable fallback: daily report intent",
-      },
-    ];
-  }
-  if (text === "/submit" || hasAny(text, ["入稿前", "入稿チェック", "submit", "submission"])) {
-    return [
-      {
-        name: "check_submission",
-        args: {},
-        why: "LLM unavailable fallback: submission check intent",
-      },
-    ];
-  }
-  if (text === "/status" || hasAny(text, ["状態", "ステータス", "status", "health"])) {
-    return [
-      {
-        name: "check_status",
-        args: {},
-        why: "LLM unavailable fallback: status intent",
-      },
-    ];
-  }
-  if (text === "/account" || hasAny(text, ["広告アカウント", "ad account", "accounts"])) {
-    return [
-      {
-        name: "list_ad_accounts",
-        args: {},
-        why: "LLM unavailable fallback: account intent",
-      },
-    ];
-  }
-  if (text === "/open" || hasAny(text, ["web ui", "webui", "ブラウザ", "開いて", "url"])) {
-    return [
-      {
-        name: "open_web_ui",
-        args: {},
-        why: "LLM unavailable fallback: open Web UI intent",
-      },
-    ];
-  }
-  if (text === "/schedule" || hasAny(text, ["スケジュール", "schedule", "cron", "自動実行"])) {
-    return [
-      {
-        name: "manage_schedule",
-        args: { action: "list" },
-        why: "LLM unavailable fallback: schedule list intent",
-      },
-    ];
-  }
-  if (text === "/connect" || hasAny(text, ["接続", "認証", "connect", "auth"])) {
-    const service = text.includes("github")
-      ? "github"
-      : text.includes("meta")
-        ? "meta"
-        : hasAny(text, ["ai", "llm", "codex", "openai", "claude", "anthropic"])
-          ? "ai"
-          : text.includes("slack")
-            ? "slack"
-            : "ai";
-    return [
-      {
-        name: "connect_service",
-        args: { service },
-        why: "LLM unavailable fallback: connect intent",
-      },
-    ];
-  }
-  return [];
-}
-
-function normalizeIntentText(input: string): string {
-  return input.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function hasAny(text: string, needles: string[]): boolean {
-  return needles.some((needle) => text.includes(needle));
 }
 
 function formatLlmFailure(err: unknown): string {
@@ -300,7 +205,7 @@ export function buildAgentSystemPrompt(agentContext: AgentContext): string {
     "- sync_ad_accounts: args {selectDefault?: boolean,json?: boolean}",
     "- select_ad_account: args {adAccountId?: string,key?: string,json?: boolean}",
     "- connect_service: args {service:'meta'|'github'|'ai'|'slack', aiProvider?:'codex'|'openai'|'anthropic'}",
-    "- get_report: args {kind?:'daily'|'budget'|'improvement'}",
+    "- get_report: args {kind?:'daily'|'budget'|'improvement', metricDate?:'YYYY-MM-DD'}",
     "- check_submission: args {root?: string,base?: string,account?: string,save?: boolean}",
     "- manage_schedule: args {action:'list'|'enable'|'disable'|'run'|'logs'|'set', preset?:'daily'|'budget'|'improvement'|'github'|'retention', cron?: string, limit?: number}",
     "- show_logs: args {target?:'up'|'web'|'worker'|'all', lines?: number}",
@@ -308,6 +213,12 @@ export function buildAgentSystemPrompt(agentContext: AgentContext): string {
     "- start_delivery: args {hierarchyId:string,note?:string,json?:boolean}",
     "- backup_data: args {}",
     "- open_web_ui: args {}",
+    "- query_meta_ads: read-only Meta Ads CLI query. args {resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
+    "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
+    "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD when the user asks for a specific or relative report date. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
+    "Meta Ads CLI capability note: supported read path is `meta --output json ads ...`. `insights get` supports --date-preset/--since/--until/--time-increment/--breakdown/--fields/--campaign-id/--adset-id/--ad-id/--sort/--limit. For hierarchy detail, list campaign/adset/ad IDs first, then query insights by the ID filter. Product feed/item/set list requires catalogId. Catalog and dataset list can use businessId.",
+    "For performance analysis, request the fields needed for the user's question. For frequency ask for frequency. For CPA/CV/conversion checks request spend plus actions and, when useful, cost_per_action_type/action_values. Do not rely on display text for automation decisions; tool executors keep raw structured rows.",
+    "Meta Ads CLI also has mutation commands such as campaign/adset/ad/creative/catalog/product create/update/delete and dataset connect/disconnect/assign-user, but chat must not run those directly. Use check_submission for dry-run review and start_delivery only for the audited activation path.",
     "Never request arbitrary shell, restore, destructive git, direct DB writes, direct Meta mutation outside audited paths, or secret display.",
     "Actual ad submission must go through ops repo validation, dry-run plan, GitHub PR review/merge, and worker apply.",
     "For recurring scheduled tasks, keep flexibility: interpret the saved natural-language task at runtime and choose tools based on current state.",
@@ -458,6 +369,15 @@ function resolveTool(
         args: [],
         toolArgs: tool.args,
         display: "open Web UI",
+        why: tool.why,
+      };
+    case "query_meta_ads":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "Meta Ads CLI read-only query",
         why: tool.why,
       };
     default:

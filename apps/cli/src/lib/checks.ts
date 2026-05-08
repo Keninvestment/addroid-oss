@@ -38,9 +38,9 @@ interface VersionRun {
   status: number | null;
 }
 
-function runVersion(cmd: string, args: string[]): VersionRun {
+function runVersion(cmd: string, args: string[], env: NodeJS.ProcessEnv = process.env): VersionRun {
   try {
-    const r = spawnSync(cmd, args, { encoding: "utf8", timeout: 5_000 });
+    const r = spawnSync(cmd, args, { encoding: "utf8", env, timeout: 5_000 });
     if (r.error && (r.error as NodeJS.ErrnoException).code === "ENOENT") {
       return { found: false, stdout: "", stderr: "", status: null };
     }
@@ -200,7 +200,7 @@ export function checkMetaAdsCli(env: NodeJS.ProcessEnv = process.env): CheckResu
     { cmd: "metaads", args: ["--version"], label: "metaads" },
   ];
   for (const c of candidates) {
-    const r = runVersion(c.cmd, c.args);
+    const r = runVersion(c.cmd, c.args, env);
     if (r.found && r.status === 0) {
       return {
         name: "meta-ads-cli",

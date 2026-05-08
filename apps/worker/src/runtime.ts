@@ -319,6 +319,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               detail: summary.detail ?? null,
             });
           } else if (preset.name === "daily_report") {
+            const requestedMetricDate = readMetricDateFromCronJobData(job.data);
             // Workspace 配下の active な ad_account 全件に対して順次実行する。
             // regression fix: 各 account の inner block は Apply/Activate と
             // 共通の `buildAdAccountLockKey` を経由して `withLock` で直列化する。
@@ -353,6 +354,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     // される `mode` が正しい運用値を反映する必要がある。
                     mode: effectiveMode,
                     accountKey: acc.key,
+                    ...(requestedMetricDate ? { metricDate: requestedMetricDate } : {}),
                     insightsProvider: dailyReportInsights,
                     store: dailyReportStore,
                     analyst: dailyReportAnalyst,
@@ -436,6 +438,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               }
             }
             const aggregate = {
+              kind: "daily_report",
+              status: errors.length > 0 ? "failed" : "succeeded",
               accountsProcessed: summaries.length,
               succeeded: summaries.filter((s) => s.status === "succeeded").length,
               ai_failed: summaries.filter((s) => s.status === "ai_failed").length,
@@ -443,6 +447,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               no_account: summaries.filter((s) => s.status === "no_account").length,
               llmProvider: llmSelection.choice,
               insightsSource: summaries[0]?.insightsSource ?? "unavailable",
+              accounts: summaries.map((s) => dailyReportSummaryToPayload(s)),
             };
             if (errors.length > 0) {
               const message =
@@ -1377,6 +1382,7 @@ function dailyReportSummaryToPayload(summary: DailyReportSummary): JsonValue {
   });
   const payload: Record<string, JsonValue> = {
     status: summary.status,
+    workspaceId: summary.workspaceId,
     accountKey: summary.accountKey,
     accountId: summary.accountId,
     currency: summary.currency,
@@ -1607,6 +1613,14 @@ function buildWebUrl(
   if (!/^https?:\/\//i.test(trimmedBase)) return undefined;
   const trimmedPath = path.startsWith("/") ? path : `/${path}`;
   return `${trimmedBase}${trimmedPath}`;
+}
+
+function readMetricDateFromCronJobData(data: unknown): string | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = (data as Record<string, unknown>).metricDate;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
 }
 
 async function loadLatestPerformanceSnapshotIds(

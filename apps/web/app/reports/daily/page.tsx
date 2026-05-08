@@ -183,6 +183,16 @@ function parseDailyReportSummary(output: unknown): DailyReportSummary | null {
   };
 }
 
+function parseDailyReportSummaries(output: unknown): DailyReportSummary[] {
+  if (isRecord(output) && Array.isArray(output.accounts)) {
+    return output.accounts
+      .map(parseDailyReportSummary)
+      .filter((x): x is DailyReportSummary => x !== null);
+  }
+  const single = parseDailyReportSummary(output);
+  return single ? [single] : [];
+}
+
 function cronStateToStatus(state: string): StatusState {
   switch (state) {
     case "success":
@@ -347,9 +357,9 @@ export default async function ReportsDailyPage() {
   }
 
   // 直近 succeeded run の output を拾う。なければ最新 run の output を拾う。
-  const parsedSummaries = runs
-    .map((r) => ({ run: r, summary: parseDailyReportSummary(r.output) }))
-    .filter((x): x is { run: CronRunRow; summary: DailyReportSummary } => x.summary !== null);
+  const parsedSummaries = runs.flatMap((r) =>
+    parseDailyReportSummaries(r.output).map((summary) => ({ run: r, summary }))
+  );
   const latestSucceeded =
     parsedSummaries.find(({ summary }) => summary.status === "succeeded") ??
     parsedSummaries[0] ??
@@ -402,14 +412,14 @@ export default async function ReportsDailyPage() {
     {
       header: "Account",
       cell: (row) => {
-        const summary = parseDailyReportSummary(row.output);
+        const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? <InlineCode>{summary.accountKey}</InlineCode> : <span>—</span>;
       },
     },
     {
       header: "Metric date",
       cell: (row) => {
-        const summary = parseDailyReportSummary(row.output);
+        const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary && summary.metricDate ? (
           <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
             {summary.metricDate}
@@ -424,7 +434,7 @@ export default async function ReportsDailyPage() {
     {
       header: "Status",
       cell: (row) => {
-        const summary = parseDailyReportSummary(row.output);
+        const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? (
           <StatusBadge state={reportSummaryStatusToState(summary.status)}>
             {summary.status}
@@ -437,7 +447,7 @@ export default async function ReportsDailyPage() {
     {
       header: "Snapshots",
       cell: (row) => {
-        const summary = parseDailyReportSummary(row.output);
+        const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? (
           <span className="tabular-nums">{summary.snapshotIds.length}</span>
         ) : (

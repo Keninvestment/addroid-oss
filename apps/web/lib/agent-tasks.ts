@@ -107,7 +107,11 @@ export async function runAgentTaskNow(id: string) {
     select: { id: true },
   });
   try {
-    const result = await runWebAgentChat(task.prompt);
+    const result = await runWebAgentChat(task.prompt, {
+      includeDashboardMemory: false,
+      auditAction: "agent_task.chat_run_via_web",
+      auditActor: "agent:scheduled-task",
+    });
     const failed = !result.ok || result.executions.some((e) => e.status === "error");
     await prisma.agentTaskRun.update({
       where: { id: run.id },

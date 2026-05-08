@@ -181,7 +181,9 @@ async function executeWorkerAgentTool(opts: {
         const preset = reportPreset(
           typeof readyTool.toolArgs.kind === "string" ? readyTool.toolArgs.kind : "daily"
         );
+        const metricDate = readStringArg(readyTool.toolArgs, "metricDate", "metric_date");
         const jobId = await opts.boss.send(preset, {
+          ...(metricDate ? { metricDate } : {}),
           manual: true,
           requestedBy: "agent:scheduled-task",
           requestedAt: new Date().toISOString(),
@@ -306,6 +308,14 @@ async function runSubmissionCheck(opts: {
     message: result.ok ? "dry-run は OK です。" : "dry-run で問題があります。",
     data: { executionLogId: recorded?.id ?? null, result },
   };
+}
+
+function readStringArg(args: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 function reportPreset(value: string): CronPresetName {

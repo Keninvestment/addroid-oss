@@ -261,7 +261,8 @@ export type RunNowResult =
     };
 
 export async function runCronNow(
-  presetName: CronPresetName
+  presetName: CronPresetName,
+  data: Record<string, unknown> = {}
 ): Promise<RunNowResult> {
   let ctx: PreparedContext;
   try {
@@ -278,6 +279,7 @@ export async function runCronNow(
   let jobId: string | null = null;
   try {
     jobId = await boss.send(presetName, {
+      ...data,
       manual: true,
       requestedBy: WEB_CRON_ACTOR,
       requestedAt: new Date().toISOString(),
@@ -293,6 +295,7 @@ export async function runCronNow(
   await recordAudit(workspaceId, "cron.manual_run_via_web", presetName, {
     preset: presetName,
     jobId,
+    data,
   });
 
   return { ok: true, jobId };
