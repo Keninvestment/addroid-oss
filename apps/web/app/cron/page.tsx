@@ -79,18 +79,15 @@ export default async function CronSchedulesPage() {
   return (
     <>
       <PageHeader
-        title="Cron Schedules"
-        subtitle="pg-boss schedule と cron_schedules ミラーを Web UI から ON/OFF・schedule 編集・即時実行できます。書き込みは audit_logs に web: 接頭辞で記録されます。"
+        title="自動実行"
+        subtitle="日次レポート、予算チェック、改善提案などを定期的に実行します。文章で新しい依頼も保存できます。"
         actions={
           <div style={{ display: "flex", gap: "var(--space-2)" }}>
             <Link href="/cron/runs" className="btn btn--ghost btn--sm">
-              Cron / Execution logs
+              実行履歴
             </Link>
             <Link href="/cron/audit" className="btn btn--ghost btn--sm">
-              Audit logs
-            </Link>
-            <Link href="/logs" className="btn btn--ghost btn--sm">
-              Operational logs
+              操作履歴
             </Link>
           </div>
         }
@@ -100,18 +97,18 @@ export default async function CronSchedulesPage() {
         <CronRateLimitSummary />
 
         <Panel
-          title="Natural Language Agent Tasks"
-          subtitle="OpenClaw と同様に自然言語のまま保存し、実行時に Dashboard chat と同じ LLM agent runtime で tool call を選びます。"
+          title="文章で追加する自動実行"
+          subtitle="例: 毎朝、日次レポートを取得して問題があれば改善提案も作る。"
         >
           <AgentTaskForm tasks={agentTasks} />
         </Panel>
 
         <Panel
-          title="Registered Schedules"
+          title="標準の自動実行"
           subtitle={
             dbReady
-              ? `cron_schedules · ${registered.length} 件登録 / プリセット定義 ${CRON_PRESETS.length} 件`
-              : "Prisma スキーマ未反映 — npm run db:push を実行してください。"
+              ? `${registered.length} 件登録 / ${CRON_PRESETS.length} 件利用可能`
+              : "保存先を確認してください。"
           }
         >
           <DataTable
@@ -120,28 +117,28 @@ export default async function CronSchedulesPage() {
             empty={
               <EmptyState
                 title="登録済みのスケジュールはまだありません。"
-                description="addroid start でデフォルトプリセットが登録されます。"
+                description="AdDroid を開始すると標準の自動実行が登録されます。"
               />
             }
             columns={[
-              { header: "Name", cell: (row) => row.name, className: "mono" },
+              { header: "内容", cell: (row) => presetLabel(row.name) },
               {
-                header: "Cron",
+                header: "実行タイミング",
                 cell: (row) => row.cron,
                 className: "mono tabular",
                 headerClassName: "tabular",
               },
-              { header: "Description", cell: (row) => row.description },
+              { header: "説明", cell: (row) => row.description },
               {
-                header: "Enabled",
+                header: "状態",
                 cell: (row) => (
                   <StatusBadge state={row.enabled ? "ok" : "idle"}>
-                    {row.enabled ? "on" : "off"}
+                    {row.enabled ? "有効" : "停止中"}
                   </StatusBadge>
                 ),
               },
               {
-                header: "Last run",
+                header: "前回",
                 cell: (row) => (
                   <StatusBadge
                     state={
@@ -159,13 +156,13 @@ export default async function CronSchedulesPage() {
                 ),
               },
               {
-                header: "Next run",
+                header: "次回",
                 cell: (row) => (row.nextRunAt ? row.nextRunAt.toISOString() : "—"),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
               {
-                header: "Actions",
+                header: "操作",
                 cell: (row) => (
                   <CronControls
                     presetName={row.name}
@@ -182,4 +179,15 @@ export default async function CronSchedulesPage() {
       </div>
     </>
   );
+}
+
+function presetLabel(name: string): string {
+  const labels: Record<string, string> = {
+    daily_report: "日次レポート",
+    budget_guard: "予算チェック",
+    improvement_pr: "改善提案",
+    github_poll: "承認済み変更の確認",
+    retention_cleanup: "古い履歴の整理",
+  };
+  return labels[name] ?? name;
 }

@@ -107,8 +107,8 @@ export function CronControls({
           ? `${presetName} を有効化しました`
           : `${presetName} を無効化しました`,
         description: nextEnabled
-          ? `pg-boss schedule に登録しました (${body.cron ?? cron}).`
-          : "pg-boss schedule を解除しました。cron_schedules.enabled=false に更新しました。",
+          ? `自動実行を再開しました (${body.cron ?? cron}).`
+          : "自動実行を停止しました。実行中の処理は中断されません。",
       });
       setBusyKind(null);
       setConfirm(null);
@@ -166,10 +166,10 @@ export function CronControls({
       setEditing(false);
       toast.push({
         variant: "success",
-        title: `${presetName} の schedule を更新しました`,
+        title: `${presetName} の実行タイミングを更新しました`,
         description: body.reschedulePending
-          ? `${persistedCron} を保存しました。disabled のため pg-boss schedule は未登録です (有効化時に新 cron が反映されます).`
-          : `${persistedCron} に再登録しました (pg-boss schedule)。`,
+          ? `${persistedCron} を保存しました。停止中のため、有効化した時に反映されます。`
+          : `${persistedCron} に更新しました。`,
       });
       setBusyKind(null);
       router.refresh();
@@ -214,10 +214,10 @@ export function CronControls({
       }
       toast.push({
         variant: "success",
-        title: `${presetName} を手動実行キューに積みました`,
+        title: `${presetName} を今すぐ実行します`,
         description: body.jobId
-          ? `pg-boss job: ${body.jobId} — 実行は worker で処理されます。`
-          : "pg-boss にジョブを送信しました (jobId 不明 — 重複抑止または worker 未起動)。",
+          ? `受付ID: ${body.jobId}`
+          : "実行要求を受け付けました。",
       });
       setBusyKind(null);
       setConfirm(null);
@@ -290,7 +290,7 @@ export function CronControls({
               }}
               disabled={busyKind !== null}
             >
-              cron 編集
+              時間を編集
             </button>
             <button
               type="button"
@@ -305,7 +305,7 @@ export function CronControls({
       </div>
       {!persistedFromDb ? (
         <div className="cron-controls__hint">
-          cron_schedules 行は未作成です。最初の操作で自動的に登録されます。
+          最初の操作で自動的に登録されます。
         </div>
       ) : null}
       {inlineError ? (
@@ -327,25 +327,16 @@ export function CronControls({
           <div className="confirm-body">
             <p className="confirm-body__lead">
               {confirm?.kind === "toggle" && confirm.nextEnabled
-                ? "pg-boss schedule に登録し、cron 式に従って自動実行を再開します。"
-                : "pg-boss schedule を解除し、自動実行を停止します。実行中のジョブは中断されません。"}
+                ? "設定された時間に従って自動実行を再開します。"
+                : "自動実行を停止します。実行中の処理は中断されません。"}
             </p>
             <dl className="kv">
-              <dt>Preset</dt>
-              <dd className="mono">{presetName}</dd>
-              <dt>Description</dt>
+              <dt>内容</dt>
+              <dd>{presetLabel(presetName)}</dd>
+              <dt>説明</dt>
               <dd>{description}</dd>
-              <dt>Cron</dt>
+              <dt>実行タイミング</dt>
               <dd className="mono">{cron}</dd>
-              <dt>Audit</dt>
-              <dd>
-                <span className="mono">
-                  cron.{confirm?.kind === "toggle" && confirm.nextEnabled
-                    ? "enabled_via_web"
-                    : "disabled_via_web"}
-                </span>{" "}
-                が <span className="mono">audit_logs</span> に記録されます。
-              </dd>
             </dl>
           </div>
         }
@@ -373,31 +364,23 @@ export function CronControls({
         description={
           <div className="confirm-body">
             <p className="confirm-body__lead">
-              pg-boss にジョブを 1 件キューします。
-              実行は worker プロセスで処理され、結果は{" "}
-              <span className="mono">/cron/runs</span> と{" "}
-              <span className="mono">execution_logs</span> に追記されます。
+              この自動実行を 1 回だけ開始します。結果は実行履歴に残ります。
             </p>
             <dl className="kv">
-              <dt>Preset</dt>
-              <dd className="mono">{presetName}</dd>
-              <dt>Description</dt>
+              <dt>内容</dt>
+              <dd>{presetLabel(presetName)}</dd>
+              <dt>説明</dt>
               <dd>{description}</dd>
-              <dt>Side effects</dt>
+              <dt>注意点</dt>
               <dd>
                 {presetName === "improvement_pr"
-                  ? "AI トークンが消費され、改善案がある場合は GitHub PR が作成される可能性があります。"
+                  ? "改善案がある場合は GitHub に承認待ちの変更が作成される可能性があります。"
                   : presetName === "daily_report" ||
                       presetName === "budget_guard"
-                    ? "AI トークンが消費されます。Meta は変更されません。"
+                    ? "Meta の広告設定は変更されません。"
                     : presetName === "github_poll"
-                      ? "ops repo を polling し、merged PR があれば execute_apply を enqueue します。"
-                      : "performance_snapshots の保持期間に基づいた削除が行われます。"}
-              </dd>
-              <dt>Audit</dt>
-              <dd>
-                <span className="mono">cron.manual_run_via_web</span> が{" "}
-                <span className="mono">audit_logs</span> に記録されます。
+                      ? "承認済みの変更があれば反映待ちに進みます。"
+                      : "古い履歴の整理を行います。"}
               </dd>
             </dl>
           </div>
@@ -413,4 +396,15 @@ export function CronControls({
       />
     </div>
   );
+}
+
+function presetLabel(name: string): string {
+  const labels: Record<string, string> = {
+    daily_report: "日次レポート",
+    budget_guard: "予算チェック",
+    improvement_pr: "改善提案",
+    github_poll: "承認済み変更の確認",
+    retention_cleanup: "古い履歴の整理",
+  };
+  return labels[name] ?? name;
 }

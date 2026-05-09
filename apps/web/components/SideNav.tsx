@@ -16,38 +16,39 @@ interface NavGroup {
 
 const groups: NavGroup[] = [
   {
-    label: "Overview",
-    items: [{ href: "/", label: "Dashboard", exact: true }],
+    label: "全体",
+    items: [{ href: "/", label: "ホーム", exact: true }],
   },
   {
-    label: "Meta Ads",
+    label: "広告運用",
     items: [
-      { href: "/accounts", label: "Accounts" },
-      { href: "/plans", label: "Plans" },
-      { href: "/campaigns", label: "Campaigns" },
+      { href: "/accounts", label: "広告アカウント" },
+      { href: "/reports/daily", label: "日次レポート" },
+      { href: "/budget", label: "予算チェック" },
+      { href: "/plans", label: "入稿前チェック" },
+      { href: "/campaigns", label: "配信中の広告" },
     ],
   },
   {
-    label: "AI Workflows",
+    label: "改善",
     items: [
-      { href: "/improvements", label: "Improvements" },
-      { href: "/creatives", label: "Creatives" },
+      { href: "/improvements", label: "改善提案" },
+      { href: "/creatives", label: "クリエイティブ" },
     ],
   },
   {
-    label: "GitOps",
+    label: "確認と自動化",
     items: [
-      { href: "/github", label: "GitHub" },
-      { href: "/approvals", label: "Approvals" },
-      { href: "/cron", label: "Schedules", exact: true },
-      { href: "/cron/runs", label: "Runs" },
-      { href: "/cron/audit", label: "Audit" },
-      { href: "/logs", label: "Logs" },
+      { href: "/approvals", label: "承認待ち" },
+      { href: "/cron", label: "自動実行", exact: true },
+      { href: "/cron/runs", label: "実行ログ" },
+      { href: "/cron/audit", label: "操作履歴" },
+      { href: "/github", label: "GitHub 連携" },
     ],
   },
   {
-    label: "Maintenance",
-    items: [{ href: "/setup", label: "Setup & Health" }],
+    label: "設定",
+    items: [{ href: "/setup", label: "接続と健康状態" }],
   },
 ];
 

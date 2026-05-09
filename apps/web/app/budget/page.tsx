@@ -244,6 +244,19 @@ function cronStateToStatus(state: string): StatusState {
   }
 }
 
+function cronStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    failed: "失敗",
+    running: "実行中",
+    queued: "待機中",
+    ok: "成功",
+    warn: "警告",
+    error: "失敗",
+  };
+  return labels[state] ?? state;
+}
+
 function summaryStatusToState(status: BudgetGuardRunStatus): StatusState {
   switch (status) {
     case "succeeded":
@@ -259,6 +272,16 @@ function summaryStatusToState(status: BudgetGuardRunStatus): StatusState {
   }
 }
 
+function summaryStatusLabel(status: BudgetGuardRunStatus): string {
+  const labels: Record<BudgetGuardRunStatus, string> = {
+    succeeded: "チェック済み",
+    no_account: "対象なし",
+    policy_missing: "ルール未設定",
+    ai_failed: "AI判断失敗",
+  };
+  return labels[status] ?? status;
+}
+
 function classificationToState(c: BudgetGuardClassification | null): StatusState {
   switch (c) {
     case "dangerous":
@@ -270,6 +293,13 @@ function classificationToState(c: BudgetGuardClassification | null): StatusState
     default:
       return "idle";
   }
+}
+
+function classificationLabel(c: BudgetGuardClassification | null): string {
+  if (c === "dangerous") return "高リスク";
+  if (c === "requires_approval") return "承認が必要";
+  if (c === "safe") return "低リスク";
+  return "—";
 }
 
 function decisionToState(d: BudgetGuardDecision | null): StatusState {
@@ -285,6 +315,13 @@ function decisionToState(d: BudgetGuardDecision | null): StatusState {
   }
 }
 
+function decisionLabel(d: BudgetGuardDecision | null): string {
+  if (d === "auto_approved") return "自動承認";
+  if (d === "approval_required") return "承認が必要";
+  if (d === "auto_blocked") return "自動ブロック";
+  return "—";
+}
+
 function modeToState(mode: string): StatusState {
   switch (mode) {
     case "auto_apply":
@@ -295,6 +332,12 @@ function modeToState(mode: string): StatusState {
     default:
       return "idle";
   }
+}
+
+function severityLabel(severity: BudgetGuardAlertSeverity): string {
+  if (severity === "trigger") return "対応が必要";
+  if (severity === "warn") return "警告";
+  return "情報";
 }
 
 function alertSeverityToState(severity: BudgetGuardAlertSeverity): StatusState {
@@ -323,8 +366,23 @@ function aiRunStatusState(status: string): StatusState {
   }
 }
 
+function aiRunStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    succeeded: "成功",
+    failed: "失敗",
+    running: "実行中",
+    queued: "待機中",
+  };
+  return labels[status] ?? status;
+}
+
 function formatTimestamp(d: Date): string {
-  return d.toISOString().replace("T", " ").replace(/\..+$/, "Z");
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d);
 }
 
 function formatRatio(n: number): string {
@@ -425,21 +483,21 @@ export default async function BudgetGuardPage() {
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
-      header: "Started",
+      header: "開始日時",
       cell: (row) => formatTimestamp(row.startedAt),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "State",
+      header: "実行状態",
       cell: (row) => (
         <StatusBadge state={cronStateToStatus(row.state)}>
-          {row.state}
+          {cronStateLabel(row.state)}
         </StatusBadge>
       ),
     },
     {
-      header: "Account",
+      header: "広告アカウント",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         return summary ? (
@@ -450,45 +508,43 @@ export default async function BudgetGuardPage() {
       },
     },
     {
-      header: "Status",
+      header: "チェック結果",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         if (!summary) return <span>—</span>;
         return (
           <StatusBadge state={summaryStatusToState(summary.status)}>
-            {summary.status}
+            {summaryStatusLabel(summary.status)}
           </StatusBadge>
         );
       },
     },
     {
-      header: "Classification",
+      header: "リスク",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         if (!summary || !summary.classification) return <span>—</span>;
         return (
           <StatusBadge state={classificationToState(summary.classification)}>
-            {summary.classification}
+            {classificationLabel(summary.classification)}
           </StatusBadge>
         );
       },
     },
     {
-      header: "Decision",
+      header: "判断",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         if (!summary || !summary.decision) return <span>—</span>;
         return (
           <StatusBadge state={decisionToState(summary.decision)}>
-            {summary.decision === "approval_required"
-              ? "approval-required"
-              : summary.decision}
+            {decisionLabel(summary.decision)}
           </StatusBadge>
         );
       },
     },
     {
-      header: "Alerts",
+      header: "アラート",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         return summary ? (
@@ -501,7 +557,7 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Candidates",
+      header: "停止候補",
       cell: (row) => {
         const summary = parseBudgetGuardSummary(row.output);
         return summary ? (
@@ -514,7 +570,7 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Duration",
+      header: "所要時間",
       cell: (row) => (row.durationMs == null ? "—" : `${row.durationMs} ms`),
       className: "tabular",
       headerClassName: "tabular",
@@ -523,19 +579,19 @@ export default async function BudgetGuardPage() {
 
   const alertColumns: DataTableColumn<BudgetGuardAlert>[] = [
     {
-      header: "Rule",
+      header: "ルール",
       cell: (row) => <InlineCode>{formatRule(row.rule)}</InlineCode>,
     },
     {
-      header: "Severity",
+      header: "重要度",
       cell: (row) => (
         <StatusBadge state={alertSeverityToState(row.severity)}>
-          {row.severity}
+          {severityLabel(row.severity)}
         </StatusBadge>
       ),
     },
     {
-      header: "Observed",
+      header: "観測値",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {row.rule === "no_conversions"
@@ -547,7 +603,7 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Threshold",
+      header: "しきい値",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {row.rule === "no_conversions"
@@ -559,24 +615,24 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Message",
+      header: "内容",
       cell: (row) => row.message,
     },
   ];
 
   const aiRunColumns: DataTableColumn<AiRunRow>[] = [
     {
-      header: "Created",
+      header: "作成日時",
       cell: (row) => formatTimestamp(row.createdAt),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "Agent",
+      header: "担当",
       cell: (row) => <InlineCode>{row.agent}</InlineCode>,
     },
     {
-      header: "Provider / model",
+      header: "AIモデル",
       cell: (row) => (
         <InlineCode>
           {row.provider}/{row.model}
@@ -584,15 +640,15 @@ export default async function BudgetGuardPage() {
       ),
     },
     {
-      header: "Status",
+      header: "状態",
       cell: (row) => (
         <StatusBadge state={aiRunStatusState(row.status)}>
-          {row.status}
+          {aiRunStatusLabel(row.status)}
         </StatusBadge>
       ),
     },
     {
-      header: "Decision",
+      header: "判断",
       cell: (row) =>
         row.decision ? (
           <StatusBadge
@@ -602,8 +658,8 @@ export default async function BudgetGuardPage() {
                 : null
             )}
           >
-            {row.decision === "approval_required"
-              ? "approval-required"
+            {row.decision && VALID_DECISION.has(row.decision as BudgetGuardDecision)
+              ? decisionLabel(row.decision as BudgetGuardDecision)
               : row.decision}
           </StatusBadge>
         ) : (
@@ -611,7 +667,7 @@ export default async function BudgetGuardPage() {
         ),
     },
     {
-      header: "Confidence",
+      header: "信頼度",
       cell: (row) =>
         row.confidence === null ? (
           <span>—</span>
@@ -624,7 +680,7 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Tokens (in/out)",
+      header: "利用量",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {row.inputTokens.toLocaleString()} / {row.outputTokens.toLocaleString()}
@@ -634,7 +690,7 @@ export default async function BudgetGuardPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Cost (USD)",
+      header: "費用",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           ${row.costUsd.toFixed(6)}
@@ -653,29 +709,29 @@ export default async function BudgetGuardPage() {
         ? "error"
         : "ok";
   const policyStateLabel = !dbReady
-    ? "warn"
+    ? "要確認"
     : !latestSummary
-      ? "no runs yet"
+      ? "未実行"
       : policyMissing
-        ? "fail-closed"
-        : "configured";
+        ? "ルール未設定"
+        : "設定済み";
 
   const latestSummaryItems: KeyValueEntry[] = latestSummary
     ? [
         {
-          label: "Account",
+          label: "広告アカウント",
           value: <InlineCode>{latestSummary.summary.accountKey}</InlineCode>,
         },
         {
-          label: "Status",
+          label: "チェック結果",
           value: (
             <StatusBadge state={summaryStatusToState(latestSummary.summary.status)}>
-              {latestSummary.summary.status}
+              {summaryStatusLabel(latestSummary.summary.status)}
             </StatusBadge>
           ),
         },
         {
-          label: "Mode",
+          label: "実行モード",
           value: (
             <StatusBadge state={modeToState(latestSummary.summary.mode)}>
               {latestSummary.summary.mode}
@@ -683,31 +739,29 @@ export default async function BudgetGuardPage() {
           ),
         },
         {
-          label: "Classification",
+          label: "リスク",
           value: latestSummary.summary.classification ? (
             <StatusBadge
               state={classificationToState(latestSummary.summary.classification)}
             >
-              {latestSummary.summary.classification}
+              {classificationLabel(latestSummary.summary.classification)}
             </StatusBadge>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Decision",
+          label: "判断",
           value: latestSummary.summary.decision ? (
             <StatusBadge state={decisionToState(latestSummary.summary.decision)}>
-              {latestSummary.summary.decision === "approval_required"
-                ? "approval-required"
-                : latestSummary.summary.decision}
+              {decisionLabel(latestSummary.summary.decision)}
             </StatusBadge>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Candidates",
+          label: "停止候補",
           value: (
             <span className="tabular-nums">
               {latestSummary.summary.candidateCount}
@@ -715,7 +769,7 @@ export default async function BudgetGuardPage() {
           ),
         },
         {
-          label: "Dangerous categories",
+          label: "注意が必要な変更",
           value:
             latestSummary.summary.dangerousCategories.length === 0 ? (
               <span>—</span>
@@ -726,7 +780,7 @@ export default async function BudgetGuardPage() {
             ),
         },
         {
-          label: "AI run",
+          label: "AI実行ID",
           value: latestSummary.summary.aiRunId ? (
             <InlineCode>{latestSummary.summary.aiRunId}</InlineCode>
           ) : (
@@ -739,19 +793,19 @@ export default async function BudgetGuardPage() {
   const scheduleItems: KeyValueEntry[] = scheduleRow
     ? [
         {
-          label: "Schedule",
+          label: "実行タイミング",
           value: <InlineCode>{scheduleRow.cron || "(unscheduled)"}</InlineCode>,
         },
         {
-          label: "Enabled",
+          label: "状態",
           value: (
             <StatusBadge state={scheduleRow.enabled ? "ok" : "idle"}>
-              {scheduleRow.enabled ? "on" : "off"}
+              {scheduleRow.enabled ? "有効" : "停止中"}
             </StatusBadge>
           ),
         },
         {
-          label: "Last run state",
+          label: "前回",
           value: scheduleRow.lastRunState ? (
             <StatusBadge
               state={
@@ -764,14 +818,14 @@ export default async function BudgetGuardPage() {
                       : "idle"
               }
             >
-              {scheduleRow.lastRunState}
+              {cronStateLabel(scheduleRow.lastRunState)}
             </StatusBadge>
           ) : (
             <span>未実行</span>
           ),
         },
         {
-          label: "Next run",
+          label: "次回",
           value: scheduleRow.nextRunAt ? (
             <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
               {formatTimestamp(scheduleRow.nextRunAt)}
@@ -786,16 +840,11 @@ export default async function BudgetGuardPage() {
   return (
     <>
       <PageHeader
-        title="Budget Guard"
+        title="予算チェック"
         subtitle={
           <>
-            <InlineCode>budget_guard</InlineCode> rules
-            (daily_budget / monthly_pace / day_over_day / no_conversions /
-            auto_pause_policy) のポリシー評価結果と auto_pause 候補。
-            policy が未設定 (= ops repo に
-            <InlineCode>workflows/budget-guard.yaml</InlineCode> 無し) のときは
-            fail-closed で Meta を変更しない。dangerous な変更は AI 単独で
-            自動承認されず、必ず PR 承認 (approval-required) を経る。
+            予算超過、月間ペース、急な変化、成果なしを確認します。
+            ルールが未設定のときや危険な変更は、Meta を直接変更せず人の承認を待ちます。
           </>
         }
       />
@@ -817,34 +866,31 @@ export default async function BudgetGuardPage() {
             data-testid="budget-guard-fail-closed"
           >
             <div style={{ fontWeight: 600 }}>
-              Fail-closed: configure budget guard
+              予算チェックのルールが未設定です
             </div>
             <div style={{ fontSize: "0.8125rem" }}>
-              budget_guard policy が見つかりません。ops repo に{" "}
-              <InlineCode>workflows/budget-guard.yaml</InlineCode> を配置するか、
-              既存ファイルが正しく解釈できる形になっているか確認してください。
-              policy が未設定のあいだ、budget_guard は AI 推論を行わず、Meta も
-              一切変更しません。
+              ルールが見つからない間は、AI判断もMetaへの変更も行いません。
+              設定が必要な場合は接続と健康状態、またはGitHub連携を確認してください。
             </div>
           </div>
         ) : null}
 
         <Panel
-          title="Policy state"
-          subtitle="budget_guard alerts (daily_budget / monthly_pace / day_over_day / no_conversions) と auto_pause_policy が直近 run で読み込めた状態"
+          title="ルールの状態"
+          subtitle="予算・月間ペース・急な変化・成果なし・自動停止候補を確認します"
           status={
             <StatusDot state={policyStateState}>{policyStateLabel}</StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="budget_guard 出力を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="予算チェックを読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !latestSummary ? (
             <EmptyState
-              title="budget_guard はまだ実行されていません"
-              description="/cron から budget_guard スケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに alerts / auto_pause_policy / classification / decision が表示されます。"
+              title="予算チェックはまだ実行されていません"
+              description="自動実行画面から予算チェックを有効化すると、ここにアラートと判断結果が表示されます。"
             />
           ) : (
             <div style={{ display: "grid", gap: "1rem" }}>
@@ -861,7 +907,7 @@ export default async function BudgetGuardPage() {
                       marginBottom: "0.25rem",
                     }}
                   >
-                    Policy reasons
+                    判断理由
                   </div>
                   <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
                     {latestSummary.summary.policyReasons.map((r, idx) => (
@@ -885,13 +931,13 @@ export default async function BudgetGuardPage() {
         </Panel>
 
         <Panel
-          title="Schedule"
+          title="自動実行の状態"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
+              ? "保存先を確認してください"
               : scheduleRow
-                ? `cron_schedules (name="budget_guard")`
-                : "budget_guard スケジュール未登録"
+                ? "予算チェックの定期実行"
+                : "予算チェックの自動実行は未登録"
           }
           status={
             <StatusDot
@@ -917,13 +963,13 @@ export default async function BudgetGuardPage() {
         >
           {!dbReady ? (
             <EmptyState
-              title="cron_schedules を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="自動実行の状態を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !scheduleRow ? (
             <EmptyState
-              title="budget_guard スケジュールはまだ登録されていません"
-              description="addroid start を実行すると、budget_guard を含む schedule preset が登録されます。"
+              title="予算チェックの自動実行はまだ登録されていません"
+              description="AdDroid を開始すると標準の自動実行が登録されます。"
             />
           ) : (
             <KeyValueList items={scheduleItems} />
@@ -931,13 +977,13 @@ export default async function BudgetGuardPage() {
         </Panel>
 
         <Panel
-          title="Alerts (latest run)"
+          title="最新アラート"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
+              ? "保存先を確認してください"
               : latestSummary
-                ? `直近 budget_guard run のしきい値違反 · ${latestSummary.summary.alerts.length} 件`
-                : "直近 run なし"
+                ? `しきい値を超えた項目 · ${latestSummary.summary.alerts.length} 件`
+                : "直近の実行なし"
           }
           status={
             <StatusDot
@@ -956,20 +1002,20 @@ export default async function BudgetGuardPage() {
                 : !latestSummary
                   ? "idle"
                   : latestSummary.summary.alerts.length === 0
-                    ? "no alerts"
-                    : `${latestSummary.summary.alerts.length} alerts`}
+                    ? "アラートなし"
+                    : `${latestSummary.summary.alerts.length} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="alerts を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="アラートを読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !latestSummary ? (
             <EmptyState
               title="アラートはまだありません"
-              description="budget_guard が一度でも実行されると、ここに daily_budget / monthly_pace / day_over_day / no_conversions / auto_pause_policy のしきい値判定結果が表示されます。"
+              description="予算チェックが実行されると、しきい値判定結果が表示されます。"
             />
           ) : (
             <DataTable
@@ -987,22 +1033,22 @@ export default async function BudgetGuardPage() {
         </Panel>
 
         <Panel
-          title="Recent budget_guard runs"
+          title="実行履歴"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `cron_runs (name="budget_guard") · ${runsCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${runsCount} 件 (直近 25)`
           }
           status={
             <StatusDot state={!dbReady ? "warn" : runsCount === 0 ? "idle" : "ok"}>
-              {!dbReady ? "warn" : runsCount === 0 ? "idle" : `${runsCount} runs`}
+              {!dbReady ? "要確認" : runsCount === 0 ? "未実行" : `${runsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="budget_guard 実行履歴を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="予算チェックの実行履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -1011,8 +1057,8 @@ export default async function BudgetGuardPage() {
               columns={runColumns}
               empty={
                 <EmptyState
-                  title="budget_guard はまだ実行されていません"
-                  description="/cron からスケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに各実行の status / classification / decision / alerts / candidates が記録されます。"
+                  title="予算チェックはまだ実行されていません"
+                  description="自動実行を有効化すると、各回の状態・判断・アラートがここに記録されます。"
                 />
               }
             />
@@ -1020,28 +1066,28 @@ export default async function BudgetGuardPage() {
         </Panel>
 
         <Panel
-          title="Audit AI runs"
+          title="AI判断履歴"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `ai_runs (workflow="budget_guard") · ${aiRunsCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${aiRunsCount} 件 (直近 25)`
           }
           status={
             <StatusDot
               state={!dbReady ? "warn" : aiRunsCount === 0 ? "idle" : "ok"}
             >
               {!dbReady
-                ? "warn"
+                ? "要確認"
                 : aiRunsCount === 0
-                  ? "idle"
-                  : `${aiRunsCount} runs`}
+                  ? "未実行"
+                  : `${aiRunsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="audit ai_runs を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="AI判断履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -1050,8 +1096,8 @@ export default async function BudgetGuardPage() {
               columns={aiRunColumns}
               empty={
                 <EmptyState
-                  title="audit ai_run はまだ実行されていません"
-                  description="budget_guard が実行されると、audit agent の provider / model / decision / confidence / tokens / cost がここに保存されます (policy_missing 状態では AI を呼ばないため、ai_run も書かれません)。"
+                  title="AI判断履歴はまだありません"
+                  description="予算チェックが実行されると、判断結果とコストの概要がここに保存されます。"
                 />
               }
             />

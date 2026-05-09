@@ -35,9 +35,15 @@ export interface SelectGithubAdapterOptions {
   crypto?: CryptoEncryptDecrypt;
   /**
    * OAuth client (clientId / clientSecret / redirectUri)。secrets.local.yaml から
-   * 解決して渡すのが想定。null/undefined のときは Octokit パスを選ばない。
+   * 解決して渡すのが想定。無い場合でも storedTokenAvailable=true なら
+   * GitHub API 操作用の Octokit パスを選べる。
    */
   oauthClient?: OAuthClientConfig | null;
+  /**
+   * CLI / gh device flow で既に暗号化済み GitHub token が保存されている場合は、
+   * Web OAuth client が無くても GitHub API 操作用の Octokit adapter を選べる。
+   */
+  storedTokenAvailable?: boolean;
   /**
    * Mock adapter の追加オプション (テストや UI demo の制御用)。
    */
@@ -61,17 +67,19 @@ export function selectGithubAdapter(opts: SelectGithubAdapterOptions): AdapterSe
       reason: "ADDROID_GITHUB_OAUTH_MOCK=1",
     };
   }
-  if (opts.oauthClient && opts.crypto) {
+  if ((opts.oauthClient || opts.storedTokenAvailable) && opts.crypto) {
     return {
       adapter: new OctokitGithubAdapter({
-        oauthClient: opts.oauthClient,
+        oauthClient: opts.oauthClient ?? null,
         tokenStore: opts.tokenStore,
         crypto: opts.crypto,
         apiClientFactory: (accessToken) =>
           new LazyGithubApiClient(() => createDefaultGithubApiClient(accessToken)),
       }),
       choice: "octokit",
-      reason: "OAuth client + crypto boundary configured",
+      reason: opts.oauthClient
+        ? "OAuth client + crypto boundary configured"
+        : "stored GitHub OAuth token + crypto boundary configured",
     };
   }
   return {
@@ -83,7 +91,7 @@ export function selectGithubAdapter(opts: SelectGithubAdapterOptions): AdapterSe
 
 function missingReason(opts: SelectGithubAdapterOptions): string {
   const missing: string[] = [];
-  if (!opts.oauthClient) missing.push("oauthClient");
+  if (!opts.oauthClient && !opts.storedTokenAvailable) missing.push("oauthClient");
   if (!opts.crypto) missing.push("crypto");
   return `OAuth not configured (missing: ${missing.join(", ") || "n/a"})`;
 }

@@ -24,8 +24,9 @@ function single(v: string | string[] | undefined): string | undefined {
 export default async function GithubPage({
   searchParams,
 }: {
-  searchParams?: SearchParamsInput;
+  searchParams?: Promise<SearchParamsInput>;
 }) {
+  const resolvedSearchParams = await searchParams;
   type OAuthRow = { provider: string; accountIdentifier: string; scopes: string[]; connectedAt: Date };
   type RepoRow = {
     id: string;
@@ -71,32 +72,32 @@ export default async function GithubPage({
 
   const oauthState = !dbReady ? "warn" : oauth.length === 0 ? "warn" : "ok";
   const oauthMessage = !dbReady
-    ? "Prisma スキーマが未反映です。npm run db:push を実行してください。"
+    ? "保存先を確認してください。"
     : oauth.length === 0
-      ? "GitHub と未連携です。下のボタンから OAuth を開始してください。"
-      : `${oauth.length} 件の GitHub OAuth トークンが暗号化境界越しに保存されています。`;
+      ? "GitHub と未連携です。下のボタンから接続してください。"
+      : `${oauth.length} 件のGitHub接続が保存されています。`;
 
   const repo = repos[0];
   const repoState = !dbReady ? "warn" : !repo ? "warn" : repo.bootstrappedAt ? "ok" : "warn";
 
-  const oauthQuery = single(searchParams?.oauth);
-  const bootstrapQuery = single(searchParams?.bootstrap);
-  const reasonQuery = single(searchParams?.reason);
+  const oauthQuery = single(resolvedSearchParams?.oauth);
+  const bootstrapQuery = single(resolvedSearchParams?.bootstrap);
+  const reasonQuery = single(resolvedSearchParams?.reason);
   const banner = renderBanner(oauthQuery, bootstrapQuery, reasonQuery);
 
   return (
     <>
       <PageHeader
-        title="GitHub"
-        subtitle="OAuth 接続・ops repository・Pull Request ポーリングの状態。webhook は使用しません。"
+        title="GitHub 連携"
+        subtitle="広告変更を承認フローに出すためのGitHub接続を確認します。"
       />
 
       <div className="page-body page-body--single">
         {banner}
 
         <Panel
-          title="OAuth Status"
-          subtitle="oauth_tokens テーブルから読み取った接続情報"
+          title="接続状態"
+          subtitle="GitHub と連携できているか"
           status={<StatusDot state={oauthState}>{oauthState}</StatusDot>}
         >
           {oauth.length === 0 ? (
@@ -105,7 +106,7 @@ export default async function GithubPage({
               description={oauthMessage}
               action={
                 <a className="btn btn--primary" href="/api/oauth/github/begin">
-                  Connect GitHub
+                  GitHub と接続
                 </a>
               }
             />
@@ -115,11 +116,11 @@ export default async function GithubPage({
               rowKey={(row) => `${row.provider}/${row.accountIdentifier}`}
               empty={null}
               columns={[
-                { header: "Provider", cell: (row) => row.provider },
-                { header: "Account", cell: (row) => row.accountIdentifier, className: "mono" },
-                { header: "Scopes", cell: (row) => row.scopes.join(", ") || "—", className: "mono" },
+                { header: "接続先", cell: (row) => row.provider },
+                { header: "アカウント", cell: (row) => row.accountIdentifier, className: "mono" },
+                { header: "許可された範囲", cell: (row) => row.scopes.join(", ") || "—", className: "mono" },
                 {
-                  header: "Connected",
+                  header: "接続日時",
                   cell: (row) => row.connectedAt.toISOString(),
                   className: "tabular mono",
                   headerClassName: "tabular",
@@ -130,38 +131,37 @@ export default async function GithubPage({
         </Panel>
 
         <Panel
-          title="Ops Repository"
-          subtitle="github_repos テーブル + ETag ポーリング状態"
+          title="変更管理リポジトリ"
+          subtitle="広告変更をレビューする場所"
           status={<StatusDot state={repoState}>{repoState}</StatusDot>}
         >
           {!repo ? (
             <EmptyState
-              title="ops リポジトリは未生成です。"
+              title="変更管理リポジトリは未生成です。"
               description={
                 oauth.length === 0
-                  ? "GitHub と接続後、AdDroid が ops repository を bootstrap します。"
-                  : "OAuth は接続済みです。下のボタンから ops repository を bootstrap してください (callback 実行時に自動 bootstrap が失敗した場合の再試行用)。"
+                  ? "GitHub と接続後、AdDroid が変更管理リポジトリを準備します。"
+                  : "GitHub は接続済みです。下のボタンから変更管理リポジトリを準備してください。"
               }
               action={oauth.length > 0 ? <BootstrapOpsRepoButton variant="primary" /> : null}
             />
           ) : (
             <KeyValueList
               items={[
-                { label: "Repo", value: `${repo.owner}/${repo.name}`, mono: true },
-                { label: "Default branch", value: repo.defaultBranch, mono: true },
+                { label: "リポジトリ", value: `${repo.owner}/${repo.name}`, mono: true },
+                { label: "既定ブランチ", value: repo.defaultBranch, mono: true },
                 {
-                  label: "Bootstrapped",
+                  label: "準備日時",
                   value: repo.bootstrappedAt ? repo.bootstrappedAt.toISOString() : "未実行",
                 },
                 {
-                  label: "Last poll",
+                  label: "前回確認",
                   value: repo.pollingState?.lastPolledAt
                     ? `${repo.pollingState.lastPolledAt.toISOString()} (HTTP ${repo.pollingState.lastStatusCode ?? "?"})`
                     : "未実行",
                 },
-                { label: "ETag", value: repo.pollingState?.etag ?? "—", mono: true },
                 {
-                  label: "Next poll",
+                  label: "次回確認",
                   value: repo.pollingState?.nextPollAt
                     ? repo.pollingState.nextPollAt.toISOString()
                     : "未スケジュール",
@@ -171,36 +171,35 @@ export default async function GithubPage({
           )}
         </Panel>
 
-        <Panel title="Pull Requests" subtitle={`github_pull_requests · ${prs.length} 件`}>
+        <Panel title="承認待ち・承認済みの変更" subtitle={`${prs.length} 件`}>
           <DataTable
             rows={prs}
             rowKey={(row) => row.id}
             empty={
               <EmptyState
                 title="追跡中の Pull Request はまだありません。"
-                description="AdDroid が ops repo に PR を作成すると、ここに表示されます。"
+                description="AdDroid がGitHubに承認待ちの変更を作成すると、ここに表示されます。"
               />
             }
             columns={[
               { header: "#", cell: (row) => `#${row.number}`, className: "tabular mono", headerClassName: "tabular" },
-              { header: "Title", cell: (row) => row.title },
+              { header: "内容", cell: (row) => row.title },
               {
-                header: "State",
+                header: "状態",
                 cell: (row) => (
                   <StatusBadge state={row.state === "merged" ? "ok" : row.state === "closed" ? "idle" : "info"}>
                     {row.state}
                   </StatusBadge>
                 ),
               },
-              { header: "Head SHA", cell: (row) => row.headSha.slice(0, 12), className: "mono" },
               {
-                header: "Merged",
+                header: "承認日時",
                 cell: (row) => (row.mergedAt ? row.mergedAt.toISOString() : "—"),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
               {
-                header: "Polled",
+                header: "確認日時",
                 cell: (row) => row.polledAt.toISOString(),
                 className: "tabular mono",
                 headerClassName: "tabular",
@@ -222,8 +221,8 @@ function renderBanner(
   if (oauth === "error") {
     return (
       <div className="banner" data-state="error">
-        <span className="banner__title">GitHub OAuth に失敗しました</span>
-        <span>{reason ?? "詳細不明のエラー。/setup の Doctor 結果を確認してください。"}</span>
+        <span className="banner__title">GitHub 接続に失敗しました</span>
+        <span>{reason ?? "詳細不明のエラー。接続と健康状態を確認してください。"}</span>
       </div>
     );
   }
@@ -231,8 +230,8 @@ function renderBanner(
     if (bootstrap === "ok") {
       return (
         <div className="banner" data-state="ok">
-          <span className="banner__title">GitHub に接続し、ops repository を bootstrap しました。</span>
-          <span>github_repos と Workspace.opsRepoId にメタデータを保存し、audit_logs に記録しました。</span>
+          <span className="banner__title">GitHub に接続し、変更管理リポジトリを準備しました。</span>
+          <span>今後の広告変更は承認待ちとして作成できます。</span>
         </div>
       );
     }
@@ -240,14 +239,14 @@ function renderBanner(
       return (
         <div className="banner" data-state="info">
           <span className="banner__title">GitHub に接続しました。</span>
-          <span>ops repository は既に Workspace に紐付いていたため、bootstrap はスキップされました。</span>
+          <span>変更管理リポジトリは既に準備済みです。</span>
         </div>
       );
     }
     if (bootstrap === "error") {
       return (
         <div className="banner" data-state="warn">
-          <span className="banner__title">OAuth は接続できましたが ops repository の bootstrap に失敗しました。</span>
+          <span className="banner__title">GitHub は接続できましたが、変更管理リポジトリの準備に失敗しました。</span>
           <span>{reason ?? "下のパネルから手動で再試行してください。"}</span>
         </div>
       );

@@ -67,7 +67,7 @@ export function AddAccountForm() {
         className="btn"
         aria-haspopup="dialog"
       >
-        + Add account
+        + 広告アカウントを追加
       </button>
     );
   }
@@ -89,7 +89,7 @@ export function AddAccountForm() {
     >
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
         <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>
-          key (例: <code className="inline-code">brand-a</code>)
+          管理用の短い名前 (例: <code className="inline-code">brand-a</code>)
         </label>
         <input
           required
@@ -102,7 +102,7 @@ export function AddAccountForm() {
         />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>displayName</label>
+        <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>画面に表示する名前</label>
         <input
           required
           value={state.displayName}
@@ -113,7 +113,7 @@ export function AddAccountForm() {
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
         <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>
-          metaAccountId (省略可、形式: <code className="inline-code">act_1234567890</code>)
+          Meta の広告アカウントID (省略可、形式: <code className="inline-code">act_1234567890</code>)
         </label>
         <input
           value={state.metaAccountId}

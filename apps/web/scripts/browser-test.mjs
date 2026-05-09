@@ -15,11 +15,11 @@
 //        - /approvals に永続化済の pending PR が表示されること。
 //        - /approvals/[prNumber] が PR body と変更ファイル/diff プレビューを
 //          実状態から描画すること (regression fix finding #2)。
-//        - /approvals/[prNumber] の "PR をマージする (Web UI)" ボタンが
+//        - /approvals/[prNumber] の "承認して反映待ちにする" ボタンが
 //          ConfirmDialog (caution) を開き、確定時に /api/approvals/.../merge を
 //          呼び、結果 (この test fixture では workspace に紐付かないため 4xx)
 //          を Toast で表示すること (regression fix finding #3)。
-//        - /cron 行内の ON/OFF・cron 編集・今すぐ実行 が、ConfirmDialog →
+//        - /cron 行内の ON/OFF・時間編集・今すぐ実行 が、ConfirmDialog →
 //          API → Toast 完結まで実ブラウザ操作で動くこと (regression fix
 //          finding #3)。
 //
@@ -86,20 +86,21 @@ const FIXTURE_REPO_NAME = "addroid-browser-fixture";
 // SideNav が描画する全リンク先。これらは layout 経由で全ページに含まれる
 // はずなので、欠けていれば「nav が壊れている」と判定する。
 // 並びは apps/web/components/SideNav.tsx の `groups` と同じグループ順
-// (Overview / Meta Ads / AI Workflows / GitOps / Maintenance) に揃える。
+// (全体 / 広告運用 / 改善 / 確認と自動化 / 設定) に揃える。
 const REQUIRED_NAV_HREFS = [
   "/",
   "/accounts",
+  "/reports/daily",
+  "/budget",
   "/plans",
   "/campaigns",
   "/improvements",
   "/creatives",
-  "/github",
   "/approvals",
   "/cron",
   "/cron/runs",
   "/cron/audit",
-  "/logs",
+  "/github",
   "/setup",
 ];
 
@@ -107,102 +108,95 @@ const REQUIRED_NAV_HREFS = [
 // SSR で出力される PageHeader タイトルや panel タイトルなど、機械的に検証可能な
 // 文字列だけを使う。
 // 各ページに含まれているはずの文字列。HTML エンティティ化されないように
-// "&" のような文字を含む文字列は避ける ("Config & Environment" は HTML 上は
-// "Config &amp; Environment" になるため、リテラル一致しない)。
+// "&" のような文字を含む文字列は避ける。
 const SCENARIOS = [
   {
     id: "dashboard-status",
     url: "/",
-    expectContains: ["Dashboard", "Database", "Worker", "Approvals", "Daily Report"],
+    expectContains: ["ホーム", "保存先", "自動実行", "承認待ち", "日次レポート"],
   },
   {
     id: "accounts-meta-oauth",
     url: "/accounts",
-    expectContains: ["Meta Accounts", "Meta Connection", "Registered Ad Accounts"],
+    expectContains: ["広告アカウント", "Meta 連携", "利用する広告アカウント"],
   },
   {
     id: "plans-adhoc-dry-run",
     url: "/plans",
-    // PageHeader title + 2 つの Panel title (Ad-hoc Dry-run / Plan History) は
+    // PageHeader title + 2 つの Panel title (今すぐチェック / チェック履歴) は
     // DB 接続状態に関わらず常に SSR される (Panel 内が EmptyState でも header は出る)。
-    expectContains: ["Plans", "Ad-hoc Dry-run", "Plan History"],
+    expectContains: ["入稿前チェック", "今すぐチェック", "チェック履歴"],
   },
   {
     id: "campaigns-apply-activate",
     url: "/campaigns",
-    // "Apply と Activate の境界" Panel は条件分岐の外で常に描画される。
-    // "Recent Apply Jobs" Panel も同様 (中身が EmptyState でも header は出る)。
-    expectContains: ["Campaigns", "Apply と Activate の境界", "Recent Apply Jobs"],
+    // 安全ルール Panel は条件分岐の外で常に描画される。
+    // "最近の反映処理" Panel も同様 (中身が EmptyState でも header は出る)。
+    expectContains: ["配信中の広告", "反映と有効化の安全ルール", "最近の反映処理"],
   },
   {
     id: "improvements-workflow",
     url: "/improvements",
-    // PageHeader title + Schedule Panel (常時描画) + 承認境界 note (常時描画)。
-    expectContains: ["Improvements", "Schedule", "承認境界"],
+    // PageHeader title + 自動実行 Panel (常時描画) + 安全ルール note (常時描画)。
+    expectContains: ["改善提案", "自動実行の状態", "安全ルール"],
   },
   {
     id: "creatives-library",
     url: "/creatives",
-    // PageHeader title (生成クリエイティブ) + Creatives Panel header。
+    // PageHeader title (生成クリエイティブ) + クリエイティブ一覧 Panel header。
     // どちらも DB / 画像 Provider の状態に関わらず常に SSR される。
-    expectContains: ["生成クリエイティブ", "Creatives"],
+    expectContains: ["生成クリエイティブ", "クリエイティブ一覧"],
   },
   {
     id: "github-pr-tracking",
     url: "/github",
-    expectContains: ["GitHub", "OAuth"],
+    expectContains: ["GitHub 連携", "接続状態", "変更管理リポジトリ"],
   },
   {
     id: "approvals-list",
     url: "/approvals",
-    // PR が無くても empty state ("マージ待ちの PR はありません。") が出るので、
-    // これと Web UI merge 経路の説明 ("Web UI") の両方を確認する。
-    expectContains: ["Approvals", "マージ待ち", "Web UI"],
+    // PR が無くても empty state ("マージ待ちの PR はありません。") が出る。
+    expectContains: ["承認待ち", "マージ待ち", "最近承認した変更"],
   },
   {
     id: "cron-schedules",
-    // SSR 上で行内コントロール (ON/OFF・cron 編集・今すぐ実行) が描画されることを
+    // SSR 上で行内コントロール (ON/OFF・時間編集・今すぐ実行) が描画されることを
     // 確認する。preset は無条件で 5 件以上 mount されるはずなので、ボタンラベルが
     // 1 つでも見えなければ controls が壊れている。
     url: "/cron",
     expectContains: [
-      "Schedules",
-      "github_poll",
+      "自動実行",
+      "承認済み変更の確認",
       "今すぐ実行",
-      "cron 編集",
+      "時間を編集",
     ],
   },
   {
     id: "cron-runs",
     url: "/cron/runs",
-    expectContains: ["Runs"],
+    expectContains: ["実行履歴", "自動実行の履歴"],
   },
   {
     id: "cron-audit",
     url: "/cron/audit",
-    expectContains: ["Audit"],
-  },
-  {
-    id: "operational-logs-rate-limit",
-    url: "/logs",
-    expectContains: ["Operational Logs", "Rate limit", "Concurrency", "Backoff policy"],
+    expectContains: ["操作履歴", "操作イベント"],
   },
   {
     id: "reports-daily-kpi",
     url: "/reports/daily",
     expectContains: [
-      "Daily Reports",
-      "daily_report",
-      "performance_snapshots",
+      "日次レポート",
+      "最新レポート",
+      "保存された成果データ",
     ],
   },
   {
     id: "setup-docs-security-slack",
     url: "/setup",
     expectContains: [
-      "Setup",
-      "Security",
-      "outbound",
+      "接続と健康状態",
+      "安全設定",
+      "外部からの着信を使わない",
       "Slack 連携 (任意)",
       "AdDroid は Slack なしでも",
       "OPTIONAL",
@@ -253,7 +247,7 @@ const INTERACTIONS = [
     body: { cron: "0 0 * * *" },
     expectStatus: 400,
     expectJsonOkFalse: true,
-    note: "Cron schedule API は未知の preset を 400 で拒否 (CronControls の cron 編集)",
+    note: "Cron schedule API は未知の preset を 400 で拒否 (CronControls の時間編集)",
   },
   {
     id: "cron-run-unknown-preset",
@@ -910,7 +904,7 @@ async function browserFlowApprovals(page, recordResult) {
       hasFilesPanel: text.includes("変更ファイル一覧"),
       hasFixturePathA: text.includes("config/fixture-target.yaml"),
       hasFixturePathB: text.includes("config/fixture-new.yaml"),
-      hasMergeButton: !!findButtonByText("PR をマージする (Web UI)"),
+      hasMergeButton: !!findButtonByText("承認して反映待ちにする"),
     };
   `);
   recordResult("browser-approvals-detail-renders-title", detailRender.hasTitle, "PR title が描画されていません");
@@ -925,7 +919,7 @@ async function browserFlowApprovals(page, recordResult) {
   if (detailRender.hasMergeButton) {
     await page.eval(`
       ${HELPER_FNS}
-      const btn = findButtonByText("PR をマージする (Web UI)");
+      const btn = findButtonByText("承認して反映待ちにする");
       btn.click();
     `);
     const dialogOpened = await page
@@ -939,7 +933,7 @@ async function browserFlowApprovals(page, recordResult) {
       await page.eval(`
         ${HELPER_FNS}
         const dialog = getOpenDialog();
-        const confirm = findButtonByText("PR をマージする (Web UI)", dialog);
+        const confirm = findButtonByText("承認して反映待ちにする", dialog);
         confirm.click();
       `);
       // 4xx error Toast を期待 (workspace 紐付けがないため /api/.../merge は 409)。
@@ -989,38 +983,38 @@ async function browserFlowCron(page, recordResult) {
   // ===== row 描画と SSR ボタン群の確認 =====
   await page.navigate(`${page.baseUrl}/cron`);
   const rowReady = await page
-    .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 })
+    .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 })
     .then(() => true)
     .catch(() => false);
-  recordResult("browser-cron-row-ready", rowReady, "/cron 行 (github_poll) が SSR されていません");
+  recordResult("browser-cron-row-ready", rowReady, "/cron 行 (承認済み変更の確認) が SSR されていません");
   if (!rowReady) return;
 
   const ssrButtons = await page.eval(`
     ${HELPER_FNS}
-    const row = findRowByCellText("github_poll");
+    const row = findRowByCellText("承認済み変更の確認");
     return {
       hasToggle: !!findButtonByText("OFF にする", row) || !!findButtonByText("ON にする", row),
-      hasEdit: !!findButtonByText("cron 編集", row),
+      hasEdit: !!findButtonByText("時間を編集", row),
       hasRun: !!findButtonByText("今すぐ実行", row),
     };
   `);
-  recordResult("browser-cron-ssr-toggle-button", ssrButtons.hasToggle, "github_poll 行に ON/OFF ボタンが SSR されていません");
-  recordResult("browser-cron-ssr-edit-button", ssrButtons.hasEdit, "github_poll 行に cron 編集 ボタンが SSR されていません");
-  recordResult("browser-cron-ssr-run-button", ssrButtons.hasRun, "github_poll 行に 今すぐ実行 ボタンが SSR されていません");
+  recordResult("browser-cron-ssr-toggle-button", ssrButtons.hasToggle, "承認済み変更の確認 行に ON/OFF ボタンが SSR されていません");
+  recordResult("browser-cron-ssr-edit-button", ssrButtons.hasEdit, "承認済み変更の確認 行に時間編集ボタンが SSR されていません");
+  recordResult("browser-cron-ssr-run-button", ssrButtons.hasRun, "承認済み変更の確認 行に 今すぐ実行 ボタンが SSR されていません");
 
   // ===== schedule 編集の完結フロー =====
   await page.navigate(`${page.baseUrl}/cron`);
-  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
+  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
   await page.eval(`
     ${HELPER_FNS}
-    const row = findRowByCellText("github_poll");
-    findButtonByText("cron 編集", row)?.click();
+    const row = findRowByCellText("承認済み変更の確認");
+    findButtonByText("時間を編集", row)?.click();
   `);
   const inputAppeared = await page
-    .waitFor(`(function(){ ${HELPER_FNS}; const row = findRowByCellText("github_poll"); return !!row?.querySelector("input"); })()`, { timeoutMs: 4_000 })
+    .waitFor(`(function(){ ${HELPER_FNS}; const row = findRowByCellText("承認済み変更の確認"); return !!row?.querySelector("input"); })()`, { timeoutMs: 4_000 })
     .then(() => true)
     .catch(() => false);
-  recordResult("browser-cron-edit-shows-input", inputAppeared, "cron 編集モードで input が現れません");
+  recordResult("browser-cron-edit-shows-input", inputAppeared, "時間編集モードで input が現れません");
   if (inputAppeared) {
     // 元の cron と異なる値に書き換えて dirty にする (保存ボタンが有効になる)。
     // enabled=true 環境では pg-boss schedule まで成功する必要がある。
@@ -1028,7 +1022,7 @@ async function browserFlowCron(page, recordResult) {
     const TEST_CRON = "*/9 * * * *";
     await page.eval(`
       ${HELPER_FNS}
-      const row = findRowByCellText("github_poll");
+      const row = findRowByCellText("承認済み変更の確認");
       const input = row.querySelector("input");
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
       setter.call(input, ${JSON.stringify(TEST_CRON)});
@@ -1038,26 +1032,26 @@ async function browserFlowCron(page, recordResult) {
     const editToast = await waitForAnyToast(page, 15_000);
     recordResult(
       "browser-cron-schedule-edit-succeeds",
-      Boolean(editToast && editToast.variant === "success" && /github_poll|schedule|cron/i.test(editToast.text || "")),
-      `cron 編集 → 保存後に success Toast が出ません (got: ${JSON.stringify(editToast)})`
+      Boolean(editToast && editToast.variant === "success" && /github_poll|実行タイミング|更新しました/i.test(editToast.text || "")),
+      `時間編集 → 保存後に success Toast が出ません (got: ${JSON.stringify(editToast)})`
     );
     // 副作用復旧: schedule 変更が成功したら元の cron に戻す。
     if (editToast && editToast.variant === "success") {
       await page.navigate(`${page.baseUrl}/cron`);
       await page
-        .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 })
+        .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 })
         .catch(() => undefined);
       await page.eval(`
         ${HELPER_FNS}
-        const row = findRowByCellText("github_poll");
-        findButtonByText("cron 編集", row)?.click();
+        const row = findRowByCellText("承認済み変更の確認");
+        findButtonByText("時間を編集", row)?.click();
       `).catch(() => undefined);
       await page
-        .waitFor(`(function(){ ${HELPER_FNS}; const row = findRowByCellText("github_poll"); return !!row?.querySelector("input"); })()`, { timeoutMs: 4_000 })
+        .waitFor(`(function(){ ${HELPER_FNS}; const row = findRowByCellText("承認済み変更の確認"); return !!row?.querySelector("input"); })()`, { timeoutMs: 4_000 })
         .catch(() => undefined);
       await page.eval(`
         ${HELPER_FNS}
-        const row = findRowByCellText("github_poll");
+        const row = findRowByCellText("承認済み変更の確認");
         const input = row?.querySelector("input");
         if (input) {
           const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -1074,10 +1068,10 @@ async function browserFlowCron(page, recordResult) {
   // 各 sub-flow は /cron に navigate して fresh mount から開始する (前のテストの
   // editing state や busy state を持ち越さない)。
   await page.navigate(`${page.baseUrl}/cron`);
-  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
+  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
   const toggleInfo = await page.eval(`
     ${HELPER_FNS}
-    const row = findRowByCellText("github_poll");
+    const row = findRowByCellText("承認済み変更の確認");
     const off = findButtonByText("OFF にする", row);
     const on = findButtonByText("ON にする", row);
     return {
@@ -1087,7 +1081,7 @@ async function browserFlowCron(page, recordResult) {
   if (toggleInfo.buttonLabel) {
     await page.eval(`
       ${HELPER_FNS}
-      const row = findRowByCellText("github_poll");
+      const row = findRowByCellText("承認済み変更の確認");
       findButtonByText(${JSON.stringify(toggleInfo.buttonLabel)}, row).click();
     `);
     const dlgOpen = await page
@@ -1112,18 +1106,18 @@ async function browserFlowCron(page, recordResult) {
       const toggleToast = await waitForAnyToast(page, 15_000);
       recordResult(
         "browser-cron-toggle-toast-appears",
-        Boolean(toggleToast && /github_poll/.test(toggleToast.text || "")),
+        Boolean(toggleToast && /github_poll|有効化|無効化/.test(toggleToast.text || "")),
         `cron toggle confirm 後に Toast が出ません (got: ${JSON.stringify(toggleToast)})`
       );
       // 副作用復旧: toggle が success だった場合は元の状態へ戻す (best-effort)。
       if (toggleToast && toggleToast.variant === "success") {
         await page.navigate(`${page.baseUrl}/cron`);
         await page
-          .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 })
+          .waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 })
           .catch(() => undefined);
         const revert = await page.eval(`
           ${HELPER_FNS}
-          const row = findRowByCellText("github_poll");
+          const row = findRowByCellText("承認済み変更の確認");
           const off = findButtonByText("OFF にする", row);
           const on = findButtonByText("ON にする", row);
           // 直前と逆向きに戻す。
@@ -1150,21 +1144,21 @@ async function browserFlowCron(page, recordResult) {
       }
     }
   } else {
-    recordResult("browser-cron-toggle-button-found", false, "github_poll 行に ON/OFF ボタンがありません");
+    recordResult("browser-cron-toggle-button-found", false, "承認済み変更の確認 行に ON/OFF ボタンがありません");
   }
 
   // ===== run-now の完結フロー =====
   await page.navigate(`${page.baseUrl}/cron`);
-  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("github_poll"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
+  await page.waitFor(`(function(){ ${HELPER_FNS}; return !!findRowByCellText("承認済み変更の確認"); })()`, { timeoutMs: 8_000 }).catch(() => undefined);
   const runBtnExists = await page.eval(`
     ${HELPER_FNS}
-    const row = findRowByCellText("github_poll");
+    const row = findRowByCellText("承認済み変更の確認");
     return !!findButtonByText("今すぐ実行", row);
   `);
   if (runBtnExists) {
     await page.eval(`
       ${HELPER_FNS}
-      const row = findRowByCellText("github_poll");
+      const row = findRowByCellText("承認済み変更の確認");
       findButtonByText("今すぐ実行", row).click();
     `);
     const runDialogOpen = await page
@@ -1187,12 +1181,12 @@ async function browserFlowCron(page, recordResult) {
       const runToast = await waitForAnyToast(page, 15_000);
       recordResult(
         "browser-cron-run-now-toast-appears",
-        Boolean(runToast && /github_poll/.test(runToast.text || "")),
+        Boolean(runToast && /github_poll|今すぐ実行/.test(runToast.text || "")),
         `今すぐ実行 confirm 後に Toast が出ません (got: ${JSON.stringify(runToast)})`
       );
     }
   } else {
-    recordResult("browser-cron-run-button-found", false, "github_poll 行に 今すぐ実行 ボタンがありません");
+    recordResult("browser-cron-run-button-found", false, "承認済み変更の確認 行に 今すぐ実行 ボタンがありません");
   }
 }
 

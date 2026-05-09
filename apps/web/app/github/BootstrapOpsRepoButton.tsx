@@ -11,7 +11,7 @@ interface Props {
   variant?: "primary" | "default";
 }
 
-export function BootstrapOpsRepoButton({ label = "Bootstrap ops repository", variant = "default" }: Props) {
+export function BootstrapOpsRepoButton({ label = "変更管理リポジトリを準備", variant = "default" }: Props) {
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
 
@@ -34,18 +34,18 @@ export function BootstrapOpsRepoButton({ label = "Bootstrap ops repository", var
         if (body.already && body.owner && body.name) {
           setFeedback({
             kind: "ok",
-            message: `${body.owner}/${body.name} は既に bootstrap 済みです。`,
+            message: `${body.owner}/${body.name} は既に準備済みです。`,
           });
         } else {
           setFeedback({
             kind: "error",
-            message: body.error ?? `bootstrap に失敗しました (HTTP ${res.status})。`,
+            message: body.error ?? `準備に失敗しました (HTTP ${res.status})。`,
           });
         }
       } else {
         setFeedback({
           kind: "ok",
-          message: `${body.owner}/${body.name} を bootstrap しました。ページを更新します…`,
+          message: `${body.owner}/${body.name} を準備しました。ページを更新します…`,
         });
         setTimeout(() => window.location.reload(), 600);
       }
@@ -67,7 +67,7 @@ export function BootstrapOpsRepoButton({ label = "Bootstrap ops repository", var
         disabled={busy}
         className={variant === "primary" ? "btn btn--primary" : "btn"}
       >
-        {busy ? "Bootstrapping…" : label}
+        {busy ? "準備中…" : label}
       </button>
       {feedback ? (
         <div className="banner" data-state={feedback.kind === "ok" ? "ok" : "error"}>

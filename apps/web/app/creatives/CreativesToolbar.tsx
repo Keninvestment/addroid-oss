@@ -114,7 +114,7 @@ export function CreativesToolbar({
 
       <div className="toolbar__field">
         <label className="toolbar__label" htmlFor="creatives-provider">
-          Provider
+          画像生成
         </label>
         <select
           id="creatives-provider"
@@ -125,7 +125,7 @@ export function CreativesToolbar({
           }
         >
           <option value="all">すべて</option>
-          <option value="__none__">未設定 (fallback)</option>
+          <option value="__none__">未設定</option>
           {providers.map((p) => (
             <option key={p.value} value={p.value}>
               {p.label}

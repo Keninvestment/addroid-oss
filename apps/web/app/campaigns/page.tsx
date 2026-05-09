@@ -73,12 +73,13 @@ type ApplyJobRow = {
 export default async function CampaignsPage({
   searchParams,
 }: {
-  searchParams?: SearchParamsInput;
+  searchParams?: Promise<SearchParamsInput>;
 }) {
-  const accountIdParam = single(searchParams?.accountId);
-  const statusParam = (single(searchParams?.status) ?? "all").toUpperCase();
-  const queryParam = (single(searchParams?.q) ?? "").trim();
-  const fromApply = single(searchParams?.fromApply);
+  const resolvedSearchParams = await searchParams;
+  const accountIdParam = single(resolvedSearchParams?.accountId);
+  const statusParam = (single(resolvedSearchParams?.status) ?? "all").toUpperCase();
+  const queryParam = (single(resolvedSearchParams?.q) ?? "").trim();
+  const fromApply = single(resolvedSearchParams?.fromApply);
 
   let dbReady = true;
   let accounts: AccountRow[] = [];
@@ -165,47 +166,42 @@ export default async function CampaignsPage({
   return (
     <>
       <PageHeader
-        title="Campaigns"
-        subtitle="Meta 上の campaign / adset / ad の現在状態。Activate は per-row + 確認ダイアログでのみ実行できます。"
+        title="配信中の広告"
+        subtitle="Meta 上のキャンペーン、広告セット、広告の状態を確認します。停止中のものを有効化する時は確認ダイアログを必ず通します。"
       />
 
       <div className="page-body page-body--single">
         {fromApplyBanner}
 
         <Panel
-          title="Apply と Activate の境界"
-          subtitle="PR-derived Apply は PAUSED で作成・更新し、Activate は別操作・別 audit"
+          title="反映と有効化の安全ルール"
+          subtitle="変更はまず停止状態で反映され、配信開始は別操作で確認します"
         >
           <KeyValueList
             items={[
               {
-                label: "Apply",
+                label: "反映",
                 value: (
                   <>
-                    merged GitHub PR から enqueue される PR-derived apply jobs。
-                    Meta resources はすべて <StatusBadge state="idle">PAUSED</StatusBadge>{" "}
-                    で create / update されます (PAUSED creation/update is the default)。
+                    承認済みの変更は、まず <StatusBadge state="idle">停止中</StatusBadge>{" "}
+                    として Meta に作成・更新されます。
                   </>
                 ),
               },
               {
-                label: "Activate",
+                label: "有効化",
                 value: (
                   <>
-                    Apply とは separate な explicit operation。
-                    PAUSED → ACTIVE への遷移は per-row の確認ダイアログ経由でのみ実行され、
-                    actor / source (cli | web_ui) を audit_logs に記録します
-                    (audited Activate operation)。
+                    停止中から配信中へ切り替える時は、行ごとの確認ダイアログで実行します。
+                    操作履歴にも記録されます。
                   </>
                 ),
               },
               {
-                label: "Source",
+                label: "確認",
                 value: (
                   <>
-                    Apply は <InlineCode>apply_jobs</InlineCode> + 直近 merged{" "}
-                    <InlineCode>github_pull_requests</InlineCode> から、Activate は{" "}
-                    <InlineCode>POST /api/campaigns/[id]/activate</InlineCode> から。
+                    予期しない配信開始を避けるため、反映と有効化は分けて扱います。
                   </>
                 ),
               },
@@ -214,13 +210,13 @@ export default async function CampaignsPage({
         </Panel>
 
         <Panel
-          title="Recent Apply Jobs"
-          subtitle="apply_jobs · merged PR から enqueue された PR-derived jobs (直近 5 件)"
+          title="最近の反映処理"
+          subtitle="承認済み変更から作成された直近 5 件"
         >
           {!dbReady ? (
             <EmptyState
-              title="DB に接続できないため Apply jobs を読み込めません。"
-              description="npm run db:push を実行し、prisma スキーマを反映してください。Apply jobs は merged GitHub PR から enqueue される PR-derived ジョブで、成功時に Meta resources を PAUSED で作成・更新します。"
+              title="反映処理を読み込めません。"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -228,8 +224,8 @@ export default async function CampaignsPage({
               rowKey={(row) => row.id}
               empty={
                 <EmptyState
-                  title="PR-derived apply jobs はまだありません。"
-                  description="ops repository で承認された YAML 変更が main に merged されると、execute_apply ジョブが enqueue され Meta resources を PAUSED で create/update します。Activate は別操作として下の Hierarchy 表から実行してください。"
+                  title="反映処理はまだありません。"
+                  description="承認された変更があると、停止状態でMetaへ反映されます。有効化は下の一覧から別途実行します。"
                 />
               }
               columns={[
@@ -241,11 +237,11 @@ export default async function CampaignsPage({
                   headerClassName: "tabular",
                 },
                 {
-                  header: "Title",
+                  header: "内容",
                   cell: (row) => row.pullRequest?.title ?? "—",
                 },
                 {
-                  header: "State",
+                  header: "状態",
                   cell: (row) => (
                     <StatusBadge state={applyStateToBadge(row.state)}>
                       {row.state}
@@ -253,13 +249,13 @@ export default async function CampaignsPage({
                   ),
                 },
                 {
-                  header: "Enqueued",
+                  header: "受付日時",
                   cell: (row) => row.enqueuedAt.toISOString(),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
                 {
-                  header: "Finished",
+                  header: "完了日時",
                   cell: (row) =>
                     row.finishedAt ? row.finishedAt.toISOString() : "—",
                   className: "tabular mono",
@@ -271,30 +267,30 @@ export default async function CampaignsPage({
         </Panel>
 
         {!dbReady ? (
-          <Panel title="Database">
+          <Panel title="保存先">
             <EmptyState
               title="DB に接続できません。"
-              description="npm run db:push を実行し、prisma スキーマを反映してください。"
+              description="接続と健康状態を確認してください。"
             />
           </Panel>
         ) : accounts.length === 0 ? (
-          <Panel title="Ad Accounts">
+          <Panel title="広告アカウント">
             <EmptyState
-              title="登録済みの Ad Account がありません。"
-              description="/accounts から Meta と接続するか、Ad Account を手動で追加してください。"
+              title="登録済みの広告アカウントがありません。"
+              description="広告アカウント画面からMetaと接続するか、手動で追加してください。"
             />
           </Panel>
         ) : (
           <Panel
-            title="Hierarchy"
+            title="広告一覧"
             subtitle={
               <>
-                ads_hierarchy · {totalCount} ノード /{" "}
+                {totalCount} 件 /{" "}
                 <span data-state="idle" className="status-badge inline-status">
-                  PAUSED {pausedCount}
+                  停止中 {pausedCount}
                 </span>{" "}
                 <span data-state="ok" className="status-badge inline-status">
-                  ACTIVE {activeCount}
+                  配信中 {activeCount}
                 </span>
               </>
             }
@@ -317,12 +313,12 @@ export default async function CampaignsPage({
                     title={
                       queryParam || statusFilter
                         ? "条件に合うノードはありません。"
-                        : "表示できるキャンペーンはありません。"
+                        : "表示できる広告はありません。"
                     }
                     description={
                       queryParam || statusFilter
                         ? "フィルタを変更するか、検索条件をリセットしてください。"
-                        : "Apply が成功すると PAUSED で作成されたものが表示されます。"
+                        : "承認済み変更が反映されると、停止中として作成されたものが表示されます。"
                     }
                   />
                 }
@@ -407,11 +403,11 @@ export default async function CampaignsPage({
 function renderFromApplyBanner(applyId: string) {
   return (
     <div className="banner" data-state="info">
-      <span className="banner__title">Apply ジョブ由来のキャンペーンを表示中</span>
+      <span className="banner__title">反映処理で更新された広告を表示中</span>
       <span>
-        Apply <InlineCode>{applyId}</InlineCode>{" "}
-        が作成・更新したノードはこのリストに表示されます (PAUSED で作成されています)。Activate
-        は行ごとに「ACTIVE にする」ボタンから個別に実行してください。
+        反映処理 <InlineCode>{applyId}</InlineCode>{" "}
+        が作成・更新した広告はこのリストに表示されます。停止中で作成されているため、
+        配信開始は行ごとに「配信開始」ボタンから実行してください。
       </span>
     </div>
   );

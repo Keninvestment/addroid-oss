@@ -22,8 +22,9 @@ function single(v: string | string[] | undefined): string | undefined {
 export default async function SelectAccountPage({
   searchParams,
 }: {
-  searchParams?: SearchParamsInput;
+  searchParams?: Promise<SearchParamsInput>;
 }) {
+  const resolvedSearchParams = await searchParams;
   const ws = await prisma.workspace.findFirst({
     orderBy: { createdAt: "asc" },
     select: { id: true, defaultAdAccountId: true },
@@ -44,8 +45,8 @@ export default async function SelectAccountPage({
       })
     : [];
 
-  const oauth = single(searchParams?.oauth);
-  const count = Number(single(searchParams?.accounts) ?? "0");
+  const oauth = single(resolvedSearchParams?.oauth);
+  const count = Number(single(resolvedSearchParams?.accounts) ?? "0");
 
   return (
     <>
@@ -59,30 +60,30 @@ export default async function SelectAccountPage({
             <span className="banner__title">Meta と接続しました。</span>
             <span>
               {Number.isFinite(count) && count > 0
-                ? `${count} 件の Ad Account を新規登録しました。`
-                : "取得済みの Ad Account を同期しました。"}
+                ? `${count} 件の広告アカウントを新規登録しました。`
+                : "取得済みの広告アカウントを同期しました。"}
             </span>
           </div>
         ) : null}
 
         <Panel
-          title="Default Ad Account"
+          title="既定の広告アカウント"
           subtitle={`登録済み ${accounts.length} 件 / 現在の既定 = ${
             accounts.find((a) => a.id === ws?.defaultAdAccountId)?.metaAccountId ?? "未設定"
           }`}
           status={
             <Link className="btn btn--secondary" href="/accounts">
-              Accounts
+              広告アカウント
             </Link>
           }
         >
           {accounts.length === 0 ? (
             <EmptyState
-              title="選択できる Ad Account がありません。"
-              description="CLI で `addroid connect meta` を再実行するか、手動で Ad Account を追加してください。"
+              title="選択できる広告アカウントがありません。"
+              description="Meta と再接続するか、手動で広告アカウントを追加してください。"
               action={
                 <Link className="btn btn--primary" href="/accounts">
-                  Accounts
+                  広告アカウント
                 </Link>
               }
             />

@@ -43,7 +43,7 @@ export function RefreshBusinessesButton({ disabled }: Props) {
       }
       setFeedback({
         variant: "success",
-        message: `Businesses ${body.businesses ?? 0} 件 / Ad Accounts ${
+        message: `Business ${body.businesses ?? 0} 件 / 広告アカウント ${
           body.adAccounts ?? 0
         } 件を取得し、新規 ${body.registered ?? 0} 件を登録しました。`,
       });
@@ -63,7 +63,7 @@ export function RefreshBusinessesButton({ disabled }: Props) {
         disabled={busy || disabled}
         className="btn"
       >
-        {busy ? "取得中…" : "Refresh Businesses"}
+        {busy ? "取得中…" : "Business を更新"}
       </button>
       {feedback ? (
         <div

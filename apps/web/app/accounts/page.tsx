@@ -43,8 +43,9 @@ function single(v: string | string[] | undefined): string | undefined {
 export default async function AccountsPage({
   searchParams,
 }: {
-  searchParams?: SearchParamsInput;
+  searchParams?: Promise<SearchParamsInput>;
 }) {
+  const resolvedSearchParams = await searchParams;
   type OAuthRow = {
     accountIdentifier: string;
     scopes: string[];
@@ -167,24 +168,24 @@ export default async function AccountsPage({
 
   const defaultAccount = accounts.find((a) => a.id === defaultAdAccountId) ?? null;
 
-  const oauthQuery = single(searchParams?.oauth);
-  const reasonQuery = single(searchParams?.reason);
-  const accountsQuery = single(searchParams?.accounts);
+  const oauthQuery = single(resolvedSearchParams?.oauth);
+  const reasonQuery = single(resolvedSearchParams?.reason);
+  const accountsQuery = single(resolvedSearchParams?.accounts);
   const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery);
 
   return (
     <>
       <PageHeader
-        title="Meta Accounts"
-        subtitle="Meta Access Token 接続、Ad Account の登録、デフォルト切替、再認証。"
+        title="広告アカウント"
+        subtitle="Meta との接続、利用する広告アカウント、既定アカウントを確認します。"
       />
 
       <div className="page-body page-body--single">
         {banner}
 
         <Panel
-          title="Meta Connection"
-          subtitle="oauth_tokens テーブルから読み取った接続情報"
+          title="Meta 連携"
+          subtitle="広告データを読み取るための接続状態"
           status={<StatusDot state={oauthState}>{oauthState}</StatusDot>}
         >
           {!oauth ? (
@@ -192,13 +193,13 @@ export default async function AccountsPage({
               title="Meta と未連携です。"
               description={
                 adapterChoice === "stub"
-                  ? `Meta token support が未設定です: ${adapterReason}。addroid init で ENCRYPTION_KEY を設定してください。`
-                  : "CLI で `addroid connect meta` を実行し、Meta Access Token を暗号化保存してください。OAuth callback を使う場合のみ下のボタンを利用できます。"
+                  ? `Meta 連携の準備が未完了です: ${adapterReason}。接続と健康状態を確認してください。`
+                  : "Meta と接続してください。ブラウザ連携が使える場合は下のボタンから開始できます。"
               }
               action={
                 adapterChoice === "real" || adapterChoice === "mock" ? (
                   <a className="btn btn--primary" href="/api/oauth/meta/begin">
-                    Connect Meta
+                    Meta と接続
                   </a>
                 ) : null
               }
@@ -208,11 +209,11 @@ export default async function AccountsPage({
               <KeyValueList
                 items={[
                   {
-                    label: "Account",
+                    label: "接続先",
                     value: <InlineCode>{sanitizeForDisplay(oauth.accountIdentifier)}</InlineCode>,
                   },
                   {
-                    label: "Scopes",
+                    label: "許可された範囲",
                     value:
                       oauth.scopes.length === 0 ? (
                         "—"
@@ -221,19 +222,23 @@ export default async function AccountsPage({
                       ),
                   },
                   {
-                    label: "Adapter",
+                    label: "接続方式",
                     value: (
                       <StatusBadge state={adapterChoice === "real" || adapterChoice === "token" ? "ok" : adapterChoice === "mock" ? "info" : "warn"}>
-                        {adapterChoice}
+                        {adapterChoice === "real" || adapterChoice === "token"
+                          ? "本番"
+                          : adapterChoice === "mock"
+                            ? "テスト"
+                            : "未設定"}
                       </StatusBadge>
                     ),
                   },
                   {
-                    label: "Connected",
+                    label: "接続日時",
                     value: <span className="tabular mono">{oauth.connectedAt.toISOString()}</span>,
                   },
                   {
-                    label: "Expires",
+                    label: "期限",
                     value: expiry ? (
                       <span className="tabular mono">
                         {expiry.toISOString()}
@@ -245,12 +250,10 @@ export default async function AccountsPage({
                     ),
                   },
                   {
-                    label: "Token Injection",
+                    label: "安全性",
                     value: (
                       <>
-                        公式 Meta CLI 互換 ENV (<InlineCode>ACCESS_TOKEN</InlineCode> /{" "}
-                        <InlineCode>AD_ACCOUNT_ID</InlineCode>) のみ。
-                        コマンドライン引数・ログには出力しません。
+                        接続情報は画面やログに表示しません。
                       </>
                     ),
                   },
@@ -266,11 +269,11 @@ export default async function AccountsPage({
         </Panel>
 
         <Panel
-          title="Businesses"
+          title="Meta Business"
           subtitle={
             cache
-              ? `Meta Graph API から取得 · 最終取得 ${cache.fetchedAt.toISOString()}`
-              : "Meta Graph API の runtime cache (再起動後は再取得が必要)"
+              ? `最終取得 ${cache.fetchedAt.toISOString()}`
+              : "Meta と接続後に取得できます"
           }
           status={
             <RefreshBusinessesButton disabled={!oauth || adapterChoice === "stub"} />
@@ -282,7 +285,7 @@ export default async function AccountsPage({
               description={
                 !oauth
                   ? "Meta と接続すると自動で取得されます。"
-                  : "右上の「Refresh Businesses」を押すと /me/businesses と /me/adaccounts を再取得します。"
+                  : "右上の更新ボタンを押すと、最新の Business と広告アカウントを取得します。"
               }
             />
           ) : (
@@ -309,8 +312,8 @@ export default async function AccountsPage({
         </Panel>
 
         <Panel
-          title="Registered Ad Accounts"
-          subtitle={`ad_accounts テーブル · ${accounts.length} 件 / default = ${
+          title="利用する広告アカウント"
+          subtitle={`${accounts.length} 件登録済み / 既定 = ${
             defaultAccount?.metaAccountId ?? defaultAccount?.key ?? "未設定"
           }`}
           status={<AddAccountForm />}
@@ -318,7 +321,7 @@ export default async function AccountsPage({
           {accounts.length === 0 ? (
             <EmptyState
               title="登録済みの Ad Account はありません。"
-              description="Meta と連携すると、Meta Graph API から取得した Ad Account を自動で登録します。手動で追加するには右上の Add account を使用してください。"
+              description="Meta と連携すると、取得できた広告アカウントを自動で登録します。手動で追加するには右上の追加ボタンを使用してください。"
             />
           ) : (
             <SetDefaultAccountForm
@@ -334,8 +337,8 @@ export default async function AccountsPage({
         </Panel>
 
         <Panel
-          title="Reauth History"
-          subtitle="audit_logs テーブル · oauth.meta.* イベントの直近 10 件"
+          title="接続履歴"
+          subtitle="Meta への接続・更新の直近 10 件"
         >
           <DataTable
             rows={reauthEvents}
@@ -369,7 +372,7 @@ export default async function AccountsPage({
                   </StatusBadge>
                 ),
               },
-              { header: "Actor", cell: (row) => row.actor },
+              { header: "実行者", cell: (row) => row.actor.startsWith("user:") ? "ユーザー" : row.actor },
               {
                 header: "Ref",
                 cell: (row) => row.ref ?? "—",

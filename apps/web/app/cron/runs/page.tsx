@@ -4,6 +4,7 @@ import { DataTable } from "../../../components/ui/DataTable";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { PageHeader } from "../../../components/ui/PageHeader";
+import { KeyValueList } from "../../../components/ui/KeyValueList";
 import type { StatusState } from "../../../components/ui/StatusDot";
 
 export const dynamic = "force-dynamic";
@@ -55,7 +56,7 @@ export default async function CronRunsPage() {
       }),
     ]);
   } catch {
-    warning = "Prisma スキーマが未反映です。npm run db:push を実行してください。";
+    warning = "保存先を確認してください。";
   }
 
   const levelToState = (level: string): StatusState => {
@@ -65,40 +66,73 @@ export default async function CronRunsPage() {
     return "idle";
   };
 
+  const succeededRuns = cronRuns.filter((row) => row.state === "success").length;
+  const failedRuns = cronRuns.filter((row) => row.state === "failed").length;
+  const runningRuns = cronRuns.filter((row) => row.state === "running" || row.state === "queued").length;
+  const latestRun = cronRuns[0] ?? null;
+  const latestLog = executionLogs[0] ?? null;
+  const errorLogs = executionLogs.filter((row) => row.level === "error").length;
+  const warnLogs = executionLogs.filter((row) => row.level === "warn").length;
+
   return (
     <>
       <PageHeader
-        title="Cron Runs & Execution Log"
-        subtitle="cron_runs と execution_logs の直近 100 件。worker が起動すると逐次追記されます。"
+        title="実行履歴"
+        subtitle="レポート取得、入稿前チェック、自動実行の結果を確認します。"
       />
 
       <div className="page-body page-body--single">
-        <Panel title="Cron runs" subtitle={warning ?? `${cronRuns.length} 件 (cron_runs)`}>
+        <Panel title="実行サマリ" subtitle={warning ?? "直近100件の状況"}>
+          <KeyValueList
+            items={[
+              {
+                label: "最新の実行",
+                value: latestRun
+                  ? `${workflowLabel(latestRun.name)} / ${statusLabel(latestRun.state)} / ${formatTimestamp(latestRun.startedAt)}`
+                  : "まだありません",
+              },
+              {
+                label: "成功 / 失敗 / 実行中",
+                value: `${succeededRuns} / ${failedRuns} / ${runningRuns} 件`,
+              },
+              {
+                label: "注意が必要なログ",
+                value: `${errorLogs} 件のエラー / ${warnLogs} 件の警告`,
+              },
+              {
+                label: "最新メッセージ",
+                value: latestLog ? friendlyMessage(latestLog.message) : "まだありません",
+              },
+            ]}
+          />
+        </Panel>
+
+        <Panel title="自動実行の履歴" subtitle={warning ?? `${cronRuns.length} 件`}>
           <DataTable
             rows={cronRuns}
             rowKey={(row) => row.id}
             empty={
               <EmptyState
-                title="cron 実行履歴はまだありません。"
-                description="プリセットが起動すると記録されます。"
+                title="自動実行の履歴はまだありません。"
+                description="自動実行が動くと記録されます。"
               />
             }
             columns={[
               {
-                header: "Started",
-                cell: (row) => row.startedAt.toISOString(),
+                header: "開始日時",
+                cell: (row) => formatTimestamp(row.startedAt),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
-              { header: "Name", cell: (row) => row.name, className: "mono" },
+              { header: "内容", cell: (row) => workflowLabel(row.name) },
               {
-                header: "Duration",
+                header: "所要時間",
                 cell: (row) => (row.durationMs == null ? "—" : `${row.durationMs} ms`),
                 className: "tabular",
                 headerClassName: "tabular",
               },
               {
-                header: "State",
+                header: "状態",
                 cell: (row) => (
                   <StatusBadge
                     state={
@@ -111,45 +145,45 @@ export default async function CronRunsPage() {
                             : "idle"
                     }
                   >
-                    {row.state}
+                    {statusLabel(row.state)}
                   </StatusBadge>
                 ),
               },
-              { header: "Job ID", cell: (row) => row.jobId ?? "—", className: "mono" },
+              { header: "詳細", cell: (row) => row.jobId ? `受付ID ${shortId(row.jobId)}` : "—", className: "mono" },
             ]}
           />
         </Panel>
 
-        <Panel title="Execution log" subtitle={warning ?? `${executionLogs.length} 件 (execution_logs)`}>
+        <Panel title="処理ログ" subtitle={warning ?? `${executionLogs.length} 件`}>
           <DataTable
             rows={executionLogs}
             rowKey={(row) => row.id}
             empty={
               <EmptyState
                 title="実行ログはまだありません。"
-                description="cron / apply / ai_run / github_poll / doctor が動作すると execution_logs に追記されます。"
+                description="レポート取得、チェック、承認済み変更の確認などが動くと記録されます。"
               />
             }
             columns={[
               {
-                header: "Time",
-                cell: (row) => row.createdAt.toISOString(),
+                header: "日時",
+                cell: (row) => formatTimestamp(row.createdAt),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
-              { header: "Kind", cell: (row) => row.kind, className: "mono" },
+              { header: "種類", cell: (row) => workflowLabel(row.kind) },
               {
-                header: "Level",
+                header: "状態",
                 cell: (row) => (
-                  <StatusBadge state={levelToState(row.level)}>{row.level}</StatusBadge>
+                  <StatusBadge state={levelToState(row.level)}>{levelLabel(row.level)}</StatusBadge>
                 ),
               },
-              { header: "Message", cell: (row) => row.message },
+              { header: "メッセージ", cell: (row) => friendlyMessage(row.message) },
               {
-                header: "Ref",
+                header: "関連ID",
                 cell: (row) => {
-                  if (row.cronRunId) return `cron_run:${row.cronRunId}`;
-                  if (row.refType && row.refId) return `${row.refType}:${row.refId}`;
+                  if (row.cronRunId) return `実行 ${shortId(row.cronRunId)}`;
+                  if (row.refType && row.refId) return `${refTypeLabel(row.refType)} ${shortId(row.refId)}`;
                   return "—";
                 },
                 className: "mono",
@@ -160,4 +194,78 @@ export default async function CronRunsPage() {
       </div>
     </>
   );
+}
+
+function workflowLabel(name: string): string {
+  const labels: Record<string, string> = {
+    daily_report: "日次レポート",
+    budget_guard: "予算チェック",
+    improvement_pr: "改善提案",
+    github_poll: "承認済み変更の確認",
+    retention_cleanup: "古い履歴の整理",
+    plan: "入稿前チェック",
+  };
+  return labels[name] ?? name;
+}
+
+function statusLabel(state: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    failed: "失敗",
+    running: "実行中",
+    queued: "待機中",
+    skipped: "スキップ",
+    ok: "成功",
+    warn: "警告",
+    error: "失敗",
+    info: "情報",
+  };
+  return labels[state] ?? state;
+}
+
+function levelLabel(level: string): string {
+  const labels: Record<string, string> = {
+    info: "情報",
+    warn: "警告",
+    error: "エラー",
+    debug: "詳細",
+  };
+  return labels[level] ?? level;
+}
+
+function refTypeLabel(refType: string): string {
+  const labels: Record<string, string> = {
+    cron_run: "実行",
+    pr: "承認待ち",
+    pull_request: "承認待ち",
+    account: "広告アカウント",
+    ad_account: "広告アカウント",
+    ai_run: "AI実行",
+  };
+  return labels[refType] ?? refType;
+}
+
+function shortId(id: string): string {
+  return id.length > 12 ? id.slice(0, 12) : id;
+}
+
+function formatTimestamp(date: Date): string {
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function friendlyMessage(message: string): string {
+  return message
+    .replaceAll("daily_report", "日次レポート")
+    .replaceAll("budget_guard", "予算チェック")
+    .replaceAll("improvement_pr", "改善提案")
+    .replaceAll("github_poll", "承認済み変更の確認")
+    .replaceAll("retention_cleanup", "古い履歴の整理")
+    .replaceAll("cron", "自動実行")
+    .replaceAll("ai_run", "AI実行")
+    .replaceAll("execution_logs", "処理ログ");
 }

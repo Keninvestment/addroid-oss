@@ -44,6 +44,19 @@ test("selectGithubAdapter chooses the Octokit adapter when oauthClient + crypto 
   assert.ok(sel.adapter instanceof OctokitGithubAdapter);
 });
 
+test("selectGithubAdapter chooses the Octokit adapter for a stored token without OAuth client", async () => {
+  const sel = selectGithubAdapter({
+    env: {},
+    tokenStore: new InMemoryOAuthTokenStore(),
+    storedTokenAvailable: true,
+    crypto: CRYPTO,
+  });
+  assert.equal(sel.choice, "octokit");
+  assert.equal(sel.reason, "stored GitHub OAuth token + crypto boundary configured");
+  assert.ok(sel.adapter instanceof OctokitGithubAdapter);
+  await assert.rejects(() => sel.adapter.beginOAuth(), GithubAdapterNotImplementedError);
+});
+
 test("selectGithubAdapter falls back to the stub when OAuth is not configured", async () => {
   const sel = selectGithubAdapter({
     env: {},

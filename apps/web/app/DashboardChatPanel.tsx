@@ -3,14 +3,11 @@
 import { useMemo, useState } from "react";
 import { useToast } from "../components/ui/Toast";
 
-const SLASH_COMMANDS = [
-  { command: "/status", text: "接続・起動状態を確認" },
-  { command: "/report", text: "日次レポートを取得" },
-  { command: "/submit", text: "入稿前チェックを実行" },
-  { command: "/connect", text: "接続画面を案内" },
-  { command: "/account", text: "広告アカウントを確認" },
-  { command: "/schedule", text: "自動実行を確認・変更" },
-  { command: "/open", text: "Web UI の URL を表示" },
+const EXAMPLES = [
+  "日次レポートを取得して",
+  "入稿前チェックを実行して",
+  "広告アカウントの状態を確認して",
+  "毎朝9時に日次レポートを送る設定にして",
 ] as const;
 
 interface ApiExecution {
@@ -40,11 +37,11 @@ export function DashboardChatPanel() {
   const [messages, setMessages] = useState<Message[]>([]);
 
   const suggestions = useMemo(() => {
-    if (!input.startsWith("/") || /\s/.test(input)) return [];
-    const needle = input.trim().toLowerCase();
-    if (needle === "/") return [...SLASH_COMMANDS];
-    return SLASH_COMMANDS.filter((item) => item.command.startsWith(needle));
-  }, [input]);
+    const needle = input.trim();
+    if (busy || messages.length > 0) return [];
+    if (needle.length > 0) return [];
+    return [...EXAMPLES];
+  }, [busy, input, messages.length]);
 
   async function submit(ev?: React.FormEvent) {
     ev?.preventDefault();
@@ -104,15 +101,15 @@ export function DashboardChatPanel() {
     <section className="agent-chat" aria-label="AdDroid agent chat">
       <div className="agent-chat__head">
         <div>
-          <h2>AdDroid Chat</h2>
-          <p>自然言語でレポート取得、入稿前チェック、schedule 操作を実行します。</p>
+          <h2>やりたいことを入力</h2>
+          <p>レポート取得、入稿前チェック、自動実行の設定を文章で依頼できます。</p>
         </div>
-        <span className="agent-chat__badge">LLM Agent</span>
+        <span className="agent-chat__badge">安全確認つき</span>
       </div>
       <div className="agent-chat__messages">
         {messages.length === 0 ? (
           <div className="agent-chat__empty">
-            「日次レポートを取得」「入稿前チェック」「budget_guard を ON にして」などを入力できます。
+            「日次レポートを取得」「入稿前チェック」「予算チェックを有効にして」などを入力できます。
           </div>
         ) : (
           messages.map((message) => (
@@ -148,12 +145,12 @@ export function DashboardChatPanel() {
             <div className="agent-chat__suggestions">
               {suggestions.map((item) => (
                 <button
-                  key={item.command}
+                  key={item}
                   type="button"
-                  onClick={() => setInput(item.command)}
+                  onClick={() => setInput(item)}
+                  disabled={busy}
                 >
-                  <span>{item.command}</span>
-                  <span>{item.text}</span>
+                  <span>{item}</span>
                 </button>
               ))}
             </div>

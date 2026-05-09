@@ -71,7 +71,7 @@ export function AdhocPlanForm({
         patch({ running: false, error: message });
         push({
           variant: "error",
-          title: "plan に失敗しました",
+          title: "入稿前チェックに失敗しました",
           description: message,
         });
         return;
@@ -81,7 +81,7 @@ export function AdhocPlanForm({
         patch({ running: false, error: "Empty plan result" });
         push({
           variant: "error",
-          title: "plan に失敗しました",
+          title: "入稿前チェックに失敗しました",
           description: "API から空の結果が返りました。",
         });
         return;
@@ -90,13 +90,13 @@ export function AdhocPlanForm({
       if (body.persistError) {
         push({
           variant: "info",
-          title: "plan は完了しましたが履歴の保存に失敗しました",
+          title: "チェックは完了しましたが履歴の保存に失敗しました",
           description: body.persistError,
         });
       } else if (result.ok) {
         push({
           variant: "success",
-          title: "plan ok",
+          title: "入稿前チェックが完了しました",
           description: planSummary(result),
         });
         // 履歴を再読み込み (SSR 由来のテーブルを最新化する)。
@@ -104,7 +104,7 @@ export function AdhocPlanForm({
       } else {
         push({
           variant: "error",
-          title: "plan に検証エラー",
+          title: "確認が必要な変更があります",
           description: planSummary(result),
         });
       }
@@ -113,7 +113,7 @@ export function AdhocPlanForm({
       patch({ running: false, error: message });
       push({
         variant: "error",
-        title: "plan に失敗しました",
+        title: "入稿前チェックに失敗しました",
         description: message,
       });
     }
@@ -124,7 +124,7 @@ export function AdhocPlanForm({
       <form className="adhoc-plan__form" onSubmit={submit}>
         <div className="toolbar__field">
           <label className="toolbar__label" htmlFor="adhoc-plan-account">
-            Account
+            広告アカウント
           </label>
           <select
             id="adhoc-plan-account"
@@ -146,12 +146,12 @@ export function AdhocPlanForm({
           className="btn btn--primary"
           disabled={state.running}
         >
-          {state.running ? "実行中…" : "Dry-run を実行"}
+          {state.running ? "確認中…" : "入稿前チェックを実行"}
         </button>
       </form>
       {state.error ? (
         <div className="banner" data-state="error">
-          <span className="banner__title">plan に失敗しました</span>
+          <span className="banner__title">入稿前チェックに失敗しました</span>
           <span>{state.error}</span>
         </div>
       ) : null}

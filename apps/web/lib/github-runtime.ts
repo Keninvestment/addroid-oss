@@ -123,6 +123,9 @@ export async function getActiveGithubAdapter(): Promise<AdapterSelection> {
   const env = process.env;
   const tokenStore = createPrismaOAuthTokenStore();
   const oauthClient = await loadGithubOAuthClient(env);
+  const storedTokenAvailable = Boolean(
+    await tokenStore.loadOAuthToken("github").catch(() => null)
+  );
   let crypto: ReturnType<typeof getCryptoBoundary> | undefined;
   try {
     crypto = getCryptoBoundary(env);
@@ -133,6 +136,7 @@ export async function getActiveGithubAdapter(): Promise<AdapterSelection> {
     env,
     tokenStore,
     ...(oauthClient !== null ? { oauthClient } : {}),
+    storedTokenAvailable,
     ...(crypto !== undefined ? { crypto } : {}),
   });
   injectGithubAdapter(selection.adapter);

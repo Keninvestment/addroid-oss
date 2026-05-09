@@ -300,12 +300,14 @@ button {
 
 .agent-chat__form {
   display: flex;
-  align-items: stretch;
+  align-items: flex-end;
   gap: var(--space-2);
 }
 
 .agent-chat__input-wrap {
-  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -324,24 +326,16 @@ button {
 }
 
 .agent-chat__suggestions {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + 4px);
-  z-index: 10;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-sm);
   background: var(--color-bg-surface);
-  box-shadow: var(--shadow-md);
 }
 
 .agent-chat__suggestions button {
-  display: grid;
-  grid-template-columns: 8rem 1fr;
-  gap: var(--space-2);
+  display: block;
   padding: var(--space-2) var(--space-3);
   border: 0;
   border-bottom: 1px solid var(--color-border-subtle);
@@ -359,8 +353,13 @@ button {
   background: var(--color-bg-subtle);
 }
 
+.agent-chat__suggestions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
 .agent-chat__suggestions span:first-child {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--color-accent);
 }
 

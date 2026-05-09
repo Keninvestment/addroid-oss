@@ -117,7 +117,7 @@ export default async function SetupPage() {
       state: "ok",
       label: `Slack 接続済み: ${teamName}${channelId ? ` (channel ${channelId})` : ""}`,
       detail:
-        "Socket Mode / 通知チャンネルが永続化されています。Slack 障害時も GitOps polling / Apply / Cron は通常通り稼働します。",
+        "通知チャンネルが保存されています。Slack に障害があっても、承認済み変更の確認や自動実行は通常通り稼働します。",
     };
   })();
 
@@ -127,7 +127,7 @@ export default async function SetupPage() {
     : process.cwd();
   const securityChecks: DoctorCheck[] = [
     {
-      name: "Web UI が 127.0.0.1 のみで listen",
+      name: "この端末だけで開ける",
       state: binding.hostname === "127.0.0.1" || binding.hostname === "localhost" ? "ok" : "error",
       message: `bind=${binding.hostname}:${binding.port}`,
       hint:
@@ -146,7 +146,7 @@ export default async function SetupPage() {
           if (missing.length === 0) {
             return {
               state: "ok" as StatusState,
-              message: ".env / secrets.local.yaml が gitignore 対象になっています。",
+            message: "接続情報ファイルは共有対象から除外されています。",
             };
           }
           return {
@@ -162,33 +162,33 @@ export default async function SetupPage() {
       })(),
     },
     {
-      name: "ENCRYPTION_KEY 設定",
+      name: "接続情報の暗号化",
       ...(() => {
         const key = process.env.ENCRYPTION_KEY ?? "";
         if (!key) {
           return {
             state: "error" as StatusState,
-            message: "ENCRYPTION_KEY が未設定です。",
-            hint: "node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\" で生成してください。",
+            message: "暗号化キーが未設定です。",
+            hint: "初期設定をやり直してください。",
           };
         }
         if (key.length < 16) {
           return {
             state: "warn" as StatusState,
-            message: "ENCRYPTION_KEY が短すぎます (16 文字以上推奨)。",
+            message: "暗号化キーが短すぎます (16 文字以上推奨)。",
           };
         }
         return {
           state: "ok" as StatusState,
-          message: "ENCRYPTION_KEY が設定されています。",
+          message: "暗号化キーが設定されています。",
         };
       })(),
     },
     {
-      name: "outbound-only / webhook 不使用",
+      name: "外部からの着信を使わない",
       state: "ok",
       message:
-        "AdDroid OSS は inbound webhook を要求しません。GitHub merged PR は ETag-aware ポーリングで検出します。",
+        "AdDroid は公開URLを要求しません。承認済み変更は定期確認で検出します。",
     },
     {
       name: "Slack 連携 (任意)",
@@ -201,17 +201,17 @@ export default async function SetupPage() {
   return (
     <>
       <PageHeader
-        title="Setup & Health"
-        subtitle="ローカル AdDroid の起動・doctor 結果・セキュリティポスチャをまとめて確認します。"
+        title="接続と健康状態"
+        subtitle="AdDroid が使える状態か、必要な接続ができているかを確認します。"
       />
 
       <div className="page-body page-body--single">
-        <Panel title="インストール" subtitle="ローカルでの初期セットアップ">
+        <Panel title="初期設定メモ" subtitle="通常は初回セットアップ時だけ確認します">
           <KeyValueList
             items={[
-              { label: "依存解決", value: <CodeBlock>npm install</CodeBlock> },
+              { label: "アプリの準備", value: <CodeBlock>npm install</CodeBlock> },
               {
-                label: "DB スキーマ",
+                label: "保存先の準備",
                 value: (
                   <CodeBlock>
                     {`pg_isready -h localhost -p 5432
@@ -240,7 +240,7 @@ addroid start     # Web UI (127.0.0.1:3000) + worker を起動`}
                 ),
               },
               {
-                label: "個別起動 (任意・デバッグ用途)",
+                label: "個別起動 (必要な時だけ)",
                 value: (
                   <CodeBlock>
                     {`npm run dev          # apps/web 単独 (127.0.0.1:3000)
@@ -253,8 +253,8 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
         </Panel>
 
         <Panel
-          title="Doctor 結果"
-          subtitle="addroid doctor の最新実行結果 (doctor_results テーブルから取得)"
+          title="診断結果"
+          subtitle="直近の接続・起動チェック"
           status={
             lastDoctor ? (
               <StatusDot state={lastDoctor.overall as StatusState}>{lastDoctor.overall}</StatusDot>
@@ -265,13 +265,13 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
         >
           {!dbReady ? (
             <EmptyState
-              title="DB スキーマ未反映"
-              description="npm run db:push を実行した後、addroid status または詳細診断の addroid doctor を実行すると検査結果がここに表示されます。"
+              title="保存先の準備が未完了です"
+              description="初期設定メモを確認した後、状態確認を実行すると検査結果がここに表示されます。"
             />
           ) : !lastDoctor ? (
             <EmptyState
-              title="addroid doctor の実行履歴はまだありません。"
-              description="ターミナルで addroid status を実行してください。詳細診断が必要な場合は addroid doctor を実行すると、最新の検査結果がここに表示されます。"
+              title="診断履歴はまだありません。"
+              description="状態確認を実行すると、最新の検査結果がここに表示されます。"
             />
           ) : (
             <KeyValueList
@@ -296,7 +296,7 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
           )}
         </Panel>
 
-        <Panel title="Security & Network Posture" subtitle="ローカル運用の不変条件">
+        <Panel title="安全設定" subtitle="ローカル運用で守る条件">
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: "var(--space-3)" }}>
             {securityChecks.map((check) => (
               <li
@@ -327,7 +327,7 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
 
         <Panel
           title="Slack 連携 (任意)"
-          subtitle="Slack Socket Mode / app token / 通知チャンネル状態 (oauth_tokens(provider='slack') から取得)"
+          subtitle="Slack 通知や /adops を使う場合だけ設定します"
           status={
             <span style={{ display: "inline-flex", gap: "var(--space-2)", alignItems: "center" }}>
               <StatusBadge state="idle">OPTIONAL</StatusBadge>
@@ -338,7 +338,7 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
           {!slackInstallation ? (
             <EmptyState
               title="Slack は任意です。AdDroid は Slack なしでも動作します。"
-              description="Slack 通知や /adops を有効にしたい場合のみ、ターミナルで addroid connect slack を実行して xoxb- / xapp- / signing_secret と通知チャンネル ID を登録してください。Socket Mode のみを使用するため、公開 URL や webhook は必要ありません。"
+              description="Slack 通知や /adops を有効にしたい場合のみ接続してください。公開 URL は必要ありません。"
             />
           ) : (
             <KeyValueList
@@ -375,23 +375,23 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                   value: (
                     <StatusDot state={slackInstallation.hasBotToken ? "ok" : "warn"}>
                       {slackInstallation.hasBotToken
-                        ? "暗号化保存済み (oauth_tokens.accessTokenCiphertext)"
+                        ? "保存済み"
                         : "未登録"}
                     </StatusDot>
                   ),
                 },
                 {
-                  label: "App token (xapp- / Socket Mode)",
+                  label: "Slack アプリ接続",
                   value: (
                     <StatusDot state={slackInstallation.hasAppToken ? "ok" : "warn"}>
                       {slackInstallation.hasAppToken
-                        ? "暗号化保存済み (oauth_tokens.refreshTokenCiphertext)"
-                        : "未登録 — Socket Mode が使えません"}
+                        ? "保存済み"
+                        : "未登録"}
                     </StatusDot>
                   ),
                 },
                 {
-                  label: "Scopes",
+                  label: "許可された範囲",
                   value:
                     slackInstallation.scopes.length > 0 ? (
                       <span style={{ fontFamily: "var(--font-mono)" }}>
@@ -412,12 +412,12 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                   mono: true,
                 },
                 {
-                  label: "Connected",
+                  label: "接続日時",
                   value: slackInstallation.connectedAt.toISOString(),
                   mono: true,
                 },
                 {
-                  label: "Updated",
+                  label: "更新日時",
                   value: slackInstallation.updatedAt.toISOString(),
                   mono: true,
                 },

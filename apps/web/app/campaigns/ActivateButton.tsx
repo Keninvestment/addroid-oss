@@ -67,7 +67,7 @@ export function ActivateButton({
       if (!res.ok || !body.ok) {
         toast.push({
           variant: "error",
-          title: `${nodeLabel}を ACTIVE にできませんでした`,
+          title: `${nodeLabel}を配信開始できませんでした`,
           description: body.error ?? `HTTP ${res.status}`,
         });
         setBusy(false);
@@ -75,7 +75,7 @@ export function ActivateButton({
       }
       toast.push({
         variant: "success",
-        title: `${nodeLabel}を ACTIVE にしました`,
+        title: `${nodeLabel}を配信開始しました`,
         description: `${accountLabel} / ${displayName}${
           body.externalId ? ` (${body.externalId})` : externalId ? ` (${externalId})` : ""
         }`,
@@ -86,7 +86,7 @@ export function ActivateButton({
     } catch (err) {
       toast.push({
         variant: "error",
-        title: `${nodeLabel}を ACTIVE にできませんでした`,
+        title: `${nodeLabel}を配信開始できませんでした`,
         description: (err as Error).message,
       });
       setBusy(false);
@@ -101,42 +101,41 @@ export function ActivateButton({
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
       >
-        ACTIVE にする
+        配信開始
       </button>
       <ConfirmDialog
         open={open}
-        title={`${nodeLabel}を ACTIVE にする`}
+        title={`${nodeLabel}を配信開始する`}
         description={
           <div className="confirm-body">
             <p className="confirm-body__lead">
               この操作は <strong>{nodeLabel}</strong> を Meta 上で配信開始します。実費が発生する可能性があります。
             </p>
             <dl className="kv">
-              <dt>Name</dt>
+              <dt>名前</dt>
               <dd>{displayName}</dd>
-              <dt>Account</dt>
+              <dt>広告アカウント</dt>
               <dd className="mono">{accountLabel}</dd>
               {externalId ? (
                 <>
-                  <dt>External ID</dt>
+                  <dt>Meta ID</dt>
                   <dd className="mono">{externalId}</dd>
                 </>
               ) : null}
               {budgetLabel ? (
                 <>
-                  <dt>Budget</dt>
+                  <dt>予算</dt>
                   <dd className="tabular">{budgetLabel}</dd>
                 </>
               ) : null}
-              <dt>Audit</dt>
+              <dt>操作履歴</dt>
               <dd>
-                確定すると <span className="mono">activate.requested</span> →{" "}
-                <span className="mono">activate.committed</span> が audit_logs に記録されます。
+                確定すると配信開始の操作として記録されます。
               </dd>
             </dl>
           </div>
         }
-        confirmLabel="ACTIVE にする"
+        confirmLabel="配信開始"
         cancelLabel="キャンセル"
         confirmVariant="caution"
         busy={busy}

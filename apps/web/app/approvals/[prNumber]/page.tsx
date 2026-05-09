@@ -252,7 +252,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
       ),
     },
     { label: "Base", value: <InlineCode>{pr.baseRef}</InlineCode> },
-    { label: "Head SHA", value: <InlineCode>{pr.headSha}</InlineCode> },
+    { label: "変更ID", value: <InlineCode>{pr.headSha}</InlineCode> },
     {
       label: "Branch protection",
       value: (
@@ -302,7 +302,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
       ),
     },
     {
-      label: "Linked ai_run",
+      label: "関連するAI実行",
       value: linkedAiRunId ? (
         <InlineCode>{linkedAiRunId}</InlineCode>
       ) : (
@@ -330,10 +330,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
         subtitle={
           <>
             <InlineCode>{pr.repo.owner}/{pr.repo.name}</InlineCode>{" "}
-            の Pull Request プレビュー。Web UI からのマージは GitHub merge API を呼び、
-            merge 成功時に approval_records / audit_logs に
-            {" "}<InlineCode>web_merge</InlineCode>{" "}
-            ソースを記録します。
+            の承認前プレビュー。内容を確認してから承認できます。
           </>
         }
         actions={
@@ -345,8 +342,8 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
       <div className="page-body page-body--single">
         <Panel
-          title="Overview"
-          subtitle="PR の状態と承認境界"
+          title="概要"
+          subtitle="変更の状態と承認可否"
           status={
             <StatusDot state={approvalState(latestDecision)}>
               {latestDecision ?? "pending"}
@@ -357,9 +354,9 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
         </Panel>
 
         <Panel
-          title="PR 本文 (Body)"
+          title="変更内容の説明"
           subtitle={
-            previewSubtitle ?? "PR 本文は publisher が永続化します (sanitize 済み)"
+            previewSubtitle ?? "GitHub に作成された説明文"
           }
           status={
             <StatusDot state={pr.body ? "info" : "idle"}>
@@ -374,7 +371,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           ) : (
             <EmptyState
               title="PR 本文は未収集です。"
-              description="AdDroid 改善ワークフロー (improvement_pr) で作成された PR は本文が永続化されます。GitHub から直接ポーリングされた外部 PR は本文を保持しないため、リンク先の GitHub で確認してください。"
+              description="GitHub 側のリンクから内容を確認してください。"
             />
           )}
         </Panel>
@@ -388,7 +385,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                     ? ` · ${persistedFileCount} ファイル`
                     : ""
                 }`
-              : "publisher が永続化した sanitized 変更ファイル/diff サマリ"
+              : "変更されたファイルの概要"
           }
           status={
             <StatusDot
@@ -403,7 +400,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           {!filesPreview || filesPreview.files.length === 0 ? (
             <EmptyState
               title="変更ファイル情報は未収集です。"
-              description="AdDroid 改善ワークフロー (improvement_pr) で作成された PR は変更ファイル + 切り詰めた diff が永続化されます。GitHub から直接ポーリングされた外部 PR は保持しないため、リンク先の GitHub で diff を確認してください。"
+              description="GitHub 側のリンクから変更ファイルを確認してください。"
             />
           ) : (
             <>
@@ -413,7 +410,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                 empty={null}
                 columns={[
                   {
-                    header: "Action",
+                    header: "変更種別",
                     cell: (row) => (
                       <StatusBadge state={actionBadgeState(row.action)}>
                         {row.action}
@@ -421,7 +418,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                     ),
                   },
                   {
-                    header: "Path",
+                    header: "ファイル",
                     cell: (row) => <InlineCode>{row.path}</InlineCode>,
                     className: "mono",
                   },
@@ -436,7 +433,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                     headerClassName: "tabular",
                   },
                   {
-                    header: "Diff bytes",
+                    header: "差分サイズ",
                     cell: (row) => (
                       <span className="tabular mono">
                         {row.diffByteLength}
@@ -456,7 +453,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                     color: "var(--color-text-secondary)",
                   }}
                 >
-                  +{filesPreview.truncatedFileCount} more (50 ファイルで打ち切り)
+                  他 {filesPreview.truncatedFileCount} 件があります (50 ファイルまで表示)
                 </p>
               ) : null}
               <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3)", marginTop: "var(--space-3)" }}>
@@ -490,10 +487,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           )}
         </Panel>
 
-        <Panel
-          title="Web UI からのマージ"
-          subtitle="ConfirmDialog (caution) を経由し、approval_records / audit_logs に web_merge を記録"
-        >
+        <Panel title="承認して反映待ちにする" subtitle="確認ダイアログを通して実行します">
           {!canMerge ? (
             <EmptyState
               title="この PR は Web UI からマージできません。"
@@ -515,7 +509,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
         <Panel
           title="承認履歴"
-          subtitle={`approval_records · ${approvals.length} 件`}
+          subtitle={`${approvals.length} 件`}
         >
           <DataTable
             rows={approvals}
@@ -523,32 +517,32 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
             empty={
               <EmptyState
                 title="承認・拒否の決定はまだありません。"
-                description="この PR に対する approval_records はまだ作成されていません。Web UI からマージするか、github_poll が merged を検知すると 1 行記録されます。"
+                description="この変更に対する承認・拒否はまだ記録されていません。"
               />
             }
             columns={[
               {
-                header: "Time",
+                header: "日時",
                 cell: (row) => row.createdAt.toISOString(),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
               {
-                header: "Decision",
+                header: "判断",
                 cell: (row) => (
                   <StatusBadge state={approvalState(row.decision)}>
                     {row.decision}
                   </StatusBadge>
                 ),
               },
-              { header: "Approved by", cell: (row) => row.approvedBy, className: "mono" },
+              { header: "実行者", cell: (row) => row.approvedBy, className: "mono" },
               {
-                header: "Source",
+                header: "承認元",
                 cell: (row) => row.decisionSource ?? "—",
                 className: "mono",
               },
               {
-                header: "Comment",
+                header: "コメント",
                 cell: (row) => row.comment ?? "—",
               },
             ]}
@@ -558,16 +552,16 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
         {linkedAiRunId ? (
           <Panel
             title="関連 AI 実行"
-            subtitle="この PR の作成元になった improvement_pr / daily_report の ai_runs"
+            subtitle="この変更の作成元になったAI処理"
           >
             <KeyValueList
               items={[
                 {
-                  label: "ai_run id",
+                  label: "AI実行ID",
                   value: <InlineCode>{linkedAiRunId}</InlineCode>,
                 },
                 {
-                  label: "Run started",
+                  label: "開始日時",
                   value: linkedImprovementPrAuditAt ? (
                     <span className="tabular mono">
                       {linkedImprovementPrAuditAt.toISOString()}

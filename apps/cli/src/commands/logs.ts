@@ -1,4 +1,4 @@
-// `addroid logs [web|worker|all] [--lines N]` — `addroid up` が書き出したログを末尾から表示する。
+// `addroid logs [target] [--lines N]` — `addroid up` が書き出したログを末尾から表示する。
 
 import fs from "node:fs/promises";
 import { resolveAddroidPaths } from "@addroid/config";
@@ -13,15 +13,35 @@ export async function runLogs(args: string[]): Promise<number> {
     return 0;
   }
 
-  const sources: Array<{ label: string; file: string }> = [];
-  if (target === "all" || target === "up") {
+  const sources: Array<{
+    label: string;
+    file: string;
+    missingMessage?: string;
+  }> = [];
+  if (target === "all" || target === "debug" || target === "up") {
     sources.push({ label: "up (shared mode)", file: paths.upLogFile });
   }
-  if (target === "all" || target === "web") {
-    sources.push({ label: "web", file: paths.webLogFile });
+  if (target === "all" || target === "debug" || target === "web") {
+    sources.push({
+      label: "web",
+      file: paths.webLogFile,
+      missingMessage:
+        "web.log は `addroid up --separate-worker` モードでのみ生成されます。通常の `addroid up` は up.log にまとまります。",
+    });
   }
-  if (target === "all" || target === "worker") {
-    sources.push({ label: "worker", file: paths.workerLogFile });
+  if (target === "all" || target === "debug" || target === "worker") {
+    sources.push({
+      label: "worker",
+      file: paths.workerLogFile,
+      missingMessage:
+        "worker.log は `addroid up --separate-worker` モードでのみ生成されます。通常の `addroid up` は up.log にまとまります。",
+    });
+  }
+  if (target === "debug" || target === "service") {
+    sources.push({ label: "service", file: paths.serviceLogFile });
+  }
+  if (target === "debug" || target === "service-err") {
+    sources.push({ label: "service stderr", file: paths.serviceErrLogFile });
   }
 
   let printed = 0;
@@ -29,7 +49,9 @@ export async function runLogs(args: string[]): Promise<number> {
     const tail = await readTail(src.file, lines);
     process.stdout.write(`==> ${src.label}: ${src.file} (last ${lines} lines) <==\n`);
     if (tail === null) {
-      process.stdout.write("  (ログファイル未生成 — まだ `addroid up` が走っていない可能性)\n");
+      process.stdout.write(
+        `  (${src.missingMessage ?? "ログファイル未生成 — まだ `addroid up` が走っていない可能性"})\n`
+      );
     } else if (tail.length === 0) {
       process.stdout.write("  (空)\n");
     } else {
@@ -43,7 +65,15 @@ export async function runLogs(args: string[]): Promise<number> {
 }
 
 interface ParsedArgs {
-  target: "web" | "worker" | "up" | "all" | "__help__";
+  target:
+    | "web"
+    | "worker"
+    | "up"
+    | "all"
+    | "service"
+    | "service-err"
+    | "debug"
+    | "__help__";
   lines: number;
 }
 
@@ -63,7 +93,15 @@ function parseArgs(args: string[]): ParsedArgs {
       if (Number.isFinite(n) && n > 0) lines = n;
       continue;
     }
-    if (a === "web" || a === "worker" || a === "up" || a === "all") {
+    if (
+      a === "web" ||
+      a === "worker" ||
+      a === "up" ||
+      a === "all" ||
+      a === "debug" ||
+      a === "service" ||
+      a === "service-err"
+    ) {
       target = a;
       continue;
     }
@@ -74,12 +112,15 @@ function parseArgs(args: string[]): ParsedArgs {
 function printUsage() {
   process.stdout.write(
     [
-      "Usage: addroid logs [up|web|worker|all] [--lines N]",
+      "Usage: addroid logs [up|web|worker|all|service|service-err|debug] [--lines N]",
       "",
       "  up        shared モード (`addroid up` 既定) の up.log のみ表示",
       "  web       apps/web のログのみ表示 (`--separate-worker` モードで生成)",
       "  worker    apps/worker のログのみ表示 (`--separate-worker` モードで生成)",
       "  all       3 つすべて表示 (default)",
+      "  service   background service の stdout ログを表示",
+      "  service-err background service の stderr ログを表示",
+      "  debug     up/web/worker/service/service-err をまとめて表示",
       "  --lines N 末尾 N 行を表示 (default 200)",
       "",
     ].join("\n")

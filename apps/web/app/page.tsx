@@ -105,11 +105,11 @@ export default async function DashboardPage() {
   return (
     <>
       <PageHeader
-        title="Dashboard"
+        title="ホーム"
         subtitle={
           <>
-            ローカル AdDroid プロセスの状態を 10 秒で把握するためのオペレータ用コンソール。
-            UI は <InlineCode>{`${status.binding.hostname}:${status.binding.port}`}</InlineCode> でのみ listen。
+            広告運用の状態確認、レポート取得、入稿前チェックをここから始められます。
+            この画面は手元の端末だけで開けます。
           </>
         }
       />
@@ -121,21 +121,17 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Config & Environment"
-            subtitle="~/.addroid/config.yaml と DATABASE_URL の解決状況"
+            title="基本設定"
+            subtitle="AdDroid を使う準備ができているか"
             status={<StatusDot state={status.config.state}>{status.config.state}</StatusDot>}
           >
             <KeyValueList
               items={[
-                { label: "Config path", value: status.config.configPath, mono: true },
-                { label: "Status", value: status.config.message },
+                { label: "状態", value: status.config.message },
                 {
-                  label: "Web binding",
-                  value: (
-                    <InlineCode>
-                      {status.binding.hostname}:{status.binding.port}
-                    </InlineCode>
-                  ),
+                  label: "設定ファイル",
+                  value: status.config.configPath,
+                  mono: true,
                 },
               ]}
             />
@@ -144,14 +140,13 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Database"
-            subtitle="PostgreSQL 接続と Prisma スキーマ反映"
+            title="保存先"
+            subtitle="履歴や連携状態を保存できるか"
             status={<StatusDot state={status.database.state}>{status.database.state}</StatusDot>}
           >
             <KeyValueList
               items={[
-                { label: "Driver", value: "Prisma 5 / PostgreSQL 16+" },
-                { label: "Status", value: status.database.message },
+                { label: "状態", value: status.database.message },
               ]}
             />
           </Panel>
@@ -159,14 +154,13 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Worker / pg-boss"
-            subtitle="cron プリセットの登録状況"
+            title="自動実行"
+            subtitle="定期レポートやチェックを動かせるか"
             status={<StatusDot state={status.worker.state}>{status.worker.state}</StatusDot>}
           >
             <KeyValueList
               items={[
-                { label: "Job runner", value: "pg-boss v10 (single PostgreSQL)" },
-                { label: "Status", value: status.worker.message },
+                { label: "状態", value: status.worker.message },
               ]}
             />
           </Panel>
@@ -174,14 +168,13 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="GitHub"
-            subtitle="OAuth 接続と ops repository ポーリング"
+            title="GitHub 連携"
+            subtitle="入稿変更をレビューに出せるか"
             status={<StatusDot state={status.github.state}>{status.github.state}</StatusDot>}
           >
             <KeyValueList
               items={[
-                { label: "Mode", value: "outbound-only / API ポーリング (webhook 不使用)" },
-                { label: "Status", value: status.github.message },
+                { label: "状態", value: status.github.message },
               ]}
             />
           </Panel>
@@ -189,33 +182,33 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Meta Ads"
-            subtitle="Meta Access Token と登録済み Ad Account"
+            title="Meta 広告"
+            subtitle="広告アカウントが接続されているか"
             status={
               <StatusDot state={metaConnected ? "ok" : "warn"}>
-                {metaConnected ? "connected" : "not connected"}
+                {metaConnected ? "接続済み" : "未接続"}
               </StatusDot>
             }
           >
             <KeyValueList
               items={[
                 {
-                  label: "Token",
+                  label: "接続",
                   value: metaConnected
                     ? "Meta と連携済み"
-                    : "Meta と未連携 (CLI で接続)",
+                    : "Meta と未連携です",
                 },
                 {
-                  label: "Active Ad Accounts",
+                  label: "利用できる広告アカウント",
                   value: (
                     <span className="tabular mono">{metaAccountsCount} 件</span>
                   ),
                 },
                 {
-                  label: "Detail",
+                  label: "次に見る画面",
                   value: (
                     <Link href="/accounts" style={{ color: "var(--color-accent)" }}>
-                      /accounts を開く →
+                      広告アカウントを確認
                     </Link>
                   ),
                 },
@@ -226,27 +219,27 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Approvals"
-            subtitle="Web UI からの PR マージ承認境界"
+            title="承認待ち"
+            subtitle="人の確認が必要な入稿変更"
             status={
               <StatusDot state={pendingPrCount === 0 ? "idle" : "info"}>
-                {pendingPrCount === 0 ? "no pending" : `${pendingPrCount} pending`}
+                {pendingPrCount === 0 ? "なし" : `${pendingPrCount} 件`}
               </StatusDot>
             }
           >
             <KeyValueList
               items={[
                 {
-                  label: "Pending PRs",
+                  label: "確認待ち",
                   value: (
                     <span className="tabular mono">{pendingPrCount} 件</span>
                   ),
                 },
                 {
-                  label: "Detail",
+                  label: "次に見る画面",
                   value: (
                     <Link href="/approvals" style={{ color: "var(--color-accent)" }}>
-                      /approvals を開く →
+                      承認待ちを確認
                     </Link>
                   ),
                 },
@@ -257,11 +250,11 @@ export default async function DashboardPage() {
 
         <div className="col-span-6">
           <Panel
-            title="Daily Report"
-            subtitle="直近の daily_report KPI スナップショット"
+            title="日次レポート"
+            subtitle="直近の広告成果"
             status={
               <StatusDot state={dailyReport ? "ok" : "idle"}>
-                {dailyReport ? dailyReport.metricDate || "succeeded" : "no runs yet"}
+                {dailyReport ? dailyReport.metricDate || "取得済み" : "未取得"}
               </StatusDot>
             }
           >
@@ -269,17 +262,17 @@ export default async function DashboardPage() {
               <KeyValueList
                 items={[
                   {
-                    label: "Status",
-                    value: "daily_report はまだ実行されていません。",
+                    label: "状態",
+                    value: "日次レポートはまだ実行されていません。",
                   },
                   {
-                    label: "Detail",
+                    label: "次に見る画面",
                     value: (
                       <Link
                         href="/reports/daily"
                         style={{ color: "var(--color-accent)" }}
                       >
-                        /reports/daily を開く →
+                        日次レポートを確認
                       </Link>
                     ),
                   },
@@ -289,7 +282,7 @@ export default async function DashboardPage() {
               <KeyValueList
                 items={[
                   {
-                    label: "Account",
+                    label: "広告アカウント",
                     value: <InlineCode>{dailyReport.accountKey}</InlineCode>,
                   },
                   {
@@ -333,13 +326,13 @@ export default async function DashboardPage() {
                     ),
                   },
                   {
-                    label: "Detail",
+                    label: "次に見る画面",
                     value: (
                       <Link
                         href="/reports/daily"
                         style={{ color: "var(--color-accent)" }}
                       >
-                        /reports/daily を開く →
+                        日次レポートを確認
                       </Link>
                     ),
                   },
@@ -350,7 +343,7 @@ export default async function DashboardPage() {
         </div>
 
         <div className="col-span-12">
-          <Panel title="Recent Cron Runs" subtitle="cron_runs テーブルの直近 5 件">
+          <Panel title="最近の自動実行" subtitle="直近に動いたレポート・チェック">
             <DataTable
               rows={recentRuns}
               rowKey={(row) => row.id}
@@ -367,27 +360,27 @@ export default async function DashboardPage() {
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
-                { header: "Name", cell: (row) => row.name },
+                { header: "内容", cell: (row) => workflowLabel(row.name) },
                 {
-                  header: "Duration",
+                  header: "所要時間",
                   cell: (row) => (row.durationMs == null ? "—" : `${row.durationMs} ms`),
                   className: "tabular",
                   headerClassName: "tabular",
                 },
-                { header: "State", cell: (row) => row.state },
+                { header: "状態", cell: (row) => stateLabel(row.state) },
               ]}
             />
           </Panel>
         </div>
 
         <div className="col-span-12">
-          <Panel title="Recent Audit Events" subtitle="audit_logs テーブルの直近 5 件">
+          <Panel title="最近の操作履歴" subtitle="人や自動実行が行った主な操作">
             <DataTable
               rows={recentAudit}
               rowKey={(row) => row.id}
               empty={
                 <EmptyState
-                  title="監査ログはまだありません。"
+                  title="操作履歴はまだありません。"
                   description="AdDroid が初回 PR を生成すると記録されます。"
                 />
               }
@@ -398,9 +391,9 @@ export default async function DashboardPage() {
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
-                { header: "Actor", cell: (row) => row.actor },
-                { header: "Action", cell: (row) => row.action },
-                { header: "Target", cell: (row) => row.target ?? "—", className: "mono" },
+                { header: "実行者", cell: (row) => actorLabel(row.actor) },
+                { header: "内容", cell: (row) => actionLabel(row.action) },
+                { header: "対象", cell: (row) => row.target ?? "—", className: "mono" },
               ]}
             />
           </Panel>
@@ -408,4 +401,46 @@ export default async function DashboardPage() {
       </div>
     </>
   );
+}
+
+function workflowLabel(name: string): string {
+  const labels: Record<string, string> = {
+    daily_report: "日次レポート",
+    budget_guard: "予算チェック",
+    improvement_pr: "改善提案",
+    github_poll: "承認済み変更の確認",
+    retention_cleanup: "古い履歴の整理",
+  };
+  return labels[name] ?? name;
+}
+
+function stateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    ok: "成功",
+    failed: "失敗",
+    error: "失敗",
+    running: "実行中",
+    queued: "待機中",
+    skipped: "スキップ",
+  };
+  return labels[state] ?? state;
+}
+
+function actorLabel(actor: string): string {
+  if (actor.startsWith("user:")) return "ユーザー";
+  if (actor.startsWith("agent:")) return "自動実行";
+  if (actor.includes("cron")) return "自動実行";
+  return actor;
+}
+
+function actionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    "account.default_changed": "既定アカウントを変更",
+    "ad_account.registered": "広告アカウントを登録",
+    "oauth.meta.connected": "Meta と接続",
+    "oauth.meta.refreshed": "Meta 接続を更新",
+    "pr.merged_via_web": "承認して反映待ちにした",
+  };
+  return labels[action] ?? action.replaceAll("_", " ").replaceAll(".", " / ");
 }

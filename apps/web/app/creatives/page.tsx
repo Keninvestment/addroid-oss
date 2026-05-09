@@ -85,11 +85,12 @@ const TAKE = 60;
 export default async function CreativesPage({
   searchParams,
 }: {
-  searchParams?: SearchParamsInput;
+  searchParams?: Promise<SearchParamsInput>;
 }) {
-  const accountIdParam = single(searchParams?.accountId) ?? null;
-  const statusParam = (single(searchParams?.status) ?? "all").trim();
-  const providerParam = (single(searchParams?.provider) ?? "all").trim();
+  const resolvedSearchParams = await searchParams;
+  const accountIdParam = single(resolvedSearchParams?.accountId) ?? null;
+  const statusParam = (single(resolvedSearchParams?.status) ?? "all").trim();
+  const providerParam = (single(resolvedSearchParams?.provider) ?? "all").trim();
 
   let dbReady = true;
   let accounts: AccountOption[] = [];
@@ -205,12 +206,8 @@ export default async function CreativesPage({
         title="生成クリエイティブ"
         subtitle={
           <>
-            <InlineCode>improvement_pr</InlineCode> ワークフローが生成した広告
-            クリエイティブの一覧。AdDroid は画像 Provider なしでも動作します
-            (テキストプロンプトのみで PR を作成します)。生成画像は{" "}
-            <InlineCode>storage://</InlineCode> 配下に保存され、PR を経由してのみ
-            Meta に反映されます (本ページからは Meta への直接反映 / 再生成は
-            行えません)。
+            改善提案から作成された広告クリエイティブの一覧です。
+            画像が未設定の環境でもテキスト案として記録され、Meta へ直接反映されることはありません。
           </>
         }
       />
@@ -225,11 +222,11 @@ export default async function CreativesPage({
         />
 
         <Panel
-          title="Creatives"
+          title="クリエイティブ一覧"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `creatives テーブル · ${totalForAccount} 件 (直近 ${showingCount} を表示${
+              ? "保存先を確認してください"
+              : `${totalForAccount} 件 (直近 ${showingCount} を表示${
                   moreCount > 0 ? ` / 他 ${moreCount} 件` : ""
                 })`
           }
@@ -240,28 +237,23 @@ export default async function CreativesPage({
               {!dbReady
                 ? "warn"
                 : showingCount === 0
-                  ? "no records yet"
-                  : `${showingCount} creatives`}
+                  ? "未作成"
+                  : `${showingCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="creatives を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="クリエイティブを読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : creatives.length === 0 ? (
             <EmptyState
               title="まだ生成クリエイティブはありません"
               description={
                 <>
-                  <InlineCode>/improvements</InlineCode> から{" "}
-                  <InlineCode>improvement_pr</InlineCode> を起動するか、画像
-                  Provider (任意) を <InlineCode>~/.addroid/.env.local</InlineCode>{" "}
-                  に設定すると、生成された creative がここに一覧表示されます。
-                  画像 Provider 未設定でも improvement_pr はテキストプロンプト
-                  のみで PR を作成し、creative 行は{" "}
-                  <InlineCode>fallback_text_only</InlineCode> 状態で記録されます。
+                  改善提案を実行すると、生成されたクリエイティブがここに表示されます。
+                  画像生成を設定していない場合も、テキスト案として承認待ちの変更を作成できます。
                 </>
               }
             />
@@ -320,17 +312,17 @@ function CreativeCard({
           />
         ) : (
           <div className="creative-card__placeholder" aria-hidden="true">
-            <span>{showStorageMissing ? "storage 未到達" : "no image"}</span>
+            <span>{showStorageMissing ? "画像未取得" : "画像なし"}</span>
           </div>
         )}
         {showStorageMissing ? (
           <div className="creative-card__overlay">
-            <StatusBadge state="warn">storage 未到達</StatusBadge>
+            <StatusBadge state="warn">画像未取得</StatusBadge>
           </div>
         ) : null}
         {!hasStorageRef ? (
           <div className="creative-card__overlay">
-            <StatusBadge state="idle">prompt-only</StatusBadge>
+            <StatusBadge state="idle">テキスト案</StatusBadge>
           </div>
         ) : null}
       </div>

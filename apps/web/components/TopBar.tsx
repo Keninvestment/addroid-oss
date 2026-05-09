@@ -3,16 +3,9 @@
 // the current implementation 拡張: 右側に「現在のデフォルト Meta アカウント」を表示するチップを追加。
 
 import Link from "next/link";
-import { resolveWebBinding } from "@addroid/config";
 import { prisma } from "../lib/prisma";
 
 export async function TopBar() {
-  let binding: { hostname: string; port: number };
-  try {
-    binding = resolveWebBinding();
-  } catch {
-    binding = { hostname: "127.0.0.1", port: 3000 };
-  }
   const version = process.env.npm_package_version ?? "0.0.0";
 
   let defaultLabel: string | null = null;
@@ -34,7 +27,9 @@ export async function TopBar() {
 
   return (
     <header className="top-bar">
-      <div className="top-bar__brand">AdDroid OSS</div>
+      <Link href="/" className="top-bar__brand" style={{ color: "inherit", textDecoration: "none" }}>
+        AdDroid
+      </Link>
       <div className="top-bar__meta">
         <Link
           href="/accounts"
@@ -46,17 +41,17 @@ export async function TopBar() {
               : "デフォルト Meta アカウント未設定 (クリックで設定)"
           }
         >
-          Meta:{" "}
+          広告アカウント:{" "}
           {defaultLabel ? (
             <span className="mono">{defaultLabel}</span>
           ) : (
-            <span>未設定 · 選択する</span>
+            <span>未設定</span>
           )}
         </Link>
         <span className="top-bar__chip">
-          {binding.hostname}:{binding.port} · outbound-only
+          この端末だけで開く
         </span>
-        <span>v{version}</span>
+        <span className="top-bar__version">v{version}</span>
       </div>
     </header>
   );

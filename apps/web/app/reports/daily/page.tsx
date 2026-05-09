@@ -208,6 +208,17 @@ function cronStateToStatus(state: string): StatusState {
   }
 }
 
+function cronStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    success: "成功",
+    failed: "失敗",
+    running: "実行中",
+    queued: "待機中",
+    skipped: "スキップ",
+  };
+  return labels[state] ?? state;
+}
+
 function reportSummaryStatusToState(status: string): StatusState {
   switch (status) {
     case "succeeded":
@@ -222,6 +233,35 @@ function reportSummaryStatusToState(status: string): StatusState {
   }
 }
 
+function reportStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    succeeded: "取得済み",
+    no_account: "対象なし",
+    no_insights: "データなし",
+    ai_failed: "AIコメント失敗",
+  };
+  return labels[status] ?? status;
+}
+
+function hierarchyLabel(nodeType: string): string {
+  const labels: Record<string, string> = {
+    account: "広告アカウント",
+    campaign: "キャンペーン",
+    adset: "広告セット",
+    ad: "広告",
+  };
+  return labels[nodeType] ?? nodeType;
+}
+
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    meta_cli: "Meta",
+    meta_graph: "Meta",
+    mock: "テストデータ",
+  };
+  return labels[source] ?? source;
+}
+
 function modeToState(mode: string): StatusState {
   switch (mode) {
     case "auto_apply":
@@ -234,8 +274,22 @@ function modeToState(mode: string): StatusState {
   }
 }
 
+function modeLabel(mode: string): string {
+  const labels: Record<string, string> = {
+    auto_apply: "自動反映候補",
+    proposal: "提案",
+    report_only: "レポートのみ",
+  };
+  return labels[mode] ?? mode;
+}
+
 function formatTimestamp(d: Date): string {
-  return d.toISOString().replace("T", " ").replace(/\..+$/, "Z");
+  return new Intl.DateTimeFormat("ja-JP", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d);
 }
 
 function formatDate(d: Date): string {
@@ -400,26 +454,26 @@ export default async function ReportsDailyPage() {
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
-      header: "Started",
+      header: "開始日時",
       cell: (row) => formatTimestamp(row.startedAt),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "State",
+      header: "実行状態",
       cell: (row) => (
-        <StatusBadge state={cronStateToStatus(row.state)}>{row.state}</StatusBadge>
+        <StatusBadge state={cronStateToStatus(row.state)}>{cronStateLabel(row.state)}</StatusBadge>
       ),
     },
     {
-      header: "Account",
+      header: "広告アカウント",
       cell: (row) => {
         const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? <InlineCode>{summary.accountKey}</InlineCode> : <span>—</span>;
       },
     },
     {
-      header: "Metric date",
+      header: "対象日",
       cell: (row) => {
         const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary && summary.metricDate ? (
@@ -434,12 +488,12 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Status",
+      header: "取得結果",
       cell: (row) => {
         const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? (
           <StatusBadge state={reportSummaryStatusToState(summary.status)}>
-            {summary.status}
+            {reportStatusLabel(summary.status)}
           </StatusBadge>
         ) : (
           <span>—</span>
@@ -447,7 +501,7 @@ export default async function ReportsDailyPage() {
       },
     },
     {
-      header: "Snapshots",
+      header: "保存データ",
       cell: (row) => {
         const summary = parseDailyReportSummaries(row.output)[0] ?? null;
         return summary ? (
@@ -460,7 +514,7 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Duration",
+      header: "所要時間",
       cell: (row) => (row.durationMs == null ? "—" : `${row.durationMs} ms`),
       className: "tabular",
       headerClassName: "tabular",
@@ -469,21 +523,21 @@ export default async function ReportsDailyPage() {
 
   const snapshotColumns: DataTableColumn<SnapshotRow>[] = [
     {
-      header: "Date",
+      header: "日付",
       cell: (row) => formatDate(row.metricDate),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "Hierarchy",
-      cell: (row) => <InlineCode>{row.nodeType}</InlineCode>,
+      header: "階層",
+      cell: (row) => hierarchyLabel(row.nodeType),
     },
     {
-      header: "Node key",
+      header: "対象",
       cell: (row) => <InlineCode>{row.nodeKey}</InlineCode>,
     },
     {
-      header: "Impressions",
+      header: "表示回数",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {formatNumber(row.impressions)}
@@ -493,7 +547,7 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Clicks",
+      header: "クリック",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {formatNumber(row.clicks)}
@@ -503,7 +557,7 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Spend",
+      header: "利用金額",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {formatNumber(microsToMajor(row.spendMicros), 2)}
@@ -513,7 +567,7 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Conversions",
+      header: "成果",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {formatNumber(row.conversions)}
@@ -523,19 +577,19 @@ export default async function ReportsDailyPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Source",
-      cell: (row) => <InlineCode>{row.source}</InlineCode>,
+      header: "取得元",
+      cell: (row) => sourceLabel(row.source),
     },
   ];
 
   const latestSummaryItems: KeyValueEntry[] = latestSucceeded
     ? [
         {
-          label: "Account",
+          label: "広告アカウント",
           value: <InlineCode>{latestSucceeded.summary.accountKey}</InlineCode>,
         },
         {
-          label: "Metric date",
+          label: "対象日",
           value: (
             <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
               {latestSucceeded.summary.metricDate || "—"}
@@ -546,11 +600,11 @@ export default async function ReportsDailyPage() {
           ),
         },
         {
-          label: "Timezone",
+          label: "タイムゾーン",
           value: <InlineCode>{latestSucceeded.summary.metricTimeZone}</InlineCode>,
         },
         {
-          label: "Currency",
+          label: "通貨",
           value: latestSucceeded.summary.currency ? (
             <InlineCode>{latestSucceeded.summary.currency}</InlineCode>
           ) : (
@@ -558,27 +612,27 @@ export default async function ReportsDailyPage() {
           ),
         },
         {
-          label: "Insights source",
-          value: <InlineCode>{latestSucceeded.summary.insightsSource}</InlineCode>,
+          label: "取得元",
+          value: sourceLabel(latestSucceeded.summary.insightsSource),
         },
         {
-          label: "Status",
+          label: "取得結果",
           value: (
             <StatusBadge state={reportSummaryStatusToState(latestSucceeded.summary.status)}>
-              {latestSucceeded.summary.status}
+              {reportStatusLabel(latestSucceeded.summary.status)}
             </StatusBadge>
           ),
         },
         {
-          label: "Mode",
+          label: "実行モード",
           value: (
             <StatusBadge state={modeToState(latestSucceeded.summary.mode)}>
-              {latestSucceeded.summary.mode}
+              {modeLabel(latestSucceeded.summary.mode)}
             </StatusBadge>
           ),
         },
         {
-          label: "Snapshot IDs",
+          label: "保存データ",
           value:
             latestSucceeded.summary.snapshotIds.length === 0 ? (
               <span>—</span>
@@ -591,7 +645,7 @@ export default async function ReportsDailyPage() {
             ),
         },
         {
-          label: "AI run",
+          label: "AI実行ID",
           value: latestSucceeded.summary.aiRunId ? (
             <InlineCode>{latestSucceeded.summary.aiRunId}</InlineCode>
           ) : (
@@ -609,40 +663,37 @@ export default async function ReportsDailyPage() {
   const latestSummaryStatusLabel = !dbReady
     ? "warn"
     : latestSucceeded
-      ? latestSucceeded.summary.status
-      : "no runs yet";
+      ? reportStatusLabel(latestSucceeded.summary.status)
+      : "未実行";
 
   return (
     <>
       <PageHeader
-        title="Daily Reports"
+        title="日次レポート"
         subtitle={
           <>
-            <InlineCode>daily_report</InlineCode> ワークフローの実行結果と{" "}
-            <InlineCode>performance_snapshots</InlineCode> 由来の analytics。
-            AI は Meta を直接変更せず、ここに表示される KPI と AI コメントは{" "}
-            <InlineCode>ai_runs</InlineCode> に永続化された出力のみ。
+            広告成果のKPIとAIコメントを確認します。この画面からMetaの広告設定は変更しません。
           </>
         }
       />
 
       <div className="page-body page-body--single">
         <Panel
-          title="Latest daily_report"
-          subtitle="直近の daily_report 実行から取得した account 集計 KPI と AI コメント"
+          title="最新レポート"
+          subtitle="直近に取得した広告アカウント全体のKPIとAIコメント"
           status={
             <StatusDot state={latestSummaryStatus}>{latestSummaryStatusLabel}</StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="daily_report 出力を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="日次レポートを読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !latestSucceeded ? (
             <EmptyState
-              title="daily_report はまだ実行されていません"
-              description="/cron から daily_report スケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに spend / impressions / clicks / CTR / CPC / CV / CPA / frequency と前期比 Δ% および AI コメントが表示されます。"
+              title="日次レポートはまだ実行されていません"
+              description="自動実行画面から日次レポートを有効化するか、ホームのチャットから依頼すると、ここに成果とAIコメントが表示されます。"
             />
           ) : (
             <div style={{ display: "grid", gap: "1.25rem" }}>
@@ -678,7 +729,7 @@ export default async function ReportsDailyPage() {
                       marginBottom: "0.25rem",
                     }}
                   >
-                    AI commentary
+                    AIコメント
                   </div>
                   <p style={{ margin: 0 }}>{latestSucceeded.summary.aiCommentary}</p>
                 </div>
@@ -696,7 +747,7 @@ export default async function ReportsDailyPage() {
                       marginBottom: "0.25rem",
                     }}
                   >
-                    Top improvements
+                    改善候補
                   </div>
                   <ol style={{ margin: 0, paddingLeft: "1.25rem" }}>
                     {latestSucceeded.summary.topImprovements.map((imp, idx) => (
@@ -734,22 +785,22 @@ export default async function ReportsDailyPage() {
         </Panel>
 
         <Panel
-          title="Recent daily_report runs"
+          title="実行履歴"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `cron_runs (name="daily_report") · ${runsCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${runsCount} 件 (直近 25)`
           }
           status={
             <StatusDot state={!dbReady ? "warn" : runsCount === 0 ? "idle" : "ok"}>
-              {!dbReady ? "warn" : runsCount === 0 ? "idle" : `${runsCount} runs`}
+              {!dbReady ? "要確認" : runsCount === 0 ? "未実行" : `${runsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="daily_report 実行履歴を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="日次レポートの実行履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -758,8 +809,8 @@ export default async function ReportsDailyPage() {
               columns={runColumns}
               empty={
                 <EmptyState
-                  title="daily_report はまだ実行されていません"
-                  description="/cron からスケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに各実行の status / metric date / snapshot 件数 / 所要時間が記録されます。"
+                  title="日次レポートはまだ実行されていません"
+                  description="自動実行を有効化すると、各回の状態・対象日・所要時間がここに記録されます。"
                 />
               }
             />
@@ -767,22 +818,22 @@ export default async function ReportsDailyPage() {
         </Panel>
 
         <Panel
-          title="Performance snapshots"
+          title="保存された成果データ"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `performance_snapshots · 直近 ${snapshotsCount} 件`
+              ? "保存先を確認してください"
+              : `直近 ${snapshotsCount} 件`
           }
           status={
             <StatusDot state={!dbReady ? "warn" : snapshotsCount === 0 ? "idle" : "ok"}>
-              {!dbReady ? "warn" : snapshotsCount === 0 ? "idle" : `${snapshotsCount} snapshots`}
+              {!dbReady ? "要確認" : snapshotsCount === 0 ? "未保存" : `${snapshotsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="performance_snapshots を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="成果データを読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -791,8 +842,8 @@ export default async function ReportsDailyPage() {
               columns={snapshotColumns}
               empty={
                 <EmptyState
-                  title="performance_snapshots はまだありません"
-                  description="daily_report が実行されると、account / campaign / adset / ad の 4 階層 snapshot がここに永続化されます (raw retention 90d / aggregated retention 1y)。"
+                  title="保存された成果データはまだありません"
+                  description="日次レポートが実行されると、広告アカウント、キャンペーン、広告セット、広告ごとの成果がここに保存されます。"
                 />
               }
             />

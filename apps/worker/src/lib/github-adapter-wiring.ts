@@ -118,6 +118,9 @@ export async function resolveGithubAdapter(
   const env = opts.env ?? process.env;
   const tokenStore = createPrismaOAuthTokenStore(opts.prisma);
   const oauthClient = await loadGithubOAuthClient(env);
+  const storedTokenAvailable = Boolean(
+    await tokenStore.loadOAuthToken("github").catch(() => null)
+  );
   let crypto: ReturnType<typeof getCryptoBoundary> | undefined;
   try {
     crypto = getCryptoBoundary(env);
@@ -128,6 +131,7 @@ export async function resolveGithubAdapter(
     env,
     tokenStore,
     ...(oauthClient !== null ? { oauthClient } : {}),
+    storedTokenAvailable,
     ...(crypto !== undefined ? { crypto } : {}),
   });
 }

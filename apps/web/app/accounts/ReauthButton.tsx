@@ -41,13 +41,13 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
           variant: res.status === 401 ? "warn" : "error",
           message:
             body.error ??
-            `再認証に失敗しました (HTTP ${res.status})。Connect Meta から OAuth をやり直してください。`,
+            `再認証に失敗しました (HTTP ${res.status})。Meta接続をやり直してください。`,
           reauthRequired: res.status === 401,
         });
       } else {
         setFeedback({
           variant: "success",
-          message: `Meta long-lived token を更新しました。expiresAt = ${
+          message: `Meta接続を更新しました。期限 = ${
             body.expiresAt ?? "(未取得)"
           }`,
         });
@@ -64,10 +64,10 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
     return (
       <div className="banner" data-state={expired ? "error" : expiringSoon ? "warn" : "ok"}>
         <span className="banner__title">
-          {expired ? "Meta token の再入力が必要です" : "Manual token"}
+          {expired ? "Meta 接続の再入力が必要です" : "手動接続"}
         </span>
         <span>
-          Access Token 方式では OAuth refresh は使いません。更新する場合は CLI で{" "}
+          手動接続方式では画面から更新できません。更新する場合は{" "}
           <code className="inline-code">addroid connect meta</code> を再実行してください。
         </span>
       </div>
@@ -76,10 +76,10 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
 
   const variant = expired || feedback?.variant === "error" ? "primary" : "default";
   const label = expired
-    ? "Meta トークンが期限切れ — 再認証する"
+    ? "Meta 接続が期限切れ — 再認証する"
     : expiringSoon
-      ? "Meta トークンの有効期限が近い — 再認証する"
-      : "Long-lived token を再認証する";
+      ? "Meta 接続の有効期限が近い — 再認証する"
+      : "Meta 接続を再認証する";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
@@ -94,7 +94,7 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
         </button>
         {feedback?.reauthRequired ? (
           <a className="btn btn--primary" href="/api/oauth/meta/begin">
-            Connect Meta (full reauth)
+            Meta と再接続
           </a>
         ) : null}
       </div>

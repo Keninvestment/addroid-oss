@@ -19,7 +19,6 @@ import { DataTable } from "../../components/ui/DataTable";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot } from "../../components/ui/StatusDot";
-import { InlineCode } from "../../components/ui/CodeBlock";
 
 export const dynamic = "force-dynamic";
 
@@ -46,11 +45,11 @@ interface MergedPrRow {
 }
 
 function approvalStateLabel(decision: string | null): string {
-  if (decision === "approved") return "approved";
-  if (decision === "auto_approved") return "auto_approved";
-  if (decision === "auto_blocked") return "auto_blocked";
-  if (decision === "rejected") return "rejected";
-  return "pending";
+  if (decision === "approved") return "承認済み";
+  if (decision === "auto_approved") return "自動承認済み";
+  if (decision === "auto_blocked") return "自動ブロック";
+  if (decision === "rejected") return "却下";
+  return "確認待ち";
 }
 
 function approvalStateBadge(decision: string | null): "ok" | "warn" | "error" | "idle" {
@@ -154,15 +153,11 @@ export default async function ApprovalsPage() {
   return (
     <>
       <PageHeader
-        title="Approvals"
+        title="承認待ち"
         subtitle={
           <>
-            マージ待ちの Pull Request を Web UI から確認・マージするための承認境界。
-            マージは GitHub merge と等価で、merge 成功時に{" "}
-            <InlineCode>approval_records.decisionSource=web_merge</InlineCode>
-            {" "}と{" "}
-            <InlineCode>audit_logs.action=pr.merged_via_web</InlineCode>
-            {" "}を残し、次回 <InlineCode>github_poll</InlineCode> で Apply pipeline が起動します。
+            広告へ反映する前に、人の確認が必要な変更を確認します。
+            承認しても即時配信ではなく、安全な反映処理に進みます。
           </>
         }
       />
@@ -172,15 +167,15 @@ export default async function ApprovalsPage() {
           title="マージ待ちの PR"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `github_pull_requests (state="open") · ${openPrs.length} 件`
+              ? "保存先を確認してください"
+              : `${openPrs.length} 件`
           }
           status={<StatusDot state={headerStatus}>{headerStatusLabel}</StatusDot>}
         >
           {!dbReady ? (
             <EmptyState
               title="承認待ち PR を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -189,7 +184,7 @@ export default async function ApprovalsPage() {
               empty={
                 <EmptyState
                   title="マージ待ちの PR はありません。"
-                  description="improvement_pr ワークフローで PR が作成されると、ここに表示されます。Slack 通知の有無に関わらず Web UI からマージ可能です。"
+                  description="改善提案や入稿変更が作成されると、ここに表示されます。"
                 />
               }
               columns={[
@@ -208,13 +203,13 @@ export default async function ApprovalsPage() {
                   headerClassName: "tabular",
                 },
                 {
-                  header: "Title",
+                  header: "内容",
                   cell: (row) => (
                     <Link href={`/approvals/${row.number}`}>{row.title}</Link>
                   ),
                 },
                 {
-                  header: "State",
+                  header: "状態",
                   cell: (row) => (
                     <StatusBadge
                       state={approvalStateBadge(row.latestDecision)}
@@ -224,26 +219,26 @@ export default async function ApprovalsPage() {
                   ),
                 },
                 {
-                  header: "Base",
+                  header: "反映先",
                   cell: (row) => row.baseRef,
                   className: "mono",
                 },
                 {
-                  header: "Head SHA",
+                  header: "変更ID",
                   cell: (row) => row.headSha.slice(0, 12),
                   className: "mono",
                 },
                 {
-                  header: "Polled",
+                  header: "確認日時",
                   cell: (row) => row.polledAt.toISOString(),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
                 {
-                  header: "Action",
+                  header: "操作",
                   cell: (row) => (
                     <Link href={`/approvals/${row.number}`} className="btn btn--ghost">
-                      Preview
+                      内容を確認
                     </Link>
                   ),
                 },
@@ -253,17 +248,17 @@ export default async function ApprovalsPage() {
         </Panel>
 
         <Panel
-          title="最近マージ済みの PR"
+          title="最近承認した変更"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `github_pull_requests (state="merged") · 直近 ${recentMerges.length} 件`
+              ? "保存先を確認してください"
+              : `直近 ${recentMerges.length} 件`
           }
         >
           {!dbReady ? (
             <EmptyState
               title="マージ履歴を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -272,7 +267,7 @@ export default async function ApprovalsPage() {
               empty={
                 <EmptyState
                   title="マージ済みの PR はまだありません。"
-                  description="github_poll が merged 状態を検知すると履歴が記録されます。"
+                  description="承認した変更があると履歴に表示されます。"
                 />
               }
               columns={[
@@ -286,9 +281,9 @@ export default async function ApprovalsPage() {
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
-                { header: "Title", cell: (row) => row.title },
+                { header: "内容", cell: (row) => row.title },
                 {
-                  header: "Decision",
+                  header: "判断",
                   cell: (row) => (
                     <StatusBadge state={approvalStateBadge(row.decision)}>
                       {approvalStateLabel(row.decision)}
@@ -296,12 +291,12 @@ export default async function ApprovalsPage() {
                   ),
                 },
                 {
-                  header: "Source",
+                  header: "承認元",
                   cell: (row) => row.decisionSource ?? "—",
                   className: "mono",
                 },
                 {
-                  header: "Merged",
+                  header: "承認日時",
                   cell: (row) =>
                     row.mergedAt ? row.mergedAt.toISOString() : "—",
                   className: "tabular mono",

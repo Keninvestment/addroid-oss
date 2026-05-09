@@ -24,6 +24,7 @@ import {
 } from "./oauth.js";
 import type { OAuthTokenStore } from "./token-store.js";
 import {
+  GithubAdapterNotImplementedError,
   GithubAdapterUnauthenticatedError,
   GithubMergeFailedError,
   GithubOAuthStateMismatchError,
@@ -123,7 +124,7 @@ export interface GithubApiClient {
 }
 
 export interface OctokitGithubAdapterDeps {
-  oauthClient: OAuthClientConfig;
+  oauthClient?: OAuthClientConfig | null;
   tokenStore: OAuthTokenStore;
   crypto: CryptoEncryptDecrypt;
   /** test seam: `accessToken` を渡すと当該トークンの API client を返す。 */
@@ -145,7 +146,7 @@ class InMemoryStateStore {
 }
 
 export class OctokitGithubAdapter implements GithubAdapter {
-  private readonly oauthClient: OAuthClientConfig;
+  private readonly oauthClient: OAuthClientConfig | null;
   private readonly tokenStore: OAuthTokenStore;
   private readonly crypto: CryptoEncryptDecrypt;
   private readonly apiClientFactory: (accessToken: string) => GithubApiClient;
@@ -153,7 +154,7 @@ export class OctokitGithubAdapter implements GithubAdapter {
   private readonly stateStore: { remember(state: string): void; consume(state: string): boolean };
 
   constructor(deps: OctokitGithubAdapterDeps) {
-    this.oauthClient = deps.oauthClient;
+    this.oauthClient = deps.oauthClient ?? null;
     this.tokenStore = deps.tokenStore;
     this.crypto = deps.crypto;
     this.apiClientFactory = deps.apiClientFactory;
@@ -162,12 +163,18 @@ export class OctokitGithubAdapter implements GithubAdapter {
   }
 
   async beginOAuth(): Promise<{ authorizationUrl: string; state: string }> {
+    if (!this.oauthClient) {
+      throw new GithubAdapterNotImplementedError("beginOAuth");
+    }
     const built = buildAuthorizationUrl({ client: this.oauthClient });
     this.stateStore.remember(built.state);
     return built;
   }
 
   async completeOAuth(params: { code: string; state: string }): Promise<OAuthConnection> {
+    if (!this.oauthClient) {
+      throw new GithubAdapterNotImplementedError("completeOAuth");
+    }
     if (!this.stateStore.consume(params.state)) {
       throw new GithubOAuthStateMismatchError();
     }

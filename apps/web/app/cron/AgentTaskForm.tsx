@@ -41,15 +41,15 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
       }
       toast.push({
         variant: "success",
-        title: "Agent task を作成しました",
-        description: `${cron} で自然言語 task を実行します。`,
+        title: "自動実行を作成しました",
+        description: `${cron} の予定で実行します。`,
       });
       setPrompt("");
       setTimeout(() => window.location.reload(), 400);
     } catch (err) {
       toast.push({
         variant: "error",
-        title: "Agent task を作成できませんでした",
+        title: "自動実行を作成できませんでした",
         description: (err as Error).message,
       });
     } finally {
@@ -72,13 +72,13 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
       }
       toast.push({
         variant: "success",
-        title: action === "run" ? "Agent task を実行しました" : "Agent task を更新しました",
+        title: action === "run" ? "自動実行を開始しました" : "自動実行を更新しました",
       });
       setTimeout(() => window.location.reload(), 500);
     } catch (err) {
       toast.push({
         variant: "error",
-        title: "Agent task 操作に失敗しました",
+        title: "自動実行の操作に失敗しました",
         description: (err as Error).message,
       });
     } finally {
@@ -104,7 +104,7 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
         </div>
         <div className="toolbar__field">
           <label className="toolbar__label" htmlFor="agent-task-cron">
-            Schedule
+            実行タイミング
           </label>
           <input
             id="agent-task-cron"
@@ -126,9 +126,9 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
       <div className="agent-task__list">
         {tasks.length === 0 ? (
           <div className="empty-state">
-            <h3 className="empty-state__title">自然言語 Agent task はまだありません。</h3>
+            <h3 className="empty-state__title">文章で追加した自動実行はまだありません。</h3>
             <p className="empty-state__body">
-              ここで保存した自然文は、実行時に Dashboard chat と同じ LLM agent runtime で解釈されます。
+              やりたいことを文章で保存すると、実行時に必要な安全確認を行いながら処理します。
             </p>
           </div>
         ) : (
@@ -139,9 +139,9 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
                 <div className="agent-task__prompt">{task.prompt}</div>
                 <div className="agent-task__meta">
                   <span className="mono">{task.cron}</span>
-                  <span>{task.enabled ? "enabled" : "disabled"}</span>
-                  <span>next: {task.nextRunAt ?? "—"}</span>
-                  <span>last: {task.lastState ?? "—"}</span>
+                  <span>{task.enabled ? "有効" : "停止中"}</span>
+                  <span>次回: {task.nextRunAt ?? "—"}</span>
+                  <span>前回: {task.lastState ?? "—"}</span>
                 </div>
               </div>
               <div className="agent-task__actions">

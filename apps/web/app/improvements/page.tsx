@@ -473,7 +473,7 @@ export default async function ImprovementsPage() {
       ),
     },
     {
-      header: "Accounts",
+      header: "広告アカウント",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -644,7 +644,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Dry-run",
+      header: "入稿前チェック",
       cell: ({ parsed }) => {
         const pv = parsed.planValidation;
         if (!pv) return <span>—</span>;
@@ -690,7 +690,7 @@ export default async function ImprovementsPage() {
       cell: (row) => <InlineCode>{row.agent}</InlineCode>,
     },
     {
-      header: "Provider / model",
+      header: "AIモデル",
       cell: (row) => (
         <InlineCode>
           {row.provider}/{row.model}
@@ -911,7 +911,7 @@ export default async function ImprovementsPage() {
           ),
         },
         {
-          label: "Dry-run validation",
+          label: "入稿前チェック",
           value: latestAudit.parsed.planValidation ? (
             <span style={{ display: "grid", gap: "0.125rem" }}>
               {latestAudit.parsed.planValidation.available ? (
@@ -1011,18 +1011,11 @@ export default async function ImprovementsPage() {
   return (
     <>
       <PageHeader
-        title="Improvements"
+        title="改善提案"
         subtitle={
           <>
-            <InlineCode>improvement_pr</InlineCode> ワークフローの実行状態と監査
-            記録。AI は Meta を直接変更せず、改善は必ず GitHub PR として提示
-            される。dangerous categories
-            (<InlineCode>budget_increase</InlineCode> /{" "}
-            <InlineCode>new_campaign</InlineCode> /{" "}
-            <InlineCode>targeting_change</InlineCode> /{" "}
-            <InlineCode>monthly_budget_change</InlineCode> /{" "}
-            <InlineCode>automation_rule_change</InlineCode>) は AI 単独で
-            自動承認されず、approval-required で人間の merge を待つ。
+            広告の改善案と、その提案が承認待ちになっているかを確認します。
+            AI は Meta を直接変更せず、危険な変更は必ず人の承認を待ちます。
           </>
         }
       />
@@ -1042,27 +1035,23 @@ export default async function ImprovementsPage() {
           data-testid="improvement-pr-approval-boundary"
         >
           <div style={{ fontWeight: 600 }}>
-            承認境界 — AI は GitHub PR を経由してのみ改善を提案する
+            安全ルール: AI は提案まで。反映には人の承認が必要です
           </div>
           <div style={{ fontSize: "0.8125rem" }}>
-            <InlineCode>improvement_pr</InlineCode> ワークフローは ops repo に
-            YAML diff を含む PR を立てるだけで、Meta API には書き込まない。
-            <InlineCode>auto_apply</InlineCode> モードでも、PR が merge され、
-            さらに Apply (PAUSED) → Activate の人間確認を経由したものだけが
-            広告配信に反映される。dangerous category を含む変更は{" "}
-            <InlineCode>approval_required</InlineCode> で必ず人間の merge を
-            待つ (本ページからは PR 承認 / Meta 反映を行わない)。
+            改善案は承認待ちの変更として作成されます。予算増額、新規キャンペーン、
+            ターゲティング変更など影響が大きいものは自動承認されません。
+            このページは確認専用で、Meta へ直接反映しません。
           </div>
         </div>
 
         <Panel
-          title="Schedule"
+          title="自動実行の状態"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
+              ? "保存先を確認してください"
               : scheduleRow
-                ? `cron_schedules (name="improvement_pr")`
-                : "improvement_pr スケジュール未登録"
+                ? "改善提案の定期実行"
+                : "改善提案の自動実行は未登録"
           }
           status={
             <StatusDot
@@ -1088,13 +1077,13 @@ export default async function ImprovementsPage() {
         >
           {!dbReady ? (
             <EmptyState
-              title="cron_schedules を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="自動実行の状態を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !scheduleRow ? (
             <EmptyState
-              title="improvement_pr スケジュールはまだ登録されていません"
-              description="addroid start を実行すると、improvement_pr を含む schedule preset が登録されます。"
+              title="改善提案の自動実行はまだ登録されていません"
+              description="AdDroid を開始すると標準の自動実行が登録されます。"
             />
           ) : (
             <KeyValueList items={scheduleItems} />
@@ -1102,21 +1091,21 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="Latest improvement_pr audit"
-          subtitle="直近 audit_logs エントリから取得した PR 提案の AI rationale / risk / dry-run / budget impact"
+          title="最新の改善提案"
+          subtitle="最新の提案内容、リスク、予算影響、承認待ち状況"
           status={
             <StatusDot state={latestAuditState}>{latestAuditLabel}</StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="audit_logs を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="改善提案の履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : !latestAudit ? (
             <EmptyState
-              title="improvement_pr はまだ実行されていません"
-              description="/cron から improvement_pr スケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに最新ランの AI rationale / risk classification / dangerous categories / budget impact / dry-run validation / PR 番号が表示されます。"
+              title="改善提案はまだ実行されていません"
+              description="自動実行画面から改善提案を有効化すると、最新の提案内容と承認待ち状況がここに表示されます。"
             />
           ) : (
             <div style={{ display: "grid", gap: "1rem" }}>
@@ -1133,7 +1122,7 @@ export default async function ImprovementsPage() {
                       marginBottom: "0.25rem",
                     }}
                   >
-                    Audit summary
+                    提案サマリ
                   </div>
                   <p style={{ margin: 0 }}>{latestAudit.parsed.summary}</p>
                 </div>
@@ -1143,11 +1132,11 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="Recent improvement_pr audit trail"
+          title="最近の改善提案"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `audit_logs (action LIKE "improvement_pr.%") · ${auditCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${auditCount} 件 (直近 25)`
           }
           status={
             <StatusDot
@@ -1163,8 +1152,8 @@ export default async function ImprovementsPage() {
         >
           {!dbReady ? (
             <EmptyState
-              title="audit_logs を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="改善提案の履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -1173,8 +1162,8 @@ export default async function ImprovementsPage() {
               columns={auditColumns}
               empty={
                 <EmptyState
-                  title="improvement_pr audit はまだありません"
-                  description="improvement_pr が実行されると、各 ad_account について improvement_pr.opened / improvement_pr.skipped / improvement_pr.failed の audit_log が 1 行ずつ書かれ、ここに risk classification / decision / proposals / budget impact / dry-run / PR 番号が表示されます。"
+                  title="改善提案の履歴はまだありません"
+                  description="改善提案が実行されると、広告アカウントごとの結果、リスク、判断、予算影響、承認待ち番号が表示されます。"
                 />
               }
             />
@@ -1182,28 +1171,28 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="Recent improvement_pr schedule runs"
+          title="実行履歴"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `cron_runs (name="improvement_pr") · ${runsCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${runsCount} 件 (直近 25)`
           }
           status={
             <StatusDot
               state={!dbReady ? "warn" : runsCount === 0 ? "idle" : "ok"}
             >
               {!dbReady
-                ? "warn"
+                ? "要確認"
                 : runsCount === 0
-                  ? "idle"
-                  : `${runsCount} runs`}
+                  ? "未実行"
+                  : `${runsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="improvement_pr 実行履歴を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="改善提案の実行履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -1212,8 +1201,8 @@ export default async function ImprovementsPage() {
               columns={runColumns}
               empty={
                 <EmptyState
-                  title="improvement_pr はまだ実行されていません"
-                  description="/cron からスケジュールを有効化するか、CLI から ad-hoc 実行すると、ここに各 cron tick の集計 (accountsProcessed / succeeded / skipped_no_proposal / auto_blocked / ai_failed / pr_failed) が記録されます。"
+                  title="改善提案はまだ実行されていません"
+                  description="自動実行を有効化すると、各回の処理件数と結果がここに記録されます。"
                 />
               }
             />
@@ -1221,28 +1210,28 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="Pipeline AI runs"
+          title="AI 判断履歴"
           subtitle={
             !dbReady
-              ? "Prisma スキーマ未反映"
-              : `ai_runs (workflow="improvement_pr") · ${aiRunsCount} 件 (直近 25)`
+              ? "保存先を確認してください"
+              : `${aiRunsCount} 件 (直近 25)`
           }
           status={
             <StatusDot
               state={!dbReady ? "warn" : aiRunsCount === 0 ? "idle" : "ok"}
             >
               {!dbReady
-                ? "warn"
+                ? "要確認"
                 : aiRunsCount === 0
-                  ? "idle"
-                  : `${aiRunsCount} runs`}
+                  ? "未実行"
+                  : `${aiRunsCount} 件`}
             </StatusDot>
           }
         >
           {!dbReady ? (
             <EmptyState
-              title="improvement_pr ai_runs を読み出せません"
-              description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
+              title="AI 判断履歴を読み出せません"
+              description="接続と健康状態を確認してください。"
             />
           ) : (
             <DataTable
@@ -1251,8 +1240,8 @@ export default async function ImprovementsPage() {
               columns={aiRunColumns}
               empty={
                 <EmptyState
-                  title="improvement_pr ai_run はまだ実行されていません"
-                  description="improvement_pr が実行されると、analyst → media_buyer → creative_qa → strategy → copy → image_prompt → gitops → audit の 8 段の provider / model / decision / confidence / tokens / cost がここに保存されます。"
+                  title="AI 判断履歴はまだありません"
+                  description="改善提案が実行されると、判断結果とコストの概要がここに保存されます。"
                 />
               }
             />

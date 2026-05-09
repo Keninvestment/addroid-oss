@@ -61,17 +61,17 @@ export function MergePrButton({
         setInlineError(errMessage);
         push({
           variant: "error",
-          title: `PR #${prNumber} のマージに失敗しました`,
+          title: `PR #${prNumber} の承認に失敗しました`,
           description: errMessage,
         });
         return;
       }
       push({
         variant: "success",
-        title: `PR #${prNumber} を Web UI からマージしました`,
+        title: `PR #${prNumber} を承認しました`,
         description: body.sha
-          ? `merge sha=${body.sha.slice(0, 12)} · 次回 github_poll で Apply pipeline が起動します`
-          : "approval_records.decisionSource=web_merge を記録しました",
+          ? `変更ID=${body.sha.slice(0, 12)} · 次の確認で反映処理に進みます`
+          : "承認を記録しました",
       });
       setOpen(false);
       router.refresh();
@@ -80,7 +80,7 @@ export function MergePrButton({
       setInlineError(msg);
       push({
         variant: "error",
-        title: `PR #${prNumber} のマージに失敗しました`,
+        title: `PR #${prNumber} の承認に失敗しました`,
         description: msg,
       });
     } finally {
@@ -107,22 +107,18 @@ export function MergePrButton({
           }}
           disabled={busy}
         >
-          PR をマージする (Web UI)
+          承認して反映待ちにする
         </button>
         <span style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)" }}>
-          merge は GitHub merge と等価です。merge 成功時に{" "}
-          <InlineCode>approval_records.decisionSource=web_merge</InlineCode>{" "}
-          を記録し、次回 <InlineCode>github_poll</InlineCode> で Apply pipeline が起動します。
+          承認後、次の確認で安全な反映処理に進みます。即時配信開始はしません。
         </span>
       </div>
       {!branchProtectionApplied ? (
         <div className="banner" data-state="warn" style={{ marginBottom: 0 }}>
-          <span className="banner__title">branch protection 未適用</span>
+          <span className="banner__title">保護設定が未適用です</span>
           <span>
-            ops repo に branch protection が設定されていないため、Apply pipeline は
-            次回 <InlineCode>github_poll</InlineCode> で
-            {" "}<InlineCode>unprotected_branch</InlineCode>{" "}
-            として拒否されます。/setup から branch protection を確認してください。
+            GitHub の保護設定が未完了のため、承認後の反映処理は拒否されます。
+            接続と健康状態を確認してください。
           </span>
         </div>
       ) : null}
@@ -134,41 +130,36 @@ export function MergePrButton({
         }}
         onConfirm={handleConfirm}
         busy={busy}
-        confirmLabel="PR をマージする (Web UI)"
+        confirmLabel="承認して反映待ちにする"
         confirmVariant="caution"
-        title="PR をマージする (Web UI)"
+        title="この変更を承認しますか？"
         description={
           <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
             <div>
-              GitHub merge API を呼びます。merge は不可逆で、成功時に Apply pipeline
-              が次回 <InlineCode>github_poll</InlineCode> で起動します (branch protection
-              が適用されている場合)。
+              承認後、この変更は次の確認で反映処理に進みます。反映は停止状態で行われ、
+              配信開始には別途確認が必要です。
             </div>
             <ul style={{ margin: 0, paddingLeft: "1.25rem", lineHeight: 1.7 }}>
               <li>
-                Repo: <InlineCode>{repoFullName}</InlineCode>
+                リポジトリ: <InlineCode>{repoFullName}</InlineCode>
               </li>
               <li>
                 PR: <InlineCode>#{prNumber}</InlineCode> {prTitle}
               </li>
               <li>
-                Expected HEAD: <InlineCode>{expectedHeadSha.slice(0, 12)}</InlineCode>
+                変更ID: <InlineCode>{expectedHeadSha.slice(0, 12)}</InlineCode>
               </li>
               <li>
-                Branch protection:{" "}
+                保護設定:{" "}
                 <InlineCode>
-                  {branchProtectionApplied ? "applied" : "not applied"}
+                  {branchProtectionApplied ? "適用済み" : "未適用"}
                 </InlineCode>
               </li>
               <li>
-                Apply pipeline 起動:{" "}
+                反映処理:{" "}
                 <InlineCode>
-                  {branchProtectionApplied ? "yes (次回 github_poll)" : "no (拒否される)"}
+                  {branchProtectionApplied ? "次の確認で開始" : "拒否されます"}
                 </InlineCode>
-              </li>
-              <li>
-                記録される actor: <InlineCode>user:web-ui</InlineCode> ·{" "}
-                decisionSource: <InlineCode>web_merge</InlineCode>
               </li>
               {htmlUrl ? (
                 <li>

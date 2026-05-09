@@ -97,19 +97,19 @@ export default async function PlansPage() {
   return (
     <>
       <PageHeader
-        title="Plans"
-        subtitle="Ads YAML から Meta apply 内容を dry-run で生成し、変更件数とリスクを確認します。CLI / CI / Web UI の全経路が同じ runner を使います。"
+        title="入稿前チェック"
+        subtitle="広告変更を反映する前に、変更件数・注意点・リスクを確認します。この画面だけでは Meta へ反映しません。"
       />
 
       <div className="page-body page-body--single">
         <Panel
-          title="Ops repo binding"
-          subtitle="サーバー側 ENV から解決される checkout パス。Web UI からはこれらの値しか読み取りません。"
+          title="準備状態"
+          subtitle="入稿前チェックに必要な変更ファイルの場所"
         >
           <KeyValueList
             items={[
               {
-                label: "ADDROID_OPS_REPO_LOCAL_DIR",
+                label: "変更ファイル",
                 value: opsRepoLocalDir ? (
                   <InlineCode>{opsRepoLocalDir}</InlineCode>
                 ) : (
@@ -117,7 +117,7 @@ export default async function PlansPage() {
                 ),
               },
               {
-                label: "ADDROID_OPS_REPO_BASE_DIR",
+                label: "比較元",
                 value: opsRepoBaseDir ? (
                   <InlineCode>{opsRepoBaseDir}</InlineCode>
                 ) : (
@@ -129,23 +129,23 @@ export default async function PlansPage() {
         </Panel>
 
         <Panel
-          title="Ad-hoc Dry-run"
-          subtitle="サーバー側で /api/plan が呼ばれます。結果は下の History にも記録されます。"
+          title="今すぐチェック"
+          subtitle="対象の広告アカウントを選び、反映前の確認だけを実行します。"
         >
           {!dbReady ? (
             <EmptyState
               title="DB に接続できません。"
-              description="npm run db:push で prisma スキーマを反映してください。"
+              description="接続と健康状態を確認してください。"
             />
           ) : !opsRepoLocalDir ? (
             <EmptyState
-              title="ops repo の checkout パスが未設定です。"
-              description="ADDROID_OPS_REPO_LOCAL_DIR に ops repo の絶対パスを設定して再起動してください。"
+              title="変更ファイルの場所が未設定です。"
+              description="GitHub 連携または接続と健康状態を確認してください。"
             />
           ) : accounts.length === 0 ? (
             <EmptyState
-              title="登録済みの Ad Account がありません。"
-              description="/accounts から登録すると、ここで対象を選択できます。"
+              title="登録済みの広告アカウントがありません。"
+              description="広告アカウント画面から登録すると、ここで対象を選択できます。"
             />
           ) : (
             <AdhocPlanForm
@@ -156,18 +156,18 @@ export default async function PlansPage() {
         </Panel>
 
         <Panel
-          title="Plan History"
-          subtitle="execution_logs.kind = 'plan' の直近 50 件。行展開で PlanPreview を表示します。"
+          title="チェック履歴"
+          subtitle="直近 50 件。行を開くと変更内容を確認できます。"
         >
           {!dbReady ? (
             <EmptyState
               title="DB に接続できません。"
-              description="npm run db:push で prisma スキーマを反映してください。"
+              description="接続と健康状態を確認してください。"
             />
           ) : rows.length === 0 ? (
             <EmptyState
-              title="Plan 履歴はまだありません。"
-              description="CLI (addroid submit --save), CI ワークフロー, または上の Ad-hoc Dry-run で実行すると記録されます。"
+              title="チェック履歴はまだありません。"
+              description="上の「今すぐチェック」を実行すると記録されます。"
             />
           ) : (
             <table className="data-table plan-history">
@@ -175,11 +175,11 @@ export default async function PlansPage() {
                 <tr>
                   <th scope="col" className="tabular">Time</th>
                   <th scope="col">Account</th>
-                  <th scope="col">Source</th>
-                  <th scope="col" className="tabular">Changes</th>
-                  <th scope="col">Risk</th>
-                  <th scope="col" className="tabular">Duration</th>
-                  <th scope="col">Detail</th>
+                  <th scope="col">実行元</th>
+                  <th scope="col" className="tabular">変更数</th>
+                  <th scope="col">リスク</th>
+                  <th scope="col" className="tabular">所要時間</th>
+                  <th scope="col">詳細</th>
                 </tr>
               </thead>
               <tbody>
