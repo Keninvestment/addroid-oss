@@ -1,11 +1,14 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { BusyLabel, LoadingDots } from "../components/ui/AsyncFeedback";
 import { useToast } from "../components/ui/Toast";
 
 const EXAMPLES = [
   "日次レポートを取得して",
   "入稿前チェックを実行して",
+  "Meta広告アカウントを同期して",
+  "バックアップを作成して",
   "広告アカウントの状態を確認して",
   "毎朝9時に日次レポートを送る設定にして",
 ] as const;
@@ -102,41 +105,54 @@ export function DashboardChatPanel() {
       <div className="agent-chat__head">
         <div>
           <h2>やりたいことを入力</h2>
-          <p>レポート取得、入稿前チェック、自動実行の設定を文章で依頼できます。</p>
+          <p>レポート取得、入稿前チェック、アカウント同期、バックアップ、自動実行の設定を文章で依頼できます。</p>
         </div>
         <span className="agent-chat__badge">安全確認つき</span>
       </div>
-      <div className="agent-chat__messages">
+      <div className="agent-chat__messages" aria-busy={busy}>
         {messages.length === 0 ? (
           <div className="agent-chat__empty">
-            「日次レポートを取得」「入稿前チェック」「予算チェックを有効にして」などを入力できます。
+            「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「予算チェックを有効にして」などを入力できます。
           </div>
         ) : (
-          messages.map((message) => (
-            <div
-              key={message.id}
-              className="agent-chat__message"
-              data-role={message.role}
-            >
-              <div className="agent-chat__bubble">
-                <div>{message.text}</div>
-                {message.executions?.length ? (
-                  <div className="agent-chat__executions">
-                    {message.executions.map((execution, i) => (
-                      <div
-                        key={`${message.id}-${i}`}
-                        className="agent-chat__execution"
-                        data-status={execution.status}
-                      >
-                        <span>{execution.display}</span>
-                        <span>{execution.message}</span>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+          <>
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className="agent-chat__message"
+                data-role={message.role}
+              >
+                <div className="agent-chat__bubble">
+                  <div>{message.text}</div>
+                  {message.executions?.length ? (
+                    <div className="agent-chat__executions">
+                      {message.executions.map((execution, i) => (
+                        <div
+                          key={`${message.id}-${i}`}
+                          className="agent-chat__execution"
+                          data-status={execution.status}
+                        >
+                          <span>{execution.display}</span>
+                          <span>{execution.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ))
+            ))}
+            {busy ? (
+              <div
+                className="agent-chat__message agent-chat__message--typing"
+                data-role="assistant"
+                aria-live="polite"
+              >
+                <div className="agent-chat__bubble agent-chat__typing">
+                  <LoadingDots label="応答を作成中" />
+                </div>
+              </div>
+            ) : null}
+          </>
         )}
       </div>
       <form className="agent-chat__form" onSubmit={submit}>
@@ -169,8 +185,13 @@ export function DashboardChatPanel() {
             disabled={busy}
           />
         </div>
-        <button type="submit" className="btn btn--primary" disabled={busy || !input.trim()}>
-          {busy ? "実行中…" : "送信"}
+        <button
+          type="submit"
+          className="btn btn--primary"
+          disabled={busy || !input.trim()}
+          aria-busy={busy}
+        >
+          {busy ? <BusyLabel>実行中</BusyLabel> : "送信"}
         </button>
       </form>
     </section>

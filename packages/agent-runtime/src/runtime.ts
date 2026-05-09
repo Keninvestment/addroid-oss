@@ -38,6 +38,13 @@ export interface AgentResponse {
   toolResults: AgentToolResult[];
 }
 
+export interface AgentLoopExecution {
+  display: string;
+  status: string;
+  message: string;
+  data?: unknown;
+}
+
 export type AgentToolResult =
   | {
       status: "ready";
@@ -198,15 +205,37 @@ export function buildAgentSystemPrompt(
     renderToolManifestForPrompt(surface),
     "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
     "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD for explicit calendar dates and metricDateRelative for relative dates. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
-    "When the user asks to do something periodically, create a scheduled natural-language Agent task unless they explicitly mention changing an existing preset schedule. Do not merely print a command.",
+    "You are allowed to inspect read-only data freely. When the user wants a one-time production mutation such as pause, activate, budget change, targeting change, create, update, or delete, never mutate Meta directly; use propose_ops_change to create a GitOps PR for human review.",
+    surface === "scheduled-agent"
+      ? "When the saved task asks for conditional or recurring ad operations that may mutate Meta, prefer propose_automation_rule so the policy is reviewed in workflows/automation-rules.yaml before runtime execution. For read-only/reporting tasks, execute the appropriate read-only tools now."
+      : "When the user asks for conditional or recurring ad operations that may mutate Meta, prefer propose_automation_rule so the policy is reviewed in workflows/automation-rules.yaml before runtime execution. Use create_scheduled_agent_task for recurring read-only/reporting or flexible non-mutating tasks.",
     "Meta Ads CLI capability note: supported read path is `meta --output json ads ...`. `insights get` supports --date-preset/--since/--until/--time-increment/--breakdown/--fields/--campaign-id/--adset-id/--ad-id/--sort/--limit. For hierarchy detail, list campaign/adset/ad IDs first, then query insights by the ID filter. Product feed/item/set list requires catalogId. Catalog and dataset list can use businessId.",
     "For performance analysis, request the fields needed for the user's question. For frequency ask for frequency. For CPA/CV/conversion checks request spend plus actions and, when useful, cost_per_action_type/action_values. Do not rely on display text for automation decisions; tool executors keep raw structured rows.",
-    "Meta Ads CLI also has mutation commands such as campaign/adset/ad/creative/catalog/product create/update/delete and dataset connect/disconnect/assign-user, but chat must not run those directly. Use check_submission for dry-run review and start_delivery only for the audited activation path.",
+    "Meta Ads CLI also has mutation commands such as campaign/adset/ad/creative/catalog/product create/update/delete and dataset connect/disconnect/assign-user, but chat must not run those directly. Use check_submission for dry-run review and propose_ops_change for production changes.",
     "Never request arbitrary shell, restore, destructive git, direct DB writes, direct Meta mutation outside audited paths, or secret display.",
     "Actual ad submission must go through ops repo validation, dry-run plan, GitHub PR review/merge, and worker apply.",
     "For recurring scheduled tasks, keep flexibility: interpret the saved natural-language task at runtime and choose tools based on current state.",
     "Agent context:",
     agentContext.content,
+  ].join("\n");
+}
+
+export function buildAgentLoopInput(
+  originalInput: string,
+  executions: readonly AgentLoopExecution[]
+): string {
+  if (executions.length === 0) return originalInput;
+  return [
+    "Original user request:",
+    originalInput,
+    "",
+    "Tool results already executed in this turn:",
+    ...executions.map((item, index) => {
+      const data = item.data === undefined ? "" : ` data=${truncateLoopJson(item.data, 1_200)}`;
+      return `${index + 1}. ${item.display}: status=${item.status}; message=${truncateLoopText(item.message, 1_200)}${data}`;
+    }),
+    "",
+    "Continue from these results. If enough information has been gathered, answer the user normally with no tools. If more work is necessary, return strict JSON with only additional tools. Do not repeat a successful tool call that appears above.",
   ].join("\n");
 }
 
@@ -256,11 +285,32 @@ function normalizeToolCall(tool: AgentToolCall): Required<AgentToolCall> {
 function sanitizeToolArgs(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
-    if (typeof value === "string") out[key] = value.trim();
-    else if (typeof value === "number" || typeof value === "boolean") out[key] = value;
-    else if (Array.isArray(value)) out[key] = value.map((v) => String(v));
+    const sanitized = sanitizeToolValue(value, 0);
+    if (sanitized !== undefined) out[key] = sanitized;
   }
   return out;
+}
+
+function sanitizeToolValue(value: unknown, depth: number): unknown {
+  if (depth > 4) return undefined;
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeToolValue(item, depth + 1))
+      .filter((item) => item !== undefined);
+  }
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (!/^[A-Za-z0-9_.-]{1,64}$/.test(k)) continue;
+      const sanitized = sanitizeToolValue(v, depth + 1);
+      if (sanitized !== undefined) out[k] = sanitized;
+    }
+    return out;
+  }
+  return undefined;
 }
 
 function safeResolveTool(tool: Required<AgentToolCall>): AgentToolResult {
@@ -338,6 +388,33 @@ function resolveTool(
       return commandTool(name, "stop", [], tool.args, tool.why);
     case "start_delivery":
       return commandTool(name, "activate", buildActivateArgs(tool.args), tool.args, tool.why);
+    case "propose_ops_change":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "create GitOps proposal PR",
+        why: tool.why,
+      };
+    case "propose_automation_rule":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "create automation rule PR",
+        why: tool.why,
+      };
+    case "propose_automation_rule_update":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "create automation rule recalibration PR",
+        why: tool.why,
+      };
     case "backup_data":
       return commandTool(name, "backup", [], tool.args, tool.why);
     case "open_web_ui":
@@ -402,7 +479,10 @@ function buildConnectArgs(args: Record<string, unknown>): string[] {
 
 function buildReportArgs(args: Record<string, unknown>): string[] {
   const kind = optionalEnum(args, "kind", ["daily", "budget", "improvement"]);
-  return kind ? [kind] : [];
+  const out = kind ? [kind] : [];
+  pushOptionalString(out, "--metric-date", args, "metricDate");
+  pushOptionalString(out, "--metric-date-relative", args, "metricDateRelative");
+  return out;
 }
 
 function buildSubmitArgs(args: Record<string, unknown>): string[] {
@@ -520,4 +600,17 @@ function kebab(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function truncateLoopText(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}...`;
+}
+
+function truncateLoopJson(value: unknown, max: number): string {
+  try {
+    return truncateLoopText(JSON.stringify(value), max);
+  } catch {
+    return "[unserializable]";
+  }
 }

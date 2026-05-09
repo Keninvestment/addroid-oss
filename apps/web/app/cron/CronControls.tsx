@@ -16,7 +16,9 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useCronRunMonitor } from "../../components/useCronRunMonitor";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { BusyLabel } from "../../components/ui/AsyncFeedback";
 import { useToast } from "../../components/ui/Toast";
 
 export interface CronControlsProps {
@@ -53,6 +55,21 @@ export function CronControls({
     | { kind: "run" }
   >(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
+  const runMonitor = useCronRunMonitor({
+    presetName,
+    onTerminal: (state) => {
+      router.refresh();
+      if (state.phase === "failed") {
+        const msg = state.errorMessage ?? "実行履歴を確認してください。";
+        setInlineError(msg);
+        toast.push({
+          variant: "error",
+          title: `${presetName} の手動実行が失敗しました`,
+          description: msg,
+        });
+      }
+    },
+  });
 
   const dirty = draftCron.trim() !== cron.trim();
 
@@ -214,14 +231,15 @@ export function CronControls({
       }
       toast.push({
         variant: "success",
-        title: `${presetName} を今すぐ実行します`,
+        title: `${presetName} を開始しました`,
         description: body.jobId
           ? `受付ID: ${body.jobId}`
           : "実行要求を受け付けました。",
       });
+      runMonitor.start(body.jobId ?? null);
       setBusyKind(null);
       setConfirm(null);
-      router.refresh();
+      if (!body.jobId) router.refresh();
     } catch (err) {
       const msg = (err as Error).message;
       toast.push({
@@ -296,13 +314,31 @@ export function CronControls({
               type="button"
               className="btn btn--caution btn--sm"
               onClick={openRunConfirm}
-              disabled={busyKind !== null}
+              disabled={busyKind !== null || runMonitor.isActive}
+              aria-busy={busyKind === "run" || runMonitor.isActive}
             >
-              今すぐ実行
+              {busyKind === "run" ? (
+                <BusyLabel>開始中</BusyLabel>
+              ) : runMonitor.isActive ? (
+                <BusyLabel>{runMonitor.label}</BusyLabel>
+              ) : (
+                "今すぐ実行"
+              )}
             </button>
           </>
         )}
       </div>
+      {runMonitor.state.phase !== "idle" ? (
+        <div className="cron-controls__run-status" data-state={runMonitor.state.phase}>
+          {runMonitor.isActive ? (
+            <BusyLabel>{runMonitor.label}</BusyLabel>
+          ) : runMonitor.state.phase === "success" ? (
+            "完了しました。"
+          ) : (
+            `失敗しました${runMonitor.state.errorMessage ? `: ${runMonitor.state.errorMessage}` : "。"}`
+          )}
+        </div>
+      ) : null}
       {!persistedFromDb ? (
         <div className="cron-controls__hint">
           最初の操作で自動的に登録されます。
@@ -375,6 +411,8 @@ export function CronControls({
               <dd>
                 {presetName === "improvement_pr"
                   ? "改善案がある場合は GitHub に承認待ちの変更が作成される可能性があります。"
+                  : presetName === "automation_rules"
+                    ? "事前承認済みポリシーに完全一致した自動停止などは、監査記録付きで実行される可能性があります。"
                   : presetName === "daily_report" ||
                       presetName === "budget_guard"
                     ? "Meta の広告設定は変更されません。"
@@ -402,6 +440,7 @@ function presetLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
     budget_guard: "予算チェック",
+    automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",

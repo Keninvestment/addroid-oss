@@ -219,3 +219,25 @@ test("chat は危険 tool をコード側 policy で拒否する", async () => {
   assert.match(out.stdout, /denied: restore_db/);
   assert.deepEqual(calls, []);
 });
+
+test("chat は本番配信に影響する direct activation を実行しない", async () => {
+  const calls: unknown[] = [];
+  const provider = fakeProvider(
+    JSON.stringify({
+      message: "直接の配信開始は実行しません。",
+      tools: [{ name: "start_delivery", args: { hierarchyId: "cmp_1" }, why: "配信開始" }],
+    })
+  );
+  const { code, out } = await capture(() =>
+    runChatCommand(["--once", "このキャンペーンを配信開始して"], {
+      provider,
+      runCommand: async (command, args) => {
+        calls.push({ command, args });
+        return 0;
+      },
+    })
+  );
+  assert.equal(code, 0);
+  assert.match(out.stdout, /unsupported tool: start_delivery/);
+  assert.deepEqual(calls, []);
+});

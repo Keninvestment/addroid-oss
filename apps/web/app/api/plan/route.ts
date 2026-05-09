@@ -23,6 +23,10 @@ import {
   persistPlanRun,
   runPlanForRoot,
 } from "../../../../worker/src/lib/plan-runtime";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "../../../../worker/src/lib/ops-repo-local";
 
 export const dynamic = "force-dynamic";
 
@@ -45,14 +49,25 @@ export async function POST(request: Request) {
     typeof payload.accountId === "string" ? payload.accountId.trim() : "";
 
   const env = process.env;
-  const rootDir = env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || "";
   const baseDir = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
+  const ws = await ensureWebWorkspace();
+  const checkout = await ensureOpsRepoLocalCheckout({
+    prisma: prisma as never,
+    workspaceId: ws.id,
+  }).catch(() => null);
+  const rootDir =
+    checkout?.rootDir ??
+    (await resolveOpsRepoLocalDirForWorkspace({
+      prisma: prisma as never,
+      workspaceId: ws.id,
+    })).rootDir ??
+    "";
   if (!rootDir) {
     return NextResponse.json(
       {
         ok: false,
         error:
-          "ADDROID_OPS_REPO_LOCAL_DIR が設定されていません。.env.local に ops repo の checkout 絶対パスを設定してください。",
+          "ops repo の local checkout を解決できません。GitHub 接続と ops repo bootstrap を完了してください。",
       },
       { status: 400 }
     );
@@ -70,7 +85,6 @@ export async function POST(request: Request) {
   let workspaceId: string | null = null;
   let accountFilter: string | null = null;
   try {
-    const ws = await ensureWebWorkspace();
     workspaceId = ws.id;
     if (accountId) {
       const account = await prisma.adAccount.findFirst({

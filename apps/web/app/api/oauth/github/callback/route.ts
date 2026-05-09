@@ -16,9 +16,11 @@ import {
 import { prisma } from "../../../../../lib/prisma";
 import {
   ensureWebWorkspace,
+  ensureWebOpsRepoCheckout,
   getActiveGithubAdapter,
   persistOpsRepoBootstrap,
   resolveDesiredOpsRepo,
+  resolveDefaultOpsTemplateAccount,
 } from "../../../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
@@ -53,14 +55,17 @@ export async function GET(request: Request) {
     });
     if (existing?.opsRepoId) {
       bootstrap = "skipped";
+      await ensureWebOpsRepoCheckout(ws.id);
     } else {
       const desired = await resolveDesiredOpsRepo();
+      const account = await resolveDefaultOpsTemplateAccount(ws.id);
       const { adapter } = await getActiveGithubAdapter();
       const result = await adapter.bootstrapOpsRepo({
         workspaceSlug: desired.workspaceSlug,
         workspaceDisplayName: desired.workspaceDisplayName,
-        initialAccountKey: "default",
-        initialAccountDisplayName: "Default Account",
+        initialAccountKey: account.primary.key,
+        initialAccountDisplayName: account.primary.displayName,
+        initialAccounts: account.accounts,
         desiredName: desired.desiredName,
         defaultBranch: desired.defaultBranch,
         visibility: "private",
@@ -74,6 +79,7 @@ export async function GET(request: Request) {
         filesCommitted: result.filesCommitted,
         branchProtectionApplied: result.branchProtectionApplied,
       });
+      await ensureWebOpsRepoCheckout(ws.id);
     }
   } catch (err) {
     bootstrap = "error";

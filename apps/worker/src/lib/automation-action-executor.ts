@@ -8,9 +8,12 @@ import {
   MetaCliRunner,
   MetaCliUnsupportedOperationError,
   MetaCliVersionUnverifiedError,
+  type MetaAdapter,
   type MetaCliExecutionResult,
+  type MetaCliRunnerOptions,
 } from "@addroid/meta-adapter";
 import type { AutomationLevel, AutomationPlannedAction } from "@addroid/queue";
+import { META_CLI_MIN_VERSION } from "./apply-meta-executor.js";
 
 export type AutomationCliMutationStatus =
   | "success"
@@ -38,6 +41,12 @@ export interface AutomationTargetResolver {
 export interface AutomationCliMutationExecutorOptions {
   runner: Pick<MetaCliRunner, "run">;
   resolver: AutomationTargetResolver;
+}
+
+export interface AutomationMutationExecutorSelection {
+  executor: AutomationCliMutationExecutor | null;
+  mode: "cli" | "mock" | "fail_closed";
+  reason: string;
 }
 
 export class AutomationCliMutationExecutor {
@@ -144,6 +153,83 @@ export function buildAutomationCliArgs(
   }
 
   return null;
+}
+
+export async function resolveAutomationMutationExecutor(opts: {
+  env?: NodeJS.ProcessEnv;
+  metaAdapter: MetaAdapter;
+  resolver: AutomationTargetResolver;
+  spawnImpl?: MetaCliRunnerOptions["spawnImpl"];
+  versionResolver?: MetaCliRunnerOptions["versionResolver"];
+}): Promise<AutomationMutationExecutorSelection> {
+  const env = opts.env ?? process.env;
+  const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
+  if (!binaryPath) {
+    if (env.ADDROID_META_ADS_CLI_MOCK === "1") {
+      return {
+        executor: new AutomationCliMutationExecutor({
+          runner: {
+            async run(): Promise<MetaCliExecutionResult> {
+              const now = new Date().toISOString();
+              return {
+                exitClass: "success",
+                exitCode: 0,
+                signal: null,
+                stdout: JSON.stringify({ ok: true, mock: true }),
+                stderr: "",
+                sanitizedCommand: "meta <automation-mock>",
+                sanitizedArgs: ["<automation-mock>"],
+                throttleHeaders: null,
+                durationMs: 0,
+                startedAt: now,
+                finishedAt: now,
+                timedOut: false,
+                accountKey: "mock",
+                binary: "meta",
+                recommendedAction: {
+                  kind: "none",
+                  retry: false,
+                  notify: "none",
+                  logLevel: "info",
+                  reason: "mock automation success",
+                },
+              };
+            },
+          },
+          resolver: opts.resolver,
+        }),
+        mode: "mock",
+        reason:
+          "ADDROID_META_CLI_BIN is not set; ADDROID_META_ADS_CLI_MOCK=1 selects the local-test automation mock executor",
+      };
+    }
+    return {
+      executor: null,
+      mode: "fail_closed",
+      reason:
+        "ADDROID_META_CLI_BIN is not set and ADDROID_META_ADS_CLI_MOCK is not '1'; automation mutations fail closed",
+    };
+  }
+  const runner = new MetaCliRunner({
+    binaryPath,
+    spawnImpl: opts.spawnImpl,
+    minVersion: META_CLI_MIN_VERSION,
+    requireVerifiedVersion: true,
+    loadTokenForAccount: async () => {
+      const lease = await opts.metaAdapter.loadAccessTokenPlaintext();
+      if (!lease) return null;
+      return { accessToken: lease.accessToken };
+    },
+    ...(opts.versionResolver ? { versionResolver: opts.versionResolver } : {}),
+  });
+  const verification = await runner.verifyVersion();
+  return {
+    executor: new AutomationCliMutationExecutor({ runner, resolver: opts.resolver }),
+    mode: "cli",
+    reason: verification.ok
+      ? `using meta-ads-cli at ${binaryPath} (${verification.detail})`
+      : `meta-ads-cli at ${binaryPath} failed version verification (${verification.detail}); automation will fail closed at execution`,
+  };
 }
 
 function cliSingularResource(level: AutomationLevel): "campaign" | "adset" | "ad" | null {

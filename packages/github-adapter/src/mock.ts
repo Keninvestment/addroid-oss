@@ -253,6 +253,8 @@ function countTemplateFiles(input: BootstrapOpsRepoInput): number {
   // ops-template が出力する 5 ファイルを表す。実装が変わっても adapter のテストが
   // 壊れないよう、ここでは固定値ではなく input を使ってカウントする方が望ましいが、
   // input には template ファイルが含まれないため固定 5 を採用する。
-  void input;
-  return 5;
+  const additional = (input.initialAccounts ?? []).filter(
+    (account) => account.key !== input.initialAccountKey
+  ).length;
+  return 5 + additional;
 }

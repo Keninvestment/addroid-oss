@@ -6,6 +6,8 @@ import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { PageHeader } from "../../../components/ui/PageHeader";
 import { KeyValueList } from "../../../components/ui/KeyValueList";
 import type { StatusState } from "../../../components/ui/StatusDot";
+import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
+import { ensureWebWorkspace } from "../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -34,13 +36,21 @@ export default async function CronRunsPage() {
   let executionLogs: ExecutionLogRow[] = [];
   let warning: string | null = null;
   try {
+    const workspace = await ensureWebWorkspace();
     [cronRuns, executionLogs] = await Promise.all([
       prisma.cronRun.findMany({
+        where: {
+          OR: [
+            { schedule: { is: { workspaceId: workspace.id } } },
+            { executionLogs: { some: { workspaceId: workspace.id } } },
+          ],
+        },
         orderBy: { startedAt: "desc" },
         take: 100,
         select: { id: true, startedAt: true, name: true, durationMs: true, state: true, jobId: true },
       }),
       prisma.executionLog.findMany({
+        where: { workspaceId: workspace.id },
         orderBy: { createdAt: "desc" },
         take: 100,
         select: {
@@ -73,6 +83,7 @@ export default async function CronRunsPage() {
   const latestLog = executionLogs[0] ?? null;
   const errorLogs = executionLogs.filter((row) => row.level === "error").length;
   const warnLogs = executionLogs.filter((row) => row.level === "warn").length;
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   return (
     <>
@@ -88,7 +99,7 @@ export default async function CronRunsPage() {
               {
                 label: "最新の実行",
                 value: latestRun
-                  ? `${workflowLabel(latestRun.name)} / ${statusLabel(latestRun.state)} / ${formatTimestamp(latestRun.startedAt)}`
+                  ? `${workflowLabel(latestRun.name)} / ${statusLabel(latestRun.state)} / ${formatDateTime(latestRun.startedAt, { timeZone: pageDisplayTimeZone })}`
                   : "まだありません",
               },
               {
@@ -120,7 +131,7 @@ export default async function CronRunsPage() {
             columns={[
               {
                 header: "開始日時",
-                cell: (row) => formatTimestamp(row.startedAt),
+                cell: (row) => formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
@@ -167,7 +178,7 @@ export default async function CronRunsPage() {
             columns={[
               {
                 header: "日時",
-                cell: (row) => formatTimestamp(row.createdAt),
+                cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
@@ -200,6 +211,7 @@ function workflowLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
     budget_guard: "予算チェック",
+    automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",
@@ -249,19 +261,11 @@ function shortId(id: string): string {
   return id.length > 12 ? id.slice(0, 12) : id;
 }
 
-function formatTimestamp(date: Date): string {
-  return new Intl.DateTimeFormat("ja-JP", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
 function friendlyMessage(message: string): string {
   return message
     .replaceAll("daily_report", "日次レポート")
     .replaceAll("budget_guard", "予算チェック")
+    .replaceAll("automation_rules", "自動運用ルール")
     .replaceAll("improvement_pr", "改善提案")
     .replaceAll("github_poll", "承認済み変更の確認")
     .replaceAll("retention_cleanup", "古い履歴の整理")

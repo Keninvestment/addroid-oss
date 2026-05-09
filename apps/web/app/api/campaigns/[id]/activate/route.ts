@@ -1,28 +1,18 @@
 // AdDroid OSS — POST /api/campaigns/[id]/activate.
 //
-// `/campaigns` の per-row "ACTIVE にする" ボタン (ConfirmDialog 通過後) から呼ばれる。
+// `/campaigns` の per-row "配信開始PR" ボタン (ConfirmDialog 通過後) から呼ばれる。
 //
 // 受入基準:
-//   - "Activate is separate from Apply and records who triggered it, from CLI or
-//      Web UI API, before changing PAUSED to ACTIVE."
+//   - Web UI は Meta を直接変更しない。
+//   - 配信開始は GitOps PR を作成し、人間の merge 後に apply 経路で反映する。
 //   - PAUSED でないノードは拒否する。
-//   - Meta CLI 連携時は MetaCliRunner 経由で `<resource> activate` を実行し、
-//     成功時のみ ads_hierarchy.status = active に更新。
-//   - audit_logs に activate.requested → activate.committed (or rejected) が
-//     最低 2 行記録される。
-//   - 失敗 (auth/rate/api/unknown) でも UI が判別できるよう、ack に reason を返す。
-//
-// regression fix: actor/source は本ハンドラ (Web 経路) で常に
-// "user:web-ui" / "web" を強制する。クライアントが body に渡す `source` は
-// 無視し、CLI を装った監査記録の偽装 (source=cli / actor=user:cli) を
-// 不可能にする。CLI 経路は apps/cli/src/commands/activate.ts が独自に
-// runActivate を呼び source="cli" を確定させる。
+//   - Meta から同期しただけで ops repo に未登録のノードは PR 化できないため拒否する。
 
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
-import { getActiveMetaAdapter } from "../../../../../lib/meta-runtime";
-import { executeActivate } from "../../../../../../worker/src/lib/activate-runtime";
-import type { ActivateOutcomeStatus } from "@addroid/queue";
+import { ensureWebWorkspace } from "../../../../../lib/meta-runtime";
+import { getActiveGithubAdapter } from "../../../../../lib/github-runtime";
+import { createOpsChangeProposal } from "../../../../../../worker/src/lib/ops-proposal-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -37,30 +27,6 @@ const WEB_ACTIVATE_ACTOR = "user:web-ui" as const;
 
 const HIERARCHY_ID_PATTERN =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-/** outcome → HTTP status の射影。UI が ack を読み取って分岐できるよう詳細にする。 */
-function statusForOutcome(outcome: ActivateOutcomeStatus): number {
-  switch (outcome) {
-    case "activated":
-      return 200;
-    case "already_active":
-    case "not_paused":
-    case "no_external_id":
-      return 409;
-    case "node_not_found":
-      return 404;
-    case "skipped_unsupported":
-      return 422;
-    case "auth_error":
-      return 401;
-    case "rate_limit_exhausted":
-      return 429;
-    case "api_error":
-    case "unknown_error":
-    default:
-      return 502;
-  }
-}
 
 export async function POST(
   request: Request,
@@ -89,41 +55,112 @@ export async function POST(
       : undefined;
 
   try {
-    const { adapter } = await getActiveMetaAdapter();
-    const { summary, executorSelection } = await executeActivate({
-      prisma,
-      metaAdapter: adapter,
-      request: {
-        hierarchyId,
-        actor: WEB_ACTIVATE_ACTOR,
-        source: WEB_ACTIVATE_SOURCE,
-        ...(note !== undefined ? { note } : {}),
+    const workspace = await ensureWebWorkspace();
+    const node = await prisma.adsHierarchyNode.findFirst({
+      where: { id: hierarchyId, account: { workspaceId: workspace.id } },
+      select: {
+        id: true,
+        nodeType: true,
+        nodeKey: true,
+        displayName: true,
+        status: true,
+        externalId: true,
+        spec: true,
+        lastCommitSha: true,
+        account: { select: { key: true, metaAccountId: true } },
       },
     });
+    if (!node) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "指定された広告オブジェクトは現在のワークスペースに存在しません。",
+        },
+        { status: 404 }
+      );
+    }
 
-    const ok = summary.status === "activated";
-    const httpStatus = statusForOutcome(summary.status);
-    return NextResponse.json(
-      {
-        ok,
-        outcome: summary.status,
-        message: summary.message,
-        attempts: summary.attempts,
-        externalId: summary.externalId,
-        finalAuditAction: summary.finalAuditAction,
-        executorMode: executorSelection.mode,
-        ...(ok ? {} : { error: summary.message }),
+    if (node.nodeType !== "campaign" && node.nodeType !== "adset" && node.nodeType !== "ad") {
+      return NextResponse.json(
+        { ok: false, error: "配信開始PRを作成できない広告オブジェクト種別です。" },
+        { status: 422 }
+      );
+    }
+    if (node.status.toUpperCase() !== "PAUSED") {
+      return NextResponse.json(
+        { ok: false, error: "PAUSED の広告オブジェクトだけ配信開始PRを作成できます。" },
+        { status: 409 }
+      );
+    }
+    if (isMetaGraphOnlyNode(node)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "この広告オブジェクトは Meta から読み取っただけで、ops repo の brand.yaml に未登録です。Web UI から直接配信開始は行いません。GitOps 管理対象にしてから PR を作成してください。",
+        },
+        { status: 409 }
+      );
+    }
+
+    const { adapter } = await getActiveGithubAdapter();
+    const result = await createOpsChangeProposal({
+      prisma,
+      githubAdapter: adapter,
+      workspaceId: workspace.id,
+      input: {
+        intent: "activate",
+        accountKey: node.account.key,
+        targets: [{ level: node.nodeType, id: node.nodeKey }],
+        desiredChanges: {
+          initialState: "active",
+          status: "ACTIVE",
+          level: node.nodeType,
+        },
+        rationale:
+          note ??
+          `Web UI request to activate ${node.nodeType} ${node.displayName}${
+            node.externalId ? ` (${node.externalId})` : ""
+          }.`,
+        urgency: "normal",
       },
-      { status: httpStatus }
-    );
+      actor: WEB_ACTIVATE_ACTOR,
+      source: WEB_ACTIVATE_SOURCE,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      message: "配信開始の GitOps PR を作成しました。merge 後に反映されます。",
+      prNumber: result.prNumber,
+      htmlUrl: result.htmlUrl,
+      pullRequestId: result.pullRequestId,
+      headSha: result.headSha,
+      planOk: result.planOk,
+      planSummary: result.planSummary,
+    });
   } catch (err) {
     return NextResponse.json(
       {
         ok: false,
-        outcome: "unknown_error" satisfies ActivateOutcomeStatus,
         error: (err as Error).message,
       },
       { status: 500 }
     );
   }
+}
+
+function isMetaGraphOnlyNode(node: {
+  spec: unknown;
+  lastCommitSha: string | null;
+  externalId: string | null;
+  nodeKey: string;
+}): boolean {
+  if (node.lastCommitSha) return false;
+  const spec = isRecord(node.spec) ? node.spec : null;
+  if (spec?.source === "meta_graph_sync") return true;
+  return Boolean(node.externalId && node.nodeKey === node.externalId);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -11,6 +11,7 @@ export {
 
 export {
   SLASH_COMMANDS,
+  buildAgentLoopInput,
   buildAgentSystemPrompt,
   runAgentTurn,
   type AgentCommandName,

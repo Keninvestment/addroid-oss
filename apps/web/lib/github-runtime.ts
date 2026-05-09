@@ -34,6 +34,7 @@ import {
   persistOpsRepoBootstrap as workerPersistOpsRepoBootstrap,
   type PersistOpsRepoBootstrapInput,
 } from "../../worker/src/lib/prisma-stores";
+import { ensureOpsRepoLocalCheckout } from "../../worker/src/lib/ops-repo-local";
 import { prisma } from "./prisma";
 
 declare global {
@@ -189,4 +190,38 @@ export async function persistOpsRepoBootstrap(
   input: PersistOpsRepoBootstrapInput
 ): Promise<{ repoId: string }> {
   return workerPersistOpsRepoBootstrap(prisma, input);
+}
+
+export async function resolveDefaultOpsTemplateAccount(
+  workspaceId: string
+): Promise<{ primary: { key: string; displayName: string }; accounts: { key: string; displayName: string }[] }> {
+  const ws = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: {
+      defaultAdAccount: { select: { key: true, displayName: true } },
+    },
+  });
+  const accounts = await prisma.adAccount.findMany({
+    where: { workspaceId, active: true },
+    orderBy: { key: "asc" },
+    select: { key: true, displayName: true },
+  });
+  const primary = ws?.defaultAdAccount ?? accounts[0] ?? null;
+  return {
+    primary: {
+      key: primary?.key ?? "default",
+      displayName: primary?.displayName ?? "Default Account",
+    },
+    accounts,
+  };
+}
+
+export async function ensureWebOpsRepoCheckout(
+  workspaceId: string
+): Promise<{ rootDir: string | null; cloned: boolean; synced: boolean }> {
+  const out = await ensureOpsRepoLocalCheckout({
+    prisma: prisma as never,
+    workspaceId,
+  });
+  return { rootDir: out.rootDir, cloned: out.cloned, synced: out.synced };
 }

@@ -6,6 +6,7 @@ import { EmptyState } from "../../../components/ui/EmptyState";
 import { PageHeader } from "../../../components/ui/PageHeader";
 import { Panel } from "../../../components/ui/Panel";
 import { SetDefaultAccountForm } from "../SetDefaultAccountForm";
+import { ensureWebWorkspace } from "../../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -25,13 +26,14 @@ export default async function SelectAccountPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const ws = await prisma.workspace.findFirst({
-    orderBy: { createdAt: "asc" },
-    select: { id: true, defaultAdAccountId: true },
+  const currentWorkspace = await ensureWebWorkspace();
+  const ws = await prisma.workspace.findUnique({
+    where: { id: currentWorkspace.id },
+    select: { defaultAdAccountId: true },
   });
   const accounts = ws
     ? await prisma.adAccount.findMany({
-        where: { workspaceId: ws.id },
+        where: { workspaceId: currentWorkspace.id },
         orderBy: [{ active: "desc" }, { displayName: "asc" }, { key: "asc" }],
         select: {
           id: true,

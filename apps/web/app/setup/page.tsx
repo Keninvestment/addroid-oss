@@ -14,6 +14,8 @@ import { CodeBlock, InlineCode } from "../../components/ui/CodeBlock";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { SlackConnectForm } from "./SlackConnectForm";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +27,7 @@ interface DoctorCheck {
 }
 
 export default async function SetupPage() {
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
   const paths = resolveAddroidPaths();
   const binding = (() => {
     try {
@@ -276,7 +279,11 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
           ) : (
             <KeyValueList
               items={[
-                { label: "実行時刻", value: lastDoctor.ranAt.toISOString(), mono: true },
+                {
+                  label: "実行時刻",
+                  value: formatDateTime(lastDoctor.ranAt, { timeZone: pageDisplayTimeZone }),
+                  mono: true,
+                },
                 { label: "総合", value: lastDoctor.overall },
                 {
                   label: "詳細",
@@ -335,6 +342,83 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
             </span>
           }
         >
+          <div className="setup-guide" aria-label="Slack 連携手順">
+            <div className="setup-guide__intro">
+              <h3>Slack 連携の手順</h3>
+              <p>
+                Slack 側でアプリを作り、3つの値をこの画面に貼り付けます。公開URLや
+                ngrok は不要です。
+              </p>
+            </div>
+            <ol className="setup-guide__steps">
+              <li>
+                <span className="setup-guide__step-index">1</span>
+                <div>
+                  <strong>Slack App を作成</strong>
+                  <p>
+                    <a href="https://api.slack.com/apps" target="_blank" rel="noreferrer">
+                      Slack API の Apps 画面
+                    </a>
+                    を開き、<InlineCode>Create New App</InlineCode> から
+                    <InlineCode>From an app manifest</InlineCode> を選びます。
+                    マニフェストは <InlineCode>templates/slack-app-manifest.yaml</InlineCode>
+                    の内容を貼り付けます。
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span className="setup-guide__step-index">2</span>
+                <div>
+                  <strong>Bot token を取得</strong>
+                  <p>
+                    Slack App の <InlineCode>OAuth & Permissions</InlineCode> で
+                    ワークスペースにインストールし、<InlineCode>Bot User OAuth Token</InlineCode>
+                    をコピーします。値は <InlineCode>xoxb-</InlineCode> で始まります。
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span className="setup-guide__step-index">3</span>
+                <div>
+                  <strong>App token を取得</strong>
+                  <p>
+                    <InlineCode>Basic Information</InlineCode> の
+                    <InlineCode>App-Level Tokens</InlineCode> で
+                    <InlineCode>connections:write</InlineCode> を付けて作成します。
+                    値は <InlineCode>xapp-</InlineCode> で始まります。
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span className="setup-guide__step-index">4</span>
+                <div>
+                  <strong>通知先チャンネルを決める</strong>
+                  <p>
+                    Slack のチャンネル詳細からチャンネルIDをコピーします。
+                    <InlineCode>C</InlineCode> や <InlineCode>G</InlineCode> で始まる値です。
+                    そのチャンネルに AdDroid のBotも追加してください。
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span className="setup-guide__step-index">5</span>
+                <div>
+                  <strong>この画面で保存</strong>
+                  <p>
+                    下のフォームに3つの値を貼り付けます。テスト送信をONにすると、
+                    保存時に通知チャンネルへ接続確認メッセージを送ります。
+                  </p>
+                </div>
+              </li>
+            </ol>
+            <div className="setup-guide__note">
+              保存した token は暗号化してDBに保存され、この画面には再表示しません。
+              Slack 側で権限を変更した場合は、Slack App を再インストールしてから再接続してください。
+            </div>
+          </div>
+          <div style={{ marginBottom: "var(--space-4)" }}>
+            <SlackConnectForm />
+          </div>
           {!slackInstallation ? (
             <EmptyState
               title="Slack は任意です。AdDroid は Slack なしでも動作します。"
@@ -401,34 +485,41 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                       "—"
                     ),
                 },
-                {
-                  label: "直近 Socket Mode 接続テスト",
-                  value: slackInstallation.metadata?.lastSocketModeTestAt ?? "未テスト",
-                  mono: true,
-                },
-                {
-                  label: "直近テストメッセージ送信",
-                  value: slackInstallation.metadata?.lastTestMessageAt ?? "未送信",
-                  mono: true,
-                },
-                {
-                  label: "接続日時",
-                  value: slackInstallation.connectedAt.toISOString(),
-                  mono: true,
-                },
-                {
-                  label: "更新日時",
-                  value: slackInstallation.updatedAt.toISOString(),
-                  mono: true,
-                },
+                  {
+                    label: "直近 Socket Mode 接続テスト",
+                    value: slackInstallation.metadata?.lastSocketModeTestAt
+                      ? formatDateTime(slackInstallation.metadata.lastSocketModeTestAt, {
+                          timeZone: pageDisplayTimeZone,
+                        })
+                      : "未テスト",
+                    mono: true,
+                  },
+                  {
+                    label: "直近テストメッセージ送信",
+                    value: slackInstallation.metadata?.lastTestMessageAt
+                      ? formatDateTime(slackInstallation.metadata.lastTestMessageAt, {
+                          timeZone: pageDisplayTimeZone,
+                        })
+                      : "未送信",
+                    mono: true,
+                  },
+                  {
+                    label: "接続日時",
+                    value: formatDateTime(slackInstallation.connectedAt, {
+                      timeZone: pageDisplayTimeZone,
+                    }),
+                    mono: true,
+                  },
+                  {
+                    label: "更新日時",
+                    value: formatDateTime(slackInstallation.updatedAt, {
+                      timeZone: pageDisplayTimeZone,
+                    }),
+                    mono: true,
+                  },
                 {
                   label: "再接続 / 切断",
-                  value: (
-                    <CodeBlock>
-                      {`addroid connect slack              # トークン更新 + Socket Mode 接続テスト
-addroid connect slack --disconnect # トークン削除 (任意)`}
-                    </CodeBlock>
-                  ),
+                  value: "上のフォームから更新または切断できます。",
                 },
               ]}
             />

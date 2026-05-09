@@ -18,6 +18,8 @@ import { KeyValueList } from "../../components/ui/KeyValueList";
 import { AdhocPlanForm } from "./AdhocPlanForm";
 import { PlanHistoryRow } from "./PlanHistoryRow";
 import type { PlanRunPayloadJson } from "../../../worker/src/lib/plan-runtime";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +28,7 @@ interface AccountRow {
   key: string;
   displayName: string;
   metaAccountId: string | null;
+  timezoneName: string | null;
 }
 
 interface RawLogRow {
@@ -43,21 +46,23 @@ export default async function PlansPage() {
   let logs: RawLogRow[] = [];
 
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { id: true, defaultAdAccountId: true },
+    const currentWorkspace = await ensureWebWorkspace();
+    const ws = await prisma.workspace.findUnique({
+      where: { id: currentWorkspace.id },
+      select: { defaultAdAccountId: true },
     });
     if (ws) {
       defaultAdAccountId = ws.defaultAdAccountId ?? null;
       [accounts, logs] = await Promise.all([
         prisma.adAccount.findMany({
-          where: { workspaceId: ws.id, active: true },
+          where: { workspaceId: currentWorkspace.id, active: true },
           orderBy: [{ createdAt: "asc" }],
           select: {
             id: true,
             key: true,
             displayName: true,
             metaAccountId: true,
+            timezoneName: true,
           },
         }),
         prisma.executionLog.findMany({
@@ -80,15 +85,17 @@ export default async function PlansPage() {
 
   const opsRepoLocalDir = process.env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || "";
   const opsRepoBaseDir = process.env.ADDROID_OPS_REPO_BASE_DIR?.trim() || "";
+  const defaultAccount = accounts.find((account) => account.id === defaultAdAccountId) ?? null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone(defaultAccount?.timezoneName);
 
   const rows = logs
     .map((row) => {
       const payload = parsePayload(row.payload);
       if (!payload) return null;
       return {
-        id: row.id,
-        createdAt: row.createdAt.toISOString(),
-        message: row.message,
+          id: row.id,
+          createdAt: formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
+          message: row.message,
         payload,
       };
     })

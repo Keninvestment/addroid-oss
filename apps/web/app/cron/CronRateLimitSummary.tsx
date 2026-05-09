@@ -19,6 +19,7 @@ import { KeyValueList } from "../../components/ui/KeyValueList";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { InlineCode } from "../../components/ui/CodeBlock";
 import type { StatusState } from "../../components/ui/StatusDot";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 
 interface ExecLogRow {
   id: string;
@@ -99,6 +100,7 @@ export async function CronRateLimitSummary() {
   }
   const worst = pickWorstSeverity(observations.map((o) => o.observation.severity));
   const lastObservedAt = observations[0]?.createdAt ?? null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   return (
     <Panel
@@ -156,7 +158,7 @@ export async function CronRateLimitSummary() {
           {
             label: "Last observed",
             value: lastObservedAt
-              ? lastObservedAt.toISOString()
+              ? formatDateTime(lastObservedAt, { timeZone: pageDisplayTimeZone })
               : "—",
           },
           {

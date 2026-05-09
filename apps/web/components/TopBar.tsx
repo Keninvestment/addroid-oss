@@ -4,14 +4,16 @@
 
 import Link from "next/link";
 import { prisma } from "../lib/prisma";
+import { ensureWebWorkspace } from "../lib/meta-runtime";
 
 export async function TopBar() {
   const version = process.env.npm_package_version ?? "0.0.0";
 
   let defaultLabel: string | null = null;
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
+    const currentWorkspace = await ensureWebWorkspace();
+    const ws = await prisma.workspace.findUnique({
+      where: { id: currentWorkspace.id },
       select: { defaultAdAccountId: true },
     });
     if (ws?.defaultAdAccountId) {

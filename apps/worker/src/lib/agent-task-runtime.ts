@@ -1,11 +1,13 @@
 import cronParser from "cron-parser";
 import {
   buildAgentContext,
+  buildAgentLoopInput,
   runAgentTurn,
   type AgentToolResult,
 } from "@addroid/agent-runtime";
 import { Prisma, type PrismaClient } from "@addroid/db";
 import type PgBoss from "pg-boss";
+import type { GithubAdapter } from "@addroid/github-adapter";
 import {
   CRON_PRESETS,
   validateCronExpression,
@@ -17,12 +19,26 @@ import {
   persistPlanRun,
   runPlanForRoot,
 } from "./plan-runtime.js";
+import { runMetaAdsReadOnlyQuery } from "./meta-ads-readonly-runtime.js";
+import {
+  createOpsChangeProposal,
+  type OpsChangeProposalInput,
+} from "./ops-proposal-runtime.js";
+import {
+  createAutomationRuleProposal,
+  type AutomationRuleProposalInput,
+} from "./automation-rule-proposal-runtime.js";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "./ops-repo-local.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
   workspaceId: string;
   provider: LLMProvider;
   boss: PgBoss;
+  githubAdapter?: GithubAdapter;
 }
 
 export interface AgentTasksSummary {
@@ -64,22 +80,42 @@ export async function runDueAgentTasks(
     });
     try {
       const agentContext = await buildAgentContext(process.env);
-      const turn = await runAgentTurn({
-        input: task.prompt,
-        provider: opts.provider,
-        agentContext,
-        purpose: "worker:agent-task",
-        surface: "scheduled-agent",
-      });
       const executions = [];
-      for (const tool of turn.toolResults) {
-        executions.push(await executeWorkerAgentTool({
-          tool,
-          prisma: opts.prisma,
-          workspaceId: opts.workspaceId,
-          boss: opts.boss,
-          webUrl: agentContext.webUrl,
-        }));
+      const seenTools = new Set<string>();
+      let message = "";
+      for (let i = 0; i < 4; i += 1) {
+        const turn = await runAgentTurn({
+          input: buildAgentLoopInput(task.prompt, executions),
+          provider: opts.provider,
+          agentContext,
+          purpose: "worker:agent-task",
+          surface: "scheduled-agent",
+        });
+        if (turn.message) message = turn.message;
+        if (turn.toolResults.length === 0) break;
+        let executedAny = false;
+        for (const tool of turn.toolResults) {
+          const signature = toolSignature(tool);
+          if (signature && seenTools.has(signature)) {
+            executions.push({
+              display: signature,
+              status: "unsupported",
+              message: "duplicate tool call skipped",
+            });
+            continue;
+          }
+          if (signature) seenTools.add(signature);
+          executions.push(await executeWorkerAgentTool({
+            tool,
+            prisma: opts.prisma,
+            workspaceId: opts.workspaceId,
+            boss: opts.boss,
+            webUrl: agentContext.webUrl,
+            githubAdapter: opts.githubAdapter,
+          }));
+          executedAny = true;
+        }
+        if (!executedAny) break;
       }
       const hasFailure = executions.some((e) =>
         e.status === "error" || e.status === "denied" || e.status === "unsupported"
@@ -89,7 +125,7 @@ export async function runDueAgentTasks(
         data: {
           status: hasFailure ? "failed" : "succeeded",
           finishedAt: new Date(),
-          message: turn.message,
+          message,
           toolCalls: executions as Prisma.InputJsonValue,
           errorMessage: hasFailure
             ? executions.find((e) =>
@@ -153,6 +189,7 @@ async function executeWorkerAgentTool(opts: {
   workspaceId: string;
   boss: PgBoss;
   webUrl: string;
+  githubAdapter?: GithubAdapter;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
   const { tool } = opts;
   if (tool.status === "denied") {
@@ -204,6 +241,65 @@ async function executeWorkerAgentTool(opts: {
         return await manageSchedule({ ...opts, tool: readyTool });
       case "check_submission":
         return await runSubmissionCheck({ ...opts, tool: readyTool });
+      case "query_meta_ads": {
+        const result = await runMetaAdsReadOnlyQuery({
+          prisma: opts.prisma,
+          workspaceId: opts.workspaceId,
+          args: readyTool.toolArgs,
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: result.message,
+          data: { label: result.label, rowCount: result.rowCount, rows: result.rows.slice(0, 20) },
+        };
+      }
+      case "propose_ops_change": {
+        if (!opts.githubAdapter) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: "GitHub adapter が worker に注入されていません。",
+          };
+        }
+        const result = await createOpsChangeProposal({
+          prisma: opts.prisma,
+          githubAdapter: opts.githubAdapter,
+          workspaceId: opts.workspaceId,
+          input: normalizeOpsProposalInput(readyTool.toolArgs),
+          actor: "agent:scheduled-task",
+          source: "scheduled-agent",
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: `GitOps PR #${result.prNumber} を作成しました。`,
+          data: result,
+        };
+      }
+      case "propose_automation_rule": {
+        if (!opts.githubAdapter) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: "GitHub adapter が worker に注入されていません。",
+          };
+        }
+        const result = await createAutomationRuleProposal({
+          prisma: opts.prisma,
+          githubAdapter: opts.githubAdapter,
+          workspaceId: opts.workspaceId,
+          input: normalizeAutomationRuleProposalInput(readyTool.toolArgs),
+          actor: "agent:scheduled-task",
+          source: "scheduled-agent",
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: `自動化ルール PR #${result.prNumber} を作成しました。`,
+          data: result,
+        };
+      }
       case "connect_service":
         return {
           display: readyTool.display,
@@ -223,6 +319,15 @@ async function executeWorkerAgentTool(opts: {
       status: "error",
       message: (err as Error).message,
     };
+  }
+}
+
+function toolSignature(tool: AgentToolResult): string | null {
+  if (tool.status !== "ready") return null;
+  try {
+    return `${tool.tool}:${JSON.stringify(tool.toolArgs)}`;
+  } catch {
+    return tool.tool;
   }
 }
 
@@ -275,10 +380,23 @@ async function runSubmissionCheck(opts: {
   prisma: PrismaClient;
   workspaceId: string;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
-  const rootDir =
+  let rootDir =
     typeof opts.tool.toolArgs.root === "string" && opts.tool.toolArgs.root.trim()
       ? opts.tool.toolArgs.root.trim()
-      : process.env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || "";
+      : "";
+  if (!rootDir) {
+    const checkout = await ensureOpsRepoLocalCheckout({
+      prisma: opts.prisma as never,
+      workspaceId: opts.workspaceId,
+    }).catch(() => null);
+    rootDir =
+      checkout?.rootDir ??
+      (await resolveOpsRepoLocalDirForWorkspace({
+        prisma: opts.prisma as never,
+        workspaceId: opts.workspaceId,
+      })).rootDir ??
+      "";
+  }
   const baseDir =
     typeof opts.tool.toolArgs.base === "string" && opts.tool.toolArgs.base.trim()
       ? opts.tool.toolArgs.base.trim()
@@ -287,7 +405,7 @@ async function runSubmissionCheck(opts: {
     return {
       display: opts.tool.display,
       status: "error",
-      message: "ADDROID_OPS_REPO_LOCAL_DIR が未設定です。",
+      message: "ops repo の local checkout を解決できません。",
     };
   }
   const result = runPlanForRoot({
@@ -321,6 +439,61 @@ function readStringArg(args: Record<string, unknown>, ...keys: string[]): string
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
+}
+
+function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProposalInput {
+  const intentRaw = readStringArg(args, "intent")?.toLowerCase().replace(/-/g, "_");
+  const intent: OpsChangeProposalInput["intent"] =
+    intentRaw === "activate" ||
+    intentRaw === "status_change" ||
+    intentRaw === "budget_change" ||
+    intentRaw === "other"
+      ? intentRaw
+      : "pause";
+  const targets: NonNullable<OpsChangeProposalInput["targets"]> = Array.isArray(args.targets)
+    ? args.targets.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const level = typeof item.level === "string" ? item.level : "";
+        const id = typeof item.id === "string" && item.id.trim() ? item.id.trim() : "";
+        if (!id || (level !== "campaign" && level !== "adset" && level !== "ad")) return [];
+        return [{ level, id }];
+      })
+    : [];
+  const targetIds = Array.isArray(args.targetIds)
+    ? args.targetIds.flatMap((item) => (typeof item === "string" && item.trim() ? [item.trim()] : []))
+    : [];
+  const desiredChanges = isRecord(args.desiredChanges) ? args.desiredChanges : undefined;
+  const urgencyRaw = readStringArg(args, "urgency");
+  const urgency =
+    urgencyRaw === "low" || urgencyRaw === "high" || urgencyRaw === "normal"
+      ? urgencyRaw
+      : undefined;
+  const accountKey = readStringArg(args, "accountKey", "account_key");
+  const rationale = readStringArg(args, "rationale");
+  return {
+    intent,
+    ...(accountKey ? { accountKey } : {}),
+    ...(targets.length > 0 ? { targets } : {}),
+    ...(targetIds.length > 0 ? { targetIds } : {}),
+    ...(desiredChanges ? { desiredChanges } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(urgency ? { urgency } : {}),
+  };
+}
+
+function normalizeAutomationRuleProposalInput(
+  args: Record<string, unknown>
+): AutomationRuleProposalInput {
+  const sourceText = readStringArg(args, "sourceText", "source_text", "prompt");
+  const rule = isRecord(args.rule) ? args.rule : undefined;
+  const rationale = readStringArg(args, "rationale");
+  const title = readStringArg(args, "title");
+  return {
+    ...(sourceText ? { sourceText } : {}),
+    ...(rule ? { rule } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(title ? { title } : {}),
+  };
 }
 
 function resolveMetricDateArg(args: Record<string, unknown>): string | null {
@@ -364,9 +537,15 @@ function reportPreset(value: string): CronPresetName {
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
-              : v === "agent" || v === "agent_task" || v === "agent_tasks"
-                ? "agent_tasks"
-              : "";
+              : v === "automation" || v === "automation_rules" || v === "autopilot"
+                ? "automation_rules"
+                : v === "agent" || v === "agent_task" || v === "agent_tasks"
+                  ? "agent_tasks"
+                  : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

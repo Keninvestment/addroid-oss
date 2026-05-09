@@ -20,6 +20,7 @@ import {
   readCreativeAssetByMetadata,
   readCreativeMetadataByRef,
 } from "../../../../../../lib/creative-helpers";
+import { ensureWebWorkspace } from "../../../../../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -66,11 +67,8 @@ export async function GET(
   // と workspace の関係が実際に張られていることを確認する。
   let workspaceMatches = false;
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { id: true },
-    });
-    workspaceMatches = ws !== null && ws.id === row.account.workspaceId;
+    const ws = await ensureWebWorkspace();
+    workspaceMatches = ws.id === row.account.workspaceId;
   } catch {
     return new NextResponse("Service unavailable", { status: 503 });
   }

@@ -19,7 +19,7 @@
 //   - `ai_runs` (workflow="improvement_pr")
 //                                  → 8 段パイプライン (analyst → ... → audit)
 //                                    の provider / model / decision /
-//                                    confidence / tokens / cost
+//                                    confidence / tokens
 //
 // 設計原則:
 //   - ガードレール「No Placeholder Data」: ダミーデータを描かない。
@@ -48,6 +48,9 @@ import {
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../components/ui/StatusDot";
 import { InlineCode } from "../../components/ui/CodeBlock";
+import { RunCronButton } from "../../components/RunCronButton";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -111,13 +114,13 @@ interface AiRunRow {
   confidence: number | null;
   inputTokens: number;
   outputTokens: number;
-  costUsd: number;
   errorMessage: string | null;
   createdAt: Date;
 }
 
 interface AuditRow {
   id: string;
+  workspaceId: string | null;
   action: string;
   target: string | null;
   ref: string | null;
@@ -131,6 +134,12 @@ interface ScheduleRow {
   enabled: boolean;
   lastRunState: string | null;
   nextRunAt: Date | null;
+}
+
+interface AdAccountTimeZoneRow {
+  workspaceId: string;
+  key: string;
+  timezoneName: string | null;
 }
 
 interface ParsedAuditMetadata {
@@ -367,10 +376,6 @@ function planRiskToState(risk: string): StatusState {
   }
 }
 
-function formatTimestamp(d: Date): string {
-  return d.toISOString().replace("T", " ").replace(/\..+$/, "Z");
-}
-
 function formatBudgetDelta(impact: BudgetImpact): string {
   const sign = impact.deltaCurrency > 0 ? "+" : impact.deltaCurrency < 0 ? "" : "±";
   return `${sign}${impact.deltaCurrency.toFixed(2)} → ${impact.afterCurrency.toFixed(2)}`;
@@ -381,11 +386,19 @@ export default async function ImprovementsPage() {
   let aiRuns: AiRunRow[] = [];
   let audits: AuditRow[] = [];
   let schedules: ScheduleRow[] = [];
+  let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
   let dbReady = true;
   try {
-    [runs, aiRuns, audits, schedules] = await Promise.all([
+    const workspace = await ensureWebWorkspace();
+    [runs, aiRuns, audits, schedules, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: { name: "improvement_pr" },
+        where: {
+          name: "improvement_pr",
+          OR: [
+            { schedule: { is: { workspaceId: workspace.id } } },
+            { executionLogs: { some: { workspaceId: workspace.id } } },
+          ],
+        },
         orderBy: { startedAt: "desc" },
         take: 25,
         select: {
@@ -399,7 +412,7 @@ export default async function ImprovementsPage() {
         },
       }),
       prisma.aiRun.findMany({
-        where: { workflow: "improvement_pr" },
+        where: { workspaceId: workspace.id, workflow: "improvement_pr" },
         orderBy: { createdAt: "desc" },
         take: 25,
         select: {
@@ -412,17 +425,17 @@ export default async function ImprovementsPage() {
           confidence: true,
           inputTokens: true,
           outputTokens: true,
-          costUsd: true,
           errorMessage: true,
           createdAt: true,
         },
       }),
       prisma.auditLog.findMany({
-        where: { action: { startsWith: "improvement_pr." } },
+        where: { workspaceId: workspace.id, action: { startsWith: "improvement_pr." } },
         orderBy: { createdAt: "desc" },
         take: 25,
         select: {
           id: true,
+          workspaceId: true,
           action: true,
           target: true,
           ref: true,
@@ -431,7 +444,7 @@ export default async function ImprovementsPage() {
         },
       }),
       prisma.cronSchedule.findMany({
-        where: { name: "improvement_pr" },
+        where: { workspaceId: workspace.id, name: "improvement_pr" },
         select: {
           name: true,
           cron: true,
@@ -439,6 +452,10 @@ export default async function ImprovementsPage() {
           lastRunState: true,
           nextRunAt: true,
         },
+      }),
+      prisma.adAccount.findMany({
+        where: { workspaceId: workspace.id, active: true },
+        select: { workspaceId: true, key: true, timezoneName: true },
       }),
     ]);
   } catch {
@@ -456,11 +473,21 @@ export default async function ImprovementsPage() {
   const runsCount = runs.length;
   const aiRunsCount = aiRuns.length;
   const auditCount = auditRows.length;
+  const timeZoneByAccount = new Map(
+    adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
+  );
+  const auditTimeZone = (row: AuditRow | null, parsed: ParsedAuditMetadata | null): string | null =>
+    row?.workspaceId && parsed?.accountKey
+      ? timeZoneByAccount.get(`${row.workspaceId}:${parsed.accountKey}`) ?? null
+      : null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone(
+    latestAudit ? auditTimeZone(latestAudit.row, latestAudit.parsed) : null
+  );
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
       header: "Started",
-      cell: (row) => formatTimestamp(row.startedAt),
+      cell: (row) => formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -564,7 +591,10 @@ export default async function ImprovementsPage() {
   }>[] = [
     {
       header: "Created",
-      cell: ({ row }) => formatTimestamp(row.createdAt),
+      cell: ({ row, parsed }) =>
+        formatDateTime(row.createdAt, {
+          timeZone: resolveDisplayTimeZone(auditTimeZone(row, parsed), pageDisplayTimeZone),
+        }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -681,7 +711,7 @@ export default async function ImprovementsPage() {
   const aiRunColumns: DataTableColumn<AiRunRow>[] = [
     {
       header: "Created",
-      cell: (row) => formatTimestamp(row.createdAt),
+      cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -736,16 +766,6 @@ export default async function ImprovementsPage() {
       className: "tabular",
       headerClassName: "tabular",
     },
-    {
-      header: "Cost (USD)",
-      cell: (row) => (
-        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
-          ${row.costUsd.toFixed(6)}
-        </span>
-      ),
-      className: "tabular",
-      headerClassName: "tabular",
-    },
   ];
 
   const scheduleItems: KeyValueEntry[] = scheduleRow
@@ -789,7 +809,7 @@ export default async function ImprovementsPage() {
               className="tabular-nums"
               style={{ fontFamily: "var(--font-mono)" }}
             >
-              {formatTimestamp(scheduleRow.nextRunAt)}
+              {formatDateTime(scheduleRow.nextRunAt, { timeZone: pageDisplayTimeZone })}
             </span>
           ) : (
             <span>—</span>
@@ -1018,6 +1038,7 @@ export default async function ImprovementsPage() {
             AI は Meta を直接変更せず、危険な変更は必ず人の承認を待ちます。
           </>
         }
+        actions={<RunCronButton presetName="improvement_pr" label="今すぐ作成" />}
       />
 
       <div className="page-body page-body--single">

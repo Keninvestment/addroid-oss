@@ -1,7 +1,7 @@
 "use client";
 
 // AdDroid OSS — Meta /me/businesses と /me/adaccounts を再取得するボタン。
-// runtime cache をリフレッシュし、未登録の Meta Ad Account を ad_accounts に登録する。
+// Business は補助情報。広告アカウント一覧が取れれば ad_accounts 同期は成功扱いにする。
 
 import { useState } from "react";
 
@@ -32,6 +32,7 @@ export function RefreshBusinessesButton({ disabled }: Props) {
         businesses?: number;
         adAccounts?: number;
         registered?: number;
+        businessError?: string | null;
         error?: string;
       };
       if (!res.ok || !body.ok) {
@@ -41,11 +42,14 @@ export function RefreshBusinessesButton({ disabled }: Props) {
         });
         return;
       }
+      const businessNote = body.businessError
+        ? " Business 情報は取得できませんでしたが、広告アカウントは同期しました。"
+        : "";
       setFeedback({
         variant: "success",
         message: `Business ${body.businesses ?? 0} 件 / 広告アカウント ${
           body.adAccounts ?? 0
-        } 件を取得し、新規 ${body.registered ?? 0} 件を登録しました。`,
+        } 件を取得し、新規 ${body.registered ?? 0} 件を登録しました。${businessNote}`,
       });
       setTimeout(() => window.location.reload(), 600);
     } catch (err) {
@@ -63,7 +67,7 @@ export function RefreshBusinessesButton({ disabled }: Props) {
         disabled={busy || disabled}
         className="btn"
       >
-        {busy ? "取得中…" : "Business を更新"}
+        {busy ? "取得中…" : "Meta一覧を更新"}
       </button>
       {feedback ? (
         <div

@@ -84,6 +84,9 @@ import {
   persistOpsRepoBootstrap,
 } from "../../../worker/src/lib/prisma-stores.js";
 import {
+  ensureOpsRepoLocalCheckout,
+} from "../../../worker/src/lib/ops-repo-local.js";
+import {
   ensureCliWorkspace,
   formatAccountLine,
   setDefaultAccount,
@@ -1031,8 +1034,10 @@ async function runAuthGithub(
       if (bootstrap.status === "created") {
         process.stdout.write(`  ops repo      : ${bootstrap.owner}/${bootstrap.name}\n`);
         process.stdout.write(`  default branch: ${bootstrap.defaultBranch}\n`);
+        if (bootstrap.localDir) process.stdout.write(`  local checkout: ${bootstrap.localDir}\n`);
       } else {
         process.stdout.write(`  ops repo      : ${bootstrap.status} (${bootstrap.reason})\n`);
+        if (bootstrap.localDir) process.stdout.write(`  local checkout: ${bootstrap.localDir}\n`);
       }
     }
     return 0;
@@ -1260,10 +1265,15 @@ async function bootstrapOpsRepoFromCli(
       findUnique(args: unknown): Promise<{
         opsRepoId?: string | null;
         opsRepo?: { owner: string; name: string } | null;
+        defaultAdAccount?: { key: string; displayName: string } | null;
       } | null>;
     };
     adAccount: {
       findFirst(args: unknown): Promise<{ key: string; displayName: string } | null>;
+      findMany(args: unknown): Promise<{ key: string; displayName: string }[]>;
+    };
+    oAuthToken?: {
+      findFirst(args: unknown): Promise<{ accessTokenCiphertext: string } | null>;
     };
   },
   adapter: MockGithubAdapter | OctokitGithubAdapter
@@ -1275,8 +1285,9 @@ async function bootstrapOpsRepoFromCli(
       defaultBranch: string;
       filesCommitted: number;
       branchProtectionApplied: boolean;
+      localDir: string | null;
     }
-  | { status: "skipped"; reason: string }
+  | { status: "skipped"; reason: string; localDir?: string | null }
 > {
   const workspace = await ensureCliWorkspace(prisma as never);
   const existing = await prisma.workspace.findUnique({
@@ -1284,29 +1295,38 @@ async function bootstrapOpsRepoFromCli(
     select: {
       opsRepoId: true,
       opsRepo: { select: { owner: true, name: true } },
+      defaultAdAccount: { select: { key: true, displayName: true } },
     },
   });
   if (existing?.opsRepoId) {
+    const checkout = await ensureOpsRepoLocalCheckout({
+      prisma: prisma as never,
+      workspaceId: workspace.id,
+    }).catch(() => null);
     return {
       status: "skipped",
       reason: existing.opsRepo
         ? `${existing.opsRepo.owner}/${existing.opsRepo.name} already linked`
         : "ops repo already linked",
+      localDir: checkout?.rootDir ?? null,
     };
   }
   const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();
   const desiredName = config.github?.opsRepo?.name ?? "addroid-ops";
   const defaultBranch = config.github?.opsRepo?.defaultBranch ?? "main";
-  const account = await prisma.adAccount.findFirst({
-    where: { active: true },
-    orderBy: [{ createdAt: "asc" }],
+  const account = existing?.defaultAdAccount ?? null;
+  const accounts = await prisma.adAccount.findMany({
+    where: { workspaceId: workspace.id, active: true },
+    orderBy: [{ key: "asc" }],
     select: { key: true, displayName: true },
   });
+  const templateAccount = account ?? accounts[0] ?? null;
   const result = await adapter.bootstrapOpsRepo({
     workspaceSlug: config.workspace.slug,
     workspaceDisplayName: config.workspace.displayName,
-    initialAccountKey: account?.key ?? "default",
-    initialAccountDisplayName: account?.displayName ?? "Default Account",
+    initialAccountKey: templateAccount?.key ?? "default",
+    initialAccountDisplayName: templateAccount?.displayName ?? "Default Account",
+    initialAccounts: accounts,
     desiredName,
     defaultBranch,
     visibility: "private",
@@ -1320,6 +1340,10 @@ async function bootstrapOpsRepoFromCli(
     filesCommitted: result.filesCommitted,
     branchProtectionApplied: result.branchProtectionApplied,
   });
+  const checkout = await ensureOpsRepoLocalCheckout({
+    prisma: prisma as never,
+    workspaceId: workspace.id,
+  }).catch(() => null);
   return {
     status: "created",
     owner: result.owner,
@@ -1327,6 +1351,7 @@ async function bootstrapOpsRepoFromCli(
     defaultBranch: result.defaultBranch,
     filesCommitted: result.filesCommitted,
     branchProtectionApplied: result.branchProtectionApplied,
+    localDir: checkout?.rootDir ?? null,
   };
 }
 
@@ -1814,9 +1839,10 @@ async function chooseAndSetMetaDefault(
   accounts: RegisteredAccount[]
 ): Promise<RegisteredAccount | null> {
   if (accounts.length === 0) return null;
-  if (accounts.length === 1 || !process.stdin.isTTY || !process.stdout.isTTY) {
+  if (accounts.length === 1) {
     return setDefaultAccount(prisma, workspaceId, accounts[0]!.id, "user:cli");
   }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
   process.stdout.write("\n");
   accounts.forEach((a, i) => {
     process.stdout.write(`  ${String(i + 1).padStart(2)}. ${formatAccountLine(a)}\n`);

@@ -59,7 +59,7 @@ type ParsedAction =
   | { kind: "enable"; name: CronPresetName }
   | { kind: "disable"; name: CronPresetName }
   | { kind: "set"; name: CronPresetName; cron: string }
-  | { kind: "run"; name: CronPresetName }
+  | { kind: "run"; name: CronPresetName; data: Record<string, unknown> }
   | { kind: "logs"; name: CronPresetName; limit: number; asJson: boolean };
 
 interface ParseError {
@@ -137,7 +137,7 @@ function parseArgs(args: string[]): ParsedAction | ParseError {
     case "set":
       return parseSet(rest);
     case "run":
-      return parseSimpleNamed(rest, "run");
+      return parseRun(rest);
     case "logs":
       return parseLogs(rest);
     default:
@@ -166,7 +166,7 @@ function parseList(rest: string[]): ParsedAction | ParseError {
 
 function parseSimpleNamed(
   rest: string[],
-  kind: "enable" | "disable" | "run"
+  kind: "enable" | "disable"
 ): ParsedAction | ParseError {
   const named = takeNameArg(rest, kind);
   if ("kind" in named) return named;
@@ -178,6 +178,41 @@ function parseSimpleNamed(
     };
   }
   return { kind, name: named.name } as ParsedAction;
+}
+
+function parseRun(rest: string[]): ParsedAction | ParseError {
+  const named = takeNameArg(rest, "run");
+  if ("kind" in named) return named;
+  const data: Record<string, unknown> = {};
+  for (let i = 0; i < named.rest.length; i += 1) {
+    const a = named.rest[i]!;
+    if (a === "--metric-date") {
+      const next = named.rest[i + 1];
+      if (!next) return { kind: "error", code: 2, stderr: "[addroid cron run] --metric-date に値がありません\n" };
+      data.metricDate = next;
+      i += 1;
+    } else if (a.startsWith("--metric-date=")) {
+      data.metricDate = a.slice("--metric-date=".length);
+    } else if (a === "--metric-date-relative") {
+      const next = named.rest[i + 1];
+      if (!next) return { kind: "error", code: 2, stderr: "[addroid cron run] --metric-date-relative に値がありません\n" };
+      const resolved = resolveMetricDateRelative(next);
+      if (!resolved) return { kind: "error", code: 2, stderr: "[addroid cron run] --metric-date-relative は today / yesterday のみ対応です\n" };
+      data.metricDate = resolved;
+      i += 1;
+    } else if (a.startsWith("--metric-date-relative=")) {
+      const resolved = resolveMetricDateRelative(a.slice("--metric-date-relative=".length));
+      if (!resolved) return { kind: "error", code: 2, stderr: "[addroid cron run] --metric-date-relative は today / yesterday のみ対応です\n" };
+      data.metricDate = resolved;
+    } else {
+      return {
+        kind: "error",
+        code: 2,
+        stderr: `[addroid cron run] 未知のオプション: ${a}\n`,
+      };
+    }
+  }
+  return { kind: "run", name: named.name, data };
 }
 
 function parseSet(rest: string[]): ParsedAction | ParseError {
@@ -212,6 +247,30 @@ function parseSet(rest: string[]): ParsedAction | ParseError {
     };
   }
   return { kind: "set", name: named.name, cron };
+}
+
+function resolveMetricDateRelative(value: string): string | null {
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "today") return dateStringInRuntimeTimeZone(0);
+  if (normalized === "yesterday") return dateStringInRuntimeTimeZone(-1);
+  return null;
+}
+
+function dateStringInRuntimeTimeZone(offsetDays: number): string {
+  const timeZone =
+    process.env.ADDROID_USER_TIMEZONE?.trim() ||
+    Intl.DateTimeFormat().resolvedOptions().timeZone ||
+    "UTC";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = Number(parts.find((p) => p.type === "year")?.value ?? "1970");
+  const m = Number(parts.find((p) => p.type === "month")?.value ?? "01");
+  const d = Number(parts.find((p) => p.type === "day")?.value ?? "01");
+  return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
 }
 
 function parseLogs(rest: string[]): ParsedAction | ParseError {
@@ -491,7 +550,7 @@ async function execRun(
 ): Promise<number> {
   let jobId: string | null = null;
   try {
-    jobId = await ctx.boss.send(opts.name, {});
+    jobId = await ctx.boss.send(opts.name, opts.data);
   } catch (err) {
     process.stderr.write(
       `[addroid cron run] pg-boss send に失敗: ${(err as Error).message}\n`
@@ -686,7 +745,7 @@ function printHelp(): void {
       "  addroid cron enable  <name>",
       "  addroid cron disable <name>",
       "  addroid cron set     <name> <cron-expression>",
-      "  addroid cron run     <name>",
+      "  addroid cron run     <name> [--metric-date YYYY-MM-DD | --metric-date-relative today|yesterday]",
       "  addroid cron logs    <name> [--limit N] [--json]",
       "",
       "Presets:",

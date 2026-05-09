@@ -190,9 +190,9 @@ export class LocalDirAdsLoader implements AdsLoader {
  */
 export function createLocalDirAdsLoaderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
-  opts: { expectedRepoId?: string | null } = {}
+  opts: { expectedRepoId?: string | null; localDir?: string | null } = {}
 ): LocalDirAdsLoader {
-  const local = env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || null;
+  const local = opts.localDir ?? (env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || null);
   const base = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
   return new LocalDirAdsLoader({
     localDir: local,

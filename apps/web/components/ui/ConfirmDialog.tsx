@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useId, useRef } from "react";
 import type { ReactNode } from "react";
+import { BusyLabel } from "./AsyncFeedback";
 
 export type ConfirmVariant = "primary" | "caution" | "danger";
 
@@ -149,7 +150,7 @@ export function ConfirmDialog({
             disabled={busy}
             aria-busy={busy}
           >
-            {busy ? "実行中…" : confirmLabel}
+            {busy ? <BusyLabel>実行中</BusyLabel> : confirmLabel}
           </button>
         </div>
       </div>

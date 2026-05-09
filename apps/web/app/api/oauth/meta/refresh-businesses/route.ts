@@ -29,10 +29,24 @@ export async function POST() {
     const ws = await ensureWebWorkspace();
     const lease = await adapter.loadAccessTokenPlaintext();
     const accountIdentifier = lease?.accountIdentifier ?? "meta";
-    const [businesses, adAccounts] = await Promise.all([
+    const [businessesResult, adAccountsResult] = await Promise.allSettled([
       adapter.fetchBusinesses(),
       adapter.fetchAdAccounts(),
     ]);
+    if (adAccountsResult.status === "rejected") {
+      throw adAccountsResult.reason instanceof Error
+        ? adAccountsResult.reason
+        : new Error(String(adAccountsResult.reason));
+    }
+    const businesses =
+      businessesResult.status === "fulfilled" ? businessesResult.value : [];
+    const businessError =
+      businessesResult.status === "rejected"
+        ? businessesResult.reason instanceof Error
+          ? businessesResult.reason.message
+          : String(businessesResult.reason)
+        : null;
+    const adAccounts = adAccountsResult.value;
     setMetaBusinessCache({
       businesses,
       adAccounts,
@@ -41,6 +55,15 @@ export async function POST() {
     });
     let registered = 0;
     let updated = 0;
+    const accountRows: {
+      id: string;
+      key: string;
+      displayName: string;
+      metaAccountId: string | null;
+      businessName: string | null;
+      currency: string | null;
+      timezoneName: string | null;
+    }[] = [];
     for (const acc of adAccounts) {
       const key = acc.metaAccountId;
       const existing = await prisma.adAccount.findFirst({
@@ -61,19 +84,23 @@ export async function POST() {
         active: true,
       };
       if (existing) {
-        await prisma.adAccount.update({
+        const row = await prisma.adAccount.update({
           where: { id: existing.id },
           data,
+          select: accountRowSelect(),
         });
+        accountRows.push(row);
         updated += 1;
       } else {
-        await prisma.adAccount.create({
+        const row = await prisma.adAccount.create({
           data: {
             workspaceId: ws.id,
             key,
             ...data,
           },
+          select: accountRowSelect(),
         });
+        accountRows.push(row);
         registered += 1;
       }
     }
@@ -83,6 +110,8 @@ export async function POST() {
       adAccounts: adAccounts.length,
       registered,
       updated,
+      businessError,
+      accountRows,
     });
   } catch (err) {
     const status = err instanceof MetaAdapterUnauthenticatedError ? 401 : 500;
@@ -91,6 +120,18 @@ export async function POST() {
       { status }
     );
   }
+}
+
+function accountRowSelect() {
+  return {
+    id: true,
+    key: true,
+    displayName: true,
+    metaAccountId: true,
+    businessName: true,
+    currency: true,
+    timezoneName: true,
+  } as const;
 }
 
 function shouldRefreshDisplayName(account: {

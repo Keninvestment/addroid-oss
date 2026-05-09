@@ -31,7 +31,7 @@ import {
 } from "@addroid/github-adapter";
 import { Prisma } from "@addroid/db";
 import { prisma } from "../../../../../lib/prisma";
-import { getActiveGithubAdapter } from "../../../../../lib/github-runtime";
+import { ensureWebWorkspace, getActiveGithubAdapter } from "../../../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -73,11 +73,15 @@ export async function POST(
   const mergeMethod = VALID_MERGE_METHODS.has(mergeMethodRaw)
     ? (mergeMethodRaw as "merge" | "squash" | "rebase")
     : "merge";
+  const workspace = await ensureWebWorkspace();
 
   // PR と repo / workspace を 1 回で取得。
   const pr = await prisma.githubPullRequest
     .findFirst({
-      where: { number: prNumber },
+      where: {
+        number: prNumber,
+        repo: { workspace: { is: { id: workspace.id } } },
+      },
       orderBy: { polledAt: "desc" },
       select: {
         id: true,
@@ -126,28 +130,11 @@ export async function POST(
     );
   }
 
-  const workspace = await prisma.workspace
-    .findFirst({
-      where: { opsRepoId: pr.repo.id },
-      select: { id: true },
-    })
-    .catch(() => null);
-
-  if (!workspace) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "ops repo is not linked to any workspace. Re-run /github bootstrap.",
-      },
-      { status: 409 }
-    );
-  }
-
   // 上流 (improvement_pr の audit / 過去の web_merge) が rejected / auto_blocked を
   // 残している場合は merge を拒否する (UI 側の latestDecision と二段防御)。
   const latest = await prisma.approvalRecord
     .findFirst({
-      where: { pullRequestId: pr.id },
+      where: { workspaceId: workspace.id, pullRequestId: pr.id },
       orderBy: { createdAt: "desc" },
       select: { decision: true },
     })

@@ -19,6 +19,8 @@ import { DataTable } from "../../components/ui/DataTable";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot } from "../../components/ui/StatusDot";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -77,8 +79,9 @@ export default async function ApprovalsPage() {
   let dbReady = true;
 
   try {
+    const workspace = await ensureWebWorkspace();
     const open = await prisma.githubPullRequest.findMany({
-      where: { state: "open" },
+      where: { state: "open", repo: { workspace: { is: { id: workspace.id } } } },
       orderBy: { polledAt: "desc" },
       take: 50,
       select: {
@@ -110,7 +113,7 @@ export default async function ApprovalsPage() {
     }));
 
     const merged = await prisma.githubPullRequest.findMany({
-      where: { state: "merged" },
+      where: { state: "merged", repo: { workspace: { is: { id: workspace.id } } } },
       orderBy: { mergedAt: "desc" },
       take: 10,
       select: {
@@ -138,6 +141,7 @@ export default async function ApprovalsPage() {
   } catch {
     dbReady = false;
   }
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   const headerStatus = !dbReady
     ? "warn"
@@ -229,8 +233,8 @@ export default async function ApprovalsPage() {
                   className: "mono",
                 },
                 {
-                  header: "確認日時",
-                  cell: (row) => row.polledAt.toISOString(),
+                    header: "確認日時",
+                    cell: (row) => formatDateTime(row.polledAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
@@ -296,9 +300,11 @@ export default async function ApprovalsPage() {
                   className: "mono",
                 },
                 {
-                  header: "承認日時",
-                  cell: (row) =>
-                    row.mergedAt ? row.mergedAt.toISOString() : "—",
+                    header: "承認日時",
+                    cell: (row) =>
+                      row.mergedAt
+                        ? formatDateTime(row.mergedAt, { timeZone: pageDisplayTimeZone })
+                        : "—",
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },

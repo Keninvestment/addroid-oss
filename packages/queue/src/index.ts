@@ -274,6 +274,25 @@ export {
 } from "./automation-rules.js";
 
 export {
+  buildAutomationBaselineStats,
+  buildAutomationRuleCalibration,
+  evaluateAutomationCalibrationDrift,
+  extractSpendThresholdFromConditions,
+  parseAutomationRuleCalibration,
+  recommendAutomationGuardrails,
+  type AutomationBaselineInput,
+  type AutomationBaselineQuality,
+  type AutomationBaselineSnapshot,
+  type AutomationBaselineStats,
+  type AutomationCalibrationDriftPolicy,
+  type AutomationCalibrationMode,
+  type AutomationDriftEvaluation,
+  type AutomationGuardrailInput,
+  type AutomationGuardrailRecommendation,
+  type AutomationRuleCalibration,
+} from "./automation-baseline.js";
+
+export {
   SLACK_COMMAND_JOB_NAME,
   SLACK_SLASH_COMMAND,
   SLACK_SLASH_SUBCOMMANDS,

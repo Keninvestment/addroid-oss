@@ -10,10 +10,12 @@ import { NextResponse } from "next/server";
 import { GithubAdapterUnauthenticatedError } from "@addroid/github-adapter";
 import { prisma } from "../../../../lib/prisma";
 import {
+  ensureWebOpsRepoCheckout,
   ensureWebWorkspace,
   getActiveGithubAdapter,
   persistOpsRepoBootstrap,
   resolveDesiredOpsRepo,
+  resolveDefaultOpsTemplateAccount,
 } from "../../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
@@ -29,14 +31,17 @@ export async function POST() {
       },
     });
     if (existing?.opsRepoId) {
+      const checkout = await ensureWebOpsRepoCheckout(ws.id);
       return NextResponse.json({
         ok: false,
         already: true,
         owner: existing.opsRepo?.owner ?? null,
         name: existing.opsRepo?.name ?? null,
+        localDir: checkout.rootDir,
       });
     }
     const desired = await resolveDesiredOpsRepo();
+    const account = await resolveDefaultOpsTemplateAccount(ws.id);
     const { adapter, choice } = await getActiveGithubAdapter();
     if (choice === "stub") {
       return NextResponse.json(
@@ -51,8 +56,9 @@ export async function POST() {
     const result = await adapter.bootstrapOpsRepo({
       workspaceSlug: desired.workspaceSlug,
       workspaceDisplayName: desired.workspaceDisplayName,
-      initialAccountKey: "default",
-      initialAccountDisplayName: "Default Account",
+      initialAccountKey: account.primary.key,
+      initialAccountDisplayName: account.primary.displayName,
+      initialAccounts: account.accounts,
       desiredName: desired.desiredName,
       defaultBranch: desired.defaultBranch,
       visibility: "private",
@@ -66,6 +72,7 @@ export async function POST() {
       filesCommitted: result.filesCommitted,
       branchProtectionApplied: result.branchProtectionApplied,
     });
+    const checkout = await ensureWebOpsRepoCheckout(ws.id);
     return NextResponse.json({
       ok: true,
       owner: result.owner,
@@ -73,6 +80,7 @@ export async function POST() {
       defaultBranch: result.defaultBranch,
       filesCommitted: result.filesCommitted,
       branchProtectionApplied: result.branchProtectionApplied,
+      localDir: checkout.rootDir,
     });
   } catch (err) {
     const status = err instanceof GithubAdapterUnauthenticatedError ? 401 : 500;

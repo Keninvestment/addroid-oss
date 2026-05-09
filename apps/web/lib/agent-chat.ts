@@ -1,13 +1,22 @@
 import fs from "node:fs";
-import { spawn } from "node:child_process";
+import fsPromises from "node:fs/promises";
+import path from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 import cronParser from "cron-parser";
 import {
   buildAgentContext,
+  buildAgentLoopInput,
   runAgentTurn,
   type AgentContext,
   type AgentToolResult,
 } from "@addroid/agent-runtime";
-import { getCryptoBoundary } from "@addroid/config";
+import {
+  ensureAddroidPaths,
+  getCryptoBoundary,
+  homeAnchorPath,
+  parseDatabaseUrl,
+  resolveAddroidPaths,
+} from "@addroid/config";
 import type { LLMProvider } from "@addroid/llm-provider";
 import { Prisma } from "@addroid/db";
 import {
@@ -16,18 +25,41 @@ import {
   type CronPresetName,
 } from "@addroid/queue";
 import { prisma } from "./prisma";
-import { ensureWebWorkspace } from "./github-runtime";
+import { ensureWebWorkspace, getActiveGithubAdapter } from "./github-runtime";
+import {
+  getActiveMetaAdapter,
+  setMetaBusinessCache,
+} from "./meta-runtime";
 import { loadDashboardStatus } from "./status";
 import {
   runCronNow,
   setCronScheduleEnabled,
 } from "./cron-actions";
+import { formatDateTime } from "./datetime";
 import { selectLLMProviderForWorker } from "../../worker/src/lib/llm-runtime";
 import {
   createPrismaPlanStore,
   persistPlanRun,
   runPlanForRoot,
 } from "../../worker/src/lib/plan-runtime";
+import {
+  createOpsChangeProposal,
+  type OpsChangeProposalInput,
+} from "../../worker/src/lib/ops-proposal-runtime";
+import {
+  createAutomationRuleCalibrationUpdateProposal,
+  createAutomationRuleProposal,
+  type AutomationRuleCalibrationUpdateInput,
+  type AutomationRuleProposalInput,
+} from "../../worker/src/lib/automation-rule-proposal-runtime";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "../../worker/src/lib/ops-repo-local";
+import {
+  createOrReuseAgentTask,
+  normalizeAgentTaskPrompt,
+} from "../../worker/src/lib/agent-task-store";
 
 export interface WebAgentExecution {
   display: string;
@@ -74,21 +106,45 @@ export async function runWebAgentChat(
         baseAgentContext,
         await loadWebChatMemory(workspace.id)
       );
-  const turn = await runAgentTurn({
-    input: text,
-    provider: selection.provider,
-    agentContext,
-    purpose: "web:dashboard-chat",
-    surface: "web-chat",
-  });
-
   const executions: WebAgentExecution[] = [];
-  for (const tool of turn.toolResults) {
-    executions.push(await executeWebAgentTool(tool, agentContext.webUrl, workspace.id, selection.provider));
+  let message = "";
+  const seenTools = new Set<string>();
+  for (let i = 0; i < 4; i += 1) {
+    const turn = await runAgentTurn({
+      input: buildAgentLoopInput(text, executions),
+      provider: selection.provider,
+      agentContext,
+      purpose: "web:dashboard-chat",
+      surface: "web-chat",
+    });
+    if (turn.message) message = turn.message;
+    if (turn.toolResults.length === 0) break;
+    let executedAny = false;
+    for (const tool of turn.toolResults) {
+      const signature = toolSignature(tool);
+      if (signature && seenTools.has(signature)) {
+        executions.push({
+          display: signature,
+          status: "unsupported",
+          message: "同じ tool call の繰り返しを防止しました。",
+        });
+        continue;
+      }
+      if (signature) seenTools.add(signature);
+      const execution = await executeWebAgentTool(
+        tool,
+        agentContext.webUrl,
+        workspace.id,
+        selection.provider
+      );
+      executions.push(execution);
+      executedAny = true;
+    }
+    if (!executedAny) break;
   }
   await recordAgentAudit(workspace.id, options.auditAction ?? "agent.chat_via_web", {
     input: text,
-    message: turn.message,
+    message,
     executions: executions.map((e) => ({
       display: e.display,
       status: e.status,
@@ -96,8 +152,8 @@ export async function runWebAgentChat(
     })),
   }, options.auditActor ?? "agent:web-ui");
   return {
-    ok: executions.every((e) => e.status !== "error"),
-    message: turn.message,
+    ok: executions.every((e) => e.status !== "error" && e.status !== "denied" && e.status !== "unsupported"),
+    message,
     executions,
   };
 }
@@ -201,27 +257,9 @@ export async function executeWebAgentTool(
           data: await loadDashboardStatus(),
         };
       case "list_ad_accounts":
-      case "sync_ad_accounts": {
-        const accounts = await prisma.adAccount.findMany({
-          where: { workspaceId, active: true },
-          orderBy: { key: "asc" },
-          select: {
-            id: true,
-            key: true,
-            displayName: true,
-            metaAccountId: true,
-            currency: true,
-          },
-        });
-        return {
-          display: tool.display,
-          status: "ok",
-          message: accounts.length
-            ? `${accounts.length} 件の広告アカウントがあります。`
-            : "広告アカウントが未登録です。/accounts から接続・同期してください。",
-          data: { accounts },
-        };
-      }
+        return await listAdAccountsTool(workspaceId, tool.display);
+      case "sync_ad_accounts":
+        return await syncAdAccountsTool(workspaceId, tool.toolArgs, tool.display);
       case "select_ad_account":
         return await selectDefaultAccount(workspaceId, tool.toolArgs, tool.display);
       case "connect_service":
@@ -241,13 +279,21 @@ export async function executeWebAgentTool(
       case "query_meta_ads":
         return await runMetaAdsReadOnlyTool(workspaceId, tool.toolArgs, tool.display, provider);
       case "start_delivery":
-      case "stop_services":
-      case "backup_data":
         return {
           display: tool.display,
           status: "unsupported",
-          message: "この操作は Web chat からはまだ実行せず、既存の専用 UI / CLI 経路を使ってください。",
+          message: "配信開始は GitOps PR 経由に変更されました。propose_ops_change を使ってください。",
         };
+      case "propose_ops_change":
+        return await proposeOpsChangeTool(workspaceId, tool.toolArgs, tool.display);
+      case "propose_automation_rule":
+        return await proposeAutomationRuleTool(workspaceId, tool.toolArgs, tool.display);
+      case "propose_automation_rule_update":
+        return await proposeAutomationRuleUpdateTool(workspaceId, tool.toolArgs, tool.display);
+      case "backup_data":
+        return await backupDataTool(tool.display);
+      case "stop_services":
+        return await stopServicesTool(tool.display);
       default:
         return {
           display: tool.display,
@@ -261,6 +307,425 @@ export async function executeWebAgentTool(
       status: "error",
       message: (err as Error).message,
     };
+  }
+}
+
+function toolSignature(tool: AgentToolResult): string | null {
+  if (tool.status !== "ready") return null;
+  try {
+    return `${tool.tool}:${JSON.stringify(tool.toolArgs)}`;
+  } catch {
+    return tool.tool;
+  }
+}
+
+async function proposeOpsChangeTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const selection = await getActiveGithubAdapter();
+  const result = await createOpsChangeProposal({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    input: normalizeOpsProposalInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+  });
+  return {
+    display,
+    status: "ok",
+    message: `GitOps PR #${result.prNumber} を作成しました。人間の承認・merge 後に反映されます。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function proposeAutomationRuleTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const selection = await getActiveGithubAdapter();
+  const result = await createAutomationRuleProposal({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    input: normalizeAutomationRuleProposalInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+  });
+  return {
+    display,
+    status: "ok",
+    message: `自動化ルール PR #${result.prNumber} を作成しました。承認・merge 後に automation_rules cron で評価されます。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function proposeAutomationRuleUpdateTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const selection = await getActiveGithubAdapter();
+  const result = await createAutomationRuleCalibrationUpdateProposal({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    input: normalizeAutomationRuleUpdateInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+  });
+  return {
+    display,
+    status: "ok",
+    message: `自動化ルールの安全レール更新PR #${result.prNumber} を作成しました。承認・merge 後に auto_apply が再開可能になります。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function listAdAccountsTool(
+  workspaceId: string,
+  display: string
+): Promise<WebAgentExecution> {
+  const accounts = await prisma.adAccount.findMany({
+    where: { workspaceId, active: true },
+    orderBy: { key: "asc" },
+    select: {
+      id: true,
+      key: true,
+      displayName: true,
+      metaAccountId: true,
+      currency: true,
+    },
+  });
+  return {
+    display,
+    status: "ok",
+    message: accounts.length
+      ? `${accounts.length} 件の広告アカウントがあります。`
+      : "広告アカウントが未登録です。/accounts から接続・同期してください。",
+    data: { accounts },
+  };
+}
+
+async function syncAdAccountsTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const { adapter, choice } = await getActiveMetaAdapter();
+  if (choice === "stub") {
+    return {
+      display,
+      status: "error",
+      message: "Meta Access Token が未接続です。/accounts から Meta と接続してください。",
+    };
+  }
+  const lease = await adapter.loadAccessTokenPlaintext();
+  if (!lease) {
+    return {
+      display,
+      status: "error",
+      message: "Meta token が未接続または復号できません。/accounts から再接続してください。",
+    };
+  }
+  const [businesses, adAccounts] = await Promise.all([
+    adapter.fetchBusinesses(),
+    adapter.fetchAdAccounts(),
+  ]);
+  setMetaBusinessCache({
+    businesses,
+    adAccounts,
+    fetchedAt: new Date(),
+    accountIdentifier: lease.accountIdentifier,
+  });
+  let registered = 0;
+  let updated = 0;
+  for (const acc of adAccounts) {
+    const key = acc.metaAccountId;
+    const existing = await prisma.adAccount.findFirst({
+      where: { workspaceId, OR: [{ metaAccountId: acc.metaAccountId }, { key }] },
+      select: { id: true, key: true, displayName: true, metaAccountId: true },
+    });
+    const data = {
+      displayName:
+        existing && !shouldRefreshDisplayName(existing)
+          ? existing.displayName
+          : acc.name || existing?.displayName || key,
+      metaAccountId: acc.metaAccountId,
+      businessId: acc.businessId ?? null,
+      businessName: acc.businessName ?? null,
+      currency: acc.currency ?? null,
+      timezoneName: acc.timezoneName ?? null,
+      accountStatus: acc.accountStatus ?? null,
+      active: true,
+    };
+    if (existing) {
+      await prisma.adAccount.update({ where: { id: existing.id }, data });
+      updated += 1;
+    } else {
+      await prisma.adAccount.create({
+        data: {
+          workspaceId,
+          key,
+          ...data,
+        },
+      });
+      registered += 1;
+    }
+  }
+  let defaultSelection: "kept" | "selected_single" | "needs_user_choice" = "kept";
+  const ws = await prisma.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { defaultAdAccountId: true },
+  });
+  if (!ws?.defaultAdAccountId) {
+    if (adAccounts.length === 1) {
+      const first = await prisma.adAccount.findFirst({
+        where: { workspaceId, metaAccountId: adAccounts[0]!.metaAccountId },
+        select: { id: true },
+      });
+      if (first) {
+        await prisma.workspace.update({
+          where: { id: workspaceId },
+          data: { defaultAdAccountId: first.id },
+        });
+        defaultSelection = "selected_single";
+      }
+    } else if (adAccounts.length > 1 || args.selectDefault === true) {
+      defaultSelection = "needs_user_choice";
+    }
+  }
+  await recordAgentAudit(
+    workspaceId,
+    "agent.ad_accounts_synced",
+    {
+      businessesFetched: businesses.length,
+      adAccountsFetched: adAccounts.length,
+      registered,
+      updated,
+      defaultSelection,
+    },
+    "agent:web-chat"
+  );
+  const defaultMessage =
+    defaultSelection === "selected_single"
+      ? "1件だけだったため、このアカウントを既定にしました。"
+      : defaultSelection === "needs_user_choice"
+        ? "複数アカウントがあるため、既定アカウントは自動変更していません。/accounts で選択してください。"
+        : "既定アカウントは変更していません。";
+  return {
+    display,
+    status: "ok",
+    message: `Meta から広告アカウントを同期しました。取得 ${adAccounts.length} 件、新規 ${registered} 件、更新 ${updated} 件。${defaultMessage}`,
+    data: { businesses, adAccounts, registered, updated, defaultSelection },
+  };
+}
+
+function shouldRefreshDisplayName(account: {
+  key: string;
+  displayName: string;
+  metaAccountId: string | null;
+}): boolean {
+  return (
+    account.displayName.trim().length === 0 ||
+    account.displayName === account.key ||
+    account.displayName === account.metaAccountId
+  );
+}
+
+async function backupDataTool(display: string): Promise<WebAgentExecution> {
+  if (!hasBinary("pg_dump")) {
+    return {
+      display,
+      status: "error",
+      message:
+        "pg_dump が見つかりません。PostgreSQL クライアントツールをインストールしてから再実行してください。",
+    };
+  }
+  const parsed = parseDatabaseUrl(process.env);
+  if (!parsed.ok) {
+    return {
+      display,
+      status: "error",
+      message: `DATABASE_URL を解釈できません: ${parsed.reason}`,
+    };
+  }
+  const paths = await ensureAddroidPaths();
+  const outFile = path.join(
+    paths.home,
+    "backups",
+    `${parsed.database}-${new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d{3}Z$/, "Z")}.dump`
+  );
+  await fsPromises.mkdir(path.dirname(outFile), { recursive: true });
+  const result = await runPgDump({
+    host: parsed.hostname,
+    port: parsed.port,
+    user: safeDecode(parsed.url.username) || "addroid",
+    password: safeDecode(parsed.url.password),
+    database: parsed.database,
+    outFile,
+  });
+  if (result.status !== 0) {
+    return {
+      display,
+      status: "error",
+      message: `pg_dump が失敗しました (exit ${result.status ?? "unknown"})。`,
+      data: { outFile: homeAnchorPath(outFile) },
+    };
+  }
+  const bytes = await fsPromises.stat(outFile).then((s) => s.size).catch(() => 0);
+  const workspace = await ensureWebWorkspace().catch(() => null);
+  if (workspace) {
+    await recordAgentAudit(
+      workspace.id,
+      "backup.created_via_web_chat",
+      {
+        path: homeAnchorPath(outFile),
+        bytes,
+        includePgBoss: true,
+      },
+      "agent:web-chat"
+    );
+  }
+  return {
+    display,
+    status: "ok",
+    message: `バックアップを作成しました: ${homeAnchorPath(outFile)} (${formatBytes(bytes)})`,
+    data: { outFile: homeAnchorPath(outFile), bytes },
+  };
+}
+
+function hasBinary(cmd: string): boolean {
+  const probe =
+    process.platform === "win32"
+      ? spawnSync("where", [cmd], { encoding: "utf8" })
+      : spawnSync("which", [cmd], { encoding: "utf8" });
+  if (probe.error) return false;
+  return probe.status === 0 && Boolean((probe.stdout ?? "").trim());
+}
+
+function runPgDump(input: {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+  outFile: string;
+}): Promise<{ status: number | null }> {
+  const args = [
+    "--format=custom",
+    "--no-owner",
+    "--no-privileges",
+    `--host=${input.host}`,
+    `--port=${input.port}`,
+    `--username=${input.user}`,
+    `--dbname=${input.database}`,
+    `--file=${input.outFile}`,
+  ];
+  return new Promise((resolve) => {
+    const child = spawn("pg_dump", args, {
+      env: { ...process.env, PGPASSWORD: input.password },
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    child.on("error", () => resolve({ status: 127 }));
+    child.on("close", (code) => resolve({ status: code }));
+  });
+}
+
+function safeDecode(s: string): string {
+  if (!s) return "";
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "?";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+async function stopServicesTool(display: string): Promise<WebAgentExecution> {
+  type StopState = {
+    mode?: string;
+    parentPid?: number;
+    webPid?: number;
+    workerPid?: number;
+  };
+  const paths = resolveAddroidPaths();
+  let state: StopState | null = null;
+  try {
+    const raw = await fsPromises.readFile(paths.pidFile, "utf8");
+    state = JSON.parse(raw) as StopState;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (!state?.parentPid) {
+    return {
+      display,
+      status: "ok",
+      message: "pid file が見つからないため、停止対象の AdDroid プロセスはありません。",
+      data: { pidFile: paths.pidFile, targets: [] },
+    };
+  }
+
+  const targets: Array<{ label: string; pid: number }> = [];
+  if (state.mode === "separate-worker") {
+    if (state.webPid && state.webPid !== state.parentPid) {
+      targets.push({ label: "web", pid: state.webPid });
+    }
+    if (state.workerPid) targets.push({ label: "worker", pid: state.workerPid });
+  }
+  targets.push({ label: "addroid up parent", pid: state.parentPid });
+  const uniqueTargets = targets.filter(
+    (target, index, all) => all.findIndex((x) => x.pid === target.pid) === index
+  );
+  const liveTargets = uniqueTargets.filter((target) => isPidAlive(target.pid));
+  setTimeout(() => {
+    for (const target of liveTargets) terminatePid(target.pid);
+  }, 250).unref();
+
+  return {
+    display,
+    status: "ok",
+    message: liveTargets.length
+      ? `${liveTargets.length} 件の AdDroid プロセスに停止を要求します。Web UI への接続はこの後切れます。`
+      : "pid file はありますが、生存中の停止対象プロセスはありません。",
+    data: { pidFile: paths.pidFile, targets: liveTargets },
+  };
+}
+
+function isPidAlive(pid: number | undefined | null): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function terminatePid(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  try {
+    process.kill(pid, "SIGTERM");
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -391,31 +856,21 @@ async function createScheduledAgentTaskTool(
   const validation = validateCronExpression(cron);
   if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
   const workspace = await ensureWebWorkspace();
-  const taskTitle = title ?? deriveAgentTaskTitle(prompt);
+  const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
+  const taskTitle = title ?? deriveAgentTaskTitle(normalizedPrompt);
   const nextRunAt = runNow ? new Date() : computeNextRunAt(cron);
-  const task = await prisma.agentTask.create({
-    data: {
-      workspaceId: workspace.id,
-      title: taskTitle,
-      prompt,
-      cron,
-      enabled: true,
-      nextRunAt,
-      createdBy: "agent:web-chat",
-    },
-    select: {
-      id: true,
-      title: true,
-      prompt: true,
-      cron: true,
-      enabled: true,
-      nextRunAt: true,
-    },
+  const { task, created } = await createOrReuseAgentTask(prisma as never, {
+    workspaceId: workspace.id,
+    title: taskTitle,
+    prompt: normalizedPrompt,
+    cron,
+    nextRunAt,
+    createdBy: "agent:web-chat",
   });
   await recordAgentAudit(
     workspace.id,
-    "agent_task.created_via_chat",
-    { title: taskTitle, cron, prompt, runNow },
+    created ? "agent_task.created_via_chat" : "agent_task.reused_via_chat",
+    { title: taskTitle, cron, prompt: normalizedPrompt, runNow, created },
     "agent:web-chat"
   );
   const queued = runNow ? await runCronNow("agent_tasks") : null;
@@ -424,8 +879,10 @@ async function createScheduledAgentTaskTool(
     status: queued && !queued.ok ? "error" : "ok",
     message: queued && !queued.ok
       ? queued.error
-      : `Agent task を設定しました。次回実行: ${task.nextRunAt ? task.nextRunAt.toISOString() : "未定"}`,
-    data: { task, queued },
+      : created
+        ? `Agent task を設定しました。次回実行: ${formatDateTime(task.nextRunAt)}`
+        : `同じ Agent task が既にあるため再利用しました。次回実行: ${formatDateTime(task.nextRunAt)}`,
+    data: { task, queued, created },
   };
 }
 
@@ -464,12 +921,20 @@ async function manageScheduleTool(
 ): Promise<WebAgentExecution> {
   const action = typeof args.action === "string" ? args.action : "list";
   if (action === "list" || action === "logs") {
+    const workspace = await ensureWebWorkspace();
     const schedules = await prisma.cronSchedule.findMany({
+      where: { workspaceId: workspace.id },
       orderBy: { name: "asc" },
       select: { name: true, cron: true, enabled: true, lastRunState: true, nextRunAt: true },
     });
     const runs = action === "logs"
       ? await prisma.cronRun.findMany({
+          where: {
+            OR: [
+              { schedule: { is: { workspaceId: workspace.id } } },
+              { executionLogs: { some: { workspaceId: workspace.id } } },
+            ],
+          },
           orderBy: { startedAt: "desc" },
           take: typeof args.limit === "number" ? Math.max(1, Math.min(50, args.limit)) : 10,
           select: { id: true, name: true, state: true, startedAt: true, errorMessage: true },
@@ -504,10 +969,20 @@ async function runSubmissionCheck(
   args: Record<string, unknown>,
   display: string
 ): Promise<WebAgentExecution> {
-  const rootDir =
-    typeof args.root === "string" && args.root.trim()
-      ? args.root.trim()
-      : process.env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || "";
+  let rootDir = typeof args.root === "string" && args.root.trim() ? args.root.trim() : "";
+  if (!rootDir) {
+    const resolved = await ensureOpsRepoLocalCheckout({
+      prisma: prisma as never,
+      workspaceId,
+    }).catch(() => null);
+    rootDir =
+      resolved?.rootDir ??
+      (await resolveOpsRepoLocalDirForWorkspace({
+        prisma: prisma as never,
+        workspaceId,
+      })).rootDir ??
+      "";
+  }
   const baseDir =
     typeof args.base === "string" && args.base.trim()
       ? args.base.trim()
@@ -1134,9 +1609,17 @@ async function waitForCronRun(
   output: unknown;
 } | null> {
   const deadline = Date.now() + timeoutMs;
+  const workspace = await ensureWebWorkspace();
   while (Date.now() < deadline) {
     const run = await prisma.cronRun.findFirst({
-      where: { jobId, name },
+      where: {
+        jobId,
+        name,
+        OR: [
+          { schedule: { is: { workspaceId: workspace.id } } },
+          { executionLogs: { some: { workspaceId: workspace.id } } },
+        ],
+      },
       orderBy: { startedAt: "desc" },
       select: {
         id: true,
@@ -1365,6 +1848,84 @@ function readRequiredString(value: unknown, key: string): string {
   return text;
 }
 
+function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProposalInput {
+  const intentRaw = readOptionalString(args.intent)?.toLowerCase().replace(/-/g, "_");
+  const intent: OpsChangeProposalInput["intent"] =
+    intentRaw === "activate" ||
+    intentRaw === "status_change" ||
+    intentRaw === "budget_change" ||
+    intentRaw === "other"
+      ? intentRaw
+      : "pause";
+  const targets: NonNullable<OpsChangeProposalInput["targets"]> = Array.isArray(args.targets)
+    ? args.targets.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const level = readOptionalString(item.level);
+        const id = readOptionalString(item.id);
+        if (!id || (level !== "campaign" && level !== "adset" && level !== "ad")) return [];
+        return [{ level, id }];
+      })
+    : [];
+  const targetIds = Array.isArray(args.targetIds)
+    ? args.targetIds.flatMap((item) => {
+        const id = readOptionalString(item);
+        return id ? [id] : [];
+      })
+    : [];
+  const desiredChanges = isRecord(args.desiredChanges) ? args.desiredChanges : undefined;
+  const urgencyRaw = readOptionalString(args.urgency);
+  const urgency =
+    urgencyRaw === "low" || urgencyRaw === "high" || urgencyRaw === "normal"
+      ? urgencyRaw
+      : undefined;
+  const accountKey = readOptionalString(args.accountKey);
+  const rationale = readOptionalString(args.rationale);
+  return {
+    intent,
+    ...(accountKey ? { accountKey } : {}),
+    ...(targets.length > 0 ? { targets } : {}),
+    ...(targetIds.length > 0 ? { targetIds } : {}),
+    ...(desiredChanges ? { desiredChanges } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(urgency ? { urgency } : {}),
+  };
+}
+
+function normalizeAutomationRuleProposalInput(
+  args: Record<string, unknown>
+): AutomationRuleProposalInput {
+  const sourceText =
+    readOptionalString(args.sourceText) ??
+    readOptionalString(args.source_text) ??
+    readOptionalString(args.prompt);
+  const rule = isRecord(args.rule) ? args.rule : undefined;
+  const rationale = readOptionalString(args.rationale);
+  const title = readOptionalString(args.title);
+  return {
+    ...(sourceText ? { sourceText } : {}),
+    ...(rule ? { rule } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(title ? { title } : {}),
+  };
+}
+
+function normalizeAutomationRuleUpdateInput(
+  args: Record<string, unknown>
+): AutomationRuleCalibrationUpdateInput {
+  const ruleId =
+    readOptionalString(args.ruleId) ??
+    readOptionalString(args.rule_id) ??
+    readOptionalString(args.id);
+  if (!ruleId) throw new Error("ruleId が必要です。");
+  const rationale = readOptionalString(args.rationale);
+  const title = readOptionalString(args.title);
+  return {
+    ruleId,
+    ...(rationale ? { rationale } : {}),
+    ...(title ? { title } : {}),
+  };
+}
+
 function resolveMetricDateArg(args: Record<string, unknown>): string | null {
   const explicit = readOptionalString(args.metricDate) ?? readOptionalString(args.metric_date);
   if (explicit) return explicit;
@@ -1465,9 +2026,11 @@ function reportPreset(value: string): CronPresetName {
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
-              : v === "agent" || v === "agent_task" || v === "agent_tasks"
-                ? "agent_tasks"
-              : "";
+              : v === "automation" || v === "automation_rules" || v === "autopilot"
+                ? "automation_rules"
+                : v === "agent" || v === "agent_task" || v === "agent_tasks"
+                  ? "agent_tasks"
+                  : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";
 }

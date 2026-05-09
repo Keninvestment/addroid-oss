@@ -709,12 +709,158 @@ export const BudgetGuardPolicyYamlSchema = z
 
 export type BudgetGuardPolicyYaml = z.infer<typeof BudgetGuardPolicyYamlSchema>;
 
+// ---- workflows/automation-rules.yaml ---------------------------------------
+
+export const AutomationMetricWindowSchema = z
+  .object({
+    preset: z.enum(["today", "yesterday", "last_7d", "last_14d", "last_30d"]).optional(),
+    since: z.string().min(1).optional(),
+    until: z.string().min(1).optional(),
+    timezone: z.union([z.literal("account"), z.literal("utc"), z.string().min(1)]).optional(),
+    lookbackHours: z.number().int().positive().max(24 * 30).optional(),
+  })
+  .passthrough();
+
+export const AutomationRuleScopeSchema = z
+  .object({
+    level: z.enum(["account", "campaign", "adset", "ad"]),
+    accounts: z.array(z.string().min(1)).optional(),
+    includePaused: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const AutomationMetricSpecSchema = z
+  .object({
+    field: z.string().min(1),
+    actionTypes: z.array(z.string().min(1)).optional(),
+    unit: z.enum(["currency", "count", "ratio"]).optional(),
+  })
+  .passthrough();
+
+export const AutomationConditionSchema = z
+  .object({
+    metric: z.string().min(1),
+    gt: z.number().optional(),
+    gte: z.number().optional(),
+    lt: z.number().optional(),
+    lte: z.number().optional(),
+    eq: z.number().optional(),
+    ne: z.number().optional(),
+  })
+  .strict();
+
+export const AutomationConditionGroupSchema = z
+  .object({
+    all: z.array(AutomationConditionSchema).optional(),
+    any: z.array(AutomationConditionSchema).optional(),
+  })
+  .strict()
+  .refine((v) => (v.all?.length ?? 0) > 0 || (v.any?.length ?? 0) > 0, {
+    message: "automation rule requires when.all or when.any",
+  });
+
+export const AutomationActionSchema = z
+  .object({
+    type: z.string().min(1),
+    status: z.enum(["ACTIVE", "PAUSED"]).optional(),
+    targetLevel: z.enum(["account", "campaign", "adset", "ad"]).optional(),
+    operation: z.enum(["increase_percent", "decrease_percent", "set_amount"]).optional(),
+    percent: z.number().positive().optional(),
+    amount: z.number().positive().optional(),
+    targetBudgetLevel: z.enum(["campaign", "adset", "auto"]).optional(),
+  })
+  .passthrough();
+
+export const AutomationSafetySchema = z
+  .object({
+    mode: z.enum(["report_only", "proposal", "auto_apply"]).optional(),
+    minConversions: z.number().nonnegative().optional(),
+    minSpend: z.number().nonnegative().optional(),
+    maxIncreasePercentPerDay: z.number().positive().optional(),
+    maxDailyBudget: z.number().positive().optional(),
+    cooldownHours: z.number().nonnegative().optional(),
+  })
+  .passthrough();
+
+export const AutomationApprovalSchema = z
+  .object({
+    mode: z
+      .enum([
+        "report_only",
+        "proposal",
+        "auto_apply",
+        "auto_apply_if_policy_matched",
+        "auto_merge_if_policy_matched",
+      ])
+      .optional(),
+  })
+  .passthrough();
+
+export const AutomationLimitsSchema = z
+  .object({
+    maxActionsPerRun: z.number().int().positive().optional(),
+    maxCampaignsPerRun: z.number().int().positive().optional(),
+    maxDailyBudgetAffected: z.number().nonnegative().optional(),
+  })
+  .passthrough();
+
+export const AutomationCalibrationSchema = z
+  .object({
+    mode: z.enum(["static", "adaptive_with_bounds"]).optional(),
+    source: z.literal("account_history").optional(),
+    generatedAt: z.string().min(1).optional(),
+    timezone: z.string().min(1).optional(),
+    lookbackDays: z.number().int().positive().optional(),
+    minSampleDays: z.number().int().positive().optional(),
+    quality: z.enum(["sufficient", "insufficient", "empty"]).optional(),
+    baseline: z.unknown().optional(),
+    recommended: z.unknown().optional(),
+    bounds: z.unknown().optional(),
+    drift: z.unknown().optional(),
+  })
+  .passthrough();
+
+export const AutomationRuleYamlSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/, "id は英数字・_・- のみ"),
+    enabled: z.boolean().default(false),
+    schedule: z.string().min(1).optional(),
+    intent: z.string().min(1).optional(),
+    scope: AutomationRuleScopeSchema,
+    window: AutomationMetricWindowSchema.default({ preset: "today", timezone: "account" }),
+    metrics: z.record(AutomationMetricSpecSchema).default({}),
+    computed: z.record(z.string().min(1)).optional(),
+    when: AutomationConditionGroupSchema,
+    action: AutomationActionSchema,
+    safety: AutomationSafetySchema.optional(),
+    approval: AutomationApprovalSchema.optional(),
+    limits: AutomationLimitsSchema.optional(),
+    calibration: AutomationCalibrationSchema.optional(),
+    sourceText: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+export const AutomationRulesYamlSchema = z
+  .object({
+    version: z.literal(1).default(1),
+    policies: z.unknown().optional(),
+    rules: z.array(AutomationRuleYamlSchema).default([]),
+  })
+  .passthrough();
+
+export type AutomationRuleYaml = z.infer<typeof AutomationRuleYamlSchema>;
+export type AutomationRulesYaml = z.infer<typeof AutomationRulesYamlSchema>;
+
 // ---- ops repo loader -----------------------------------------------------
 
 export interface OpsRepoLayout {
   projectYaml: string; // .addroid/project.yaml
   cronYaml: string; // workflows/cron.yaml
   budgetGuardYaml: string; // workflows/budget-guard.yaml (the current implementation)
+  automationRulesYaml: string; // workflows/automation-rules.yaml
   accountsDir: string; // ads/accounts
 }
 
@@ -722,6 +868,7 @@ export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
   projectYaml: ".addroid/project.yaml",
   cronYaml: "workflows/cron.yaml",
   budgetGuardYaml: "workflows/budget-guard.yaml",
+  automationRulesYaml: "workflows/automation-rules.yaml",
   accountsDir: "ads/accounts",
 };
 
@@ -749,6 +896,29 @@ export function loadBudgetGuardPolicy(
     return null;
   }
   const out = BudgetGuardPolicyYamlSchema.safeParse(parsed);
+  if (!out.success) return null;
+  return out.data;
+}
+
+export function loadAutomationRules(
+  rootDir: string,
+  layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
+): AutomationRulesYaml | null {
+  const abs = path.join(rootDir, layout.automationRulesYaml);
+  if (!fs.existsSync(abs)) return null;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(abs, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = YAML.parse(raw);
+  } catch {
+    return null;
+  }
+  const out = AutomationRulesYamlSchema.safeParse(parsed);
   if (!out.success) return null;
   return out.data;
 }

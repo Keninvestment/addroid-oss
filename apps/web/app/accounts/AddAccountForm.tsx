@@ -1,61 +1,101 @@
 "use client";
 
-// AdDroid OSS — Ad Account を手動登録するためのインライン form。
-// PageHeader の actions 領域 / Panel の status 領域に置けるよう button + 折り畳み form 形式。
+// AdDroid OSS — Meta から取得できる Ad Account 一覧を同期し、選択して既定にする。
 
 import { useState } from "react";
+import { BusyLabel } from "../../components/ui/AsyncFeedback";
 
-interface State {
+interface AccountRow {
+  id: string;
   key: string;
   displayName: string;
-  metaAccountId: string;
-  saving: boolean;
-  error: string | null;
+  metaAccountId: string | null;
+  businessName: string | null;
+  currency: string | null;
+  timezoneName: string | null;
 }
 
-const empty: State = {
-  key: "",
-  displayName: "",
-  metaAccountId: "",
-  saving: false,
-  error: null,
-};
+interface SyncResponse {
+  ok?: boolean;
+  businesses?: number;
+  adAccounts?: number;
+  registered?: number;
+  updated?: number;
+  businessError?: string | null;
+  accountRows?: AccountRow[];
+  error?: string;
+}
+
+interface DefaultResponse {
+  ok?: boolean;
+  error?: string;
+  account?: { displayName?: string; metaAccountId?: string | null };
+}
+
+type BusyState = "sync" | `select:${string}` | null;
 
 export function AddAccountForm() {
   const [open, setOpen] = useState(false);
-  const [state, setState] = useState<State>(empty);
+  const [busy, setBusy] = useState<BusyState>(null);
+  const [accounts, setAccounts] = useState<AccountRow[]>([]);
+  const [feedback, setFeedback] = useState<{
+    variant: "success" | "error";
+    message: string;
+  } | null>(null);
 
-  function patch(p: Partial<State>) {
-    setState((s) => ({ ...s, ...p }));
-  }
-
-  async function submit(ev: React.FormEvent) {
-    ev.preventDefault();
-    if (state.saving) return;
-    patch({ saving: true, error: null });
+  async function syncAccounts() {
+    if (busy) return;
+    setBusy("sync");
+    setFeedback(null);
     try {
-      const res = await fetch("/api/accounts", {
+      const res = await fetch("/api/oauth/meta/refresh-businesses", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: state.key,
-          displayName: state.displayName,
-          metaAccountId: state.metaAccountId || undefined,
-        }),
       });
-      const body = (await res.json().catch(() => ({}))) as {
-        ok?: boolean;
-        error?: string;
-      };
+      const body = (await res.json().catch(() => ({}))) as SyncResponse;
       if (!res.ok || !body.ok) {
-        patch({ saving: false, error: body.error ?? `HTTP ${res.status}` });
-        return;
+        throw new Error(body.error ?? `HTTP ${res.status}`);
       }
-      setState(empty);
-      setOpen(false);
-      window.location.reload();
+      const rows = body.accountRows ?? [];
+      setAccounts(rows);
+      setFeedback({
+        variant: "success",
+        message: `広告アカウント ${body.adAccounts ?? rows.length} 件を取得しました。新規 ${
+          body.registered ?? 0
+        } 件 / 更新 ${body.updated ?? 0} 件。`,
+      });
     } catch (err) {
-      patch({ saving: false, error: (err as Error).message });
+      setAccounts([]);
+      setFeedback({ variant: "error", message: (err as Error).message });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function selectDefault(id: string) {
+    if (busy) return;
+    setBusy(`select:${id}`);
+    setFeedback(null);
+    try {
+      const res = await fetch("/api/accounts/default", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ adAccountId: id }),
+      });
+      const body = (await res.json().catch(() => ({}))) as DefaultResponse;
+      if (!res.ok || !body.ok) {
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      const label = body.account?.metaAccountId ?? body.account?.displayName ?? id;
+      setFeedback({
+        variant: "success",
+        message: `既定の広告アカウントを ${label} にしました。`,
+      });
+      setTimeout(() => window.location.reload(), 500);
+    } catch (err) {
+      setFeedback({ variant: "error", message: (err as Error).message });
+    } finally {
+      setBusy(null);
     }
   }
 
@@ -63,18 +103,20 @@ export function AddAccountForm() {
     return (
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setOpen(true);
+          void syncAccounts();
+        }}
         className="btn"
         aria-haspopup="dialog"
       >
-        + 広告アカウントを追加
+        Metaから選択
       </button>
     );
   }
 
   return (
-    <form
-      onSubmit={submit}
+    <div
       className="add-account-form"
       style={{
         display: "flex",
@@ -84,78 +126,83 @@ export function AddAccountForm() {
         border: "1px solid var(--color-border-default)",
         borderRadius: "var(--radius-sm)",
         background: "var(--color-bg-subtle)",
-        minWidth: "20rem",
+        minWidth: "min(42rem, calc(100vw - 3rem))",
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>
-          管理用の短い名前 (例: <code className="inline-code">brand-a</code>)
-        </label>
-        <input
-          required
-          value={state.key}
-          onChange={(e) => patch({ key: e.target.value })}
-          className="form-input"
-          pattern="[a-zA-Z0-9._\-]{1,64}"
-          style={inputStyle}
-          autoFocus
-        />
+      <div style={{ display: "flex", gap: "var(--space-2)", justifyContent: "flex-end" }}>
+        <button type="button" className="btn btn--ghost" onClick={() => setOpen(false)} disabled={busy !== null}>
+          閉じる
+        </button>
+        <button type="button" className="btn" onClick={syncAccounts} disabled={busy !== null}>
+          {busy === "sync" ? <BusyLabel>取得中</BusyLabel> : "再取得"}
+        </button>
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>画面に表示する名前</label>
-        <input
-          required
-          value={state.displayName}
-          onChange={(e) => patch({ displayName: e.target.value })}
-          className="form-input"
-          style={inputStyle}
-        />
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-2)" }}>
-        <label style={{ fontSize: "var(--size-xs)", fontWeight: 600 }}>
-          Meta の広告アカウントID (省略可、形式: <code className="inline-code">act_1234567890</code>)
-        </label>
-        <input
-          value={state.metaAccountId}
-          onChange={(e) => patch({ metaAccountId: e.target.value })}
-          className="form-input"
-          pattern="act_\d{1,32}"
-          placeholder="act_1234567890"
-          style={inputStyle}
-        />
-      </div>
-      {state.error ? (
-        <div className="banner" data-state="error">
-          <span className="banner__title">登録に失敗しました</span>
-          <span>{state.error}</span>
+
+      {feedback ? (
+        <div className="banner" data-state={feedback.variant === "success" ? "ok" : "error"}>
+          <span className="banner__title">
+            {feedback.variant === "success" ? "取得しました" : "取得に失敗"}
+          </span>
+          <span>{feedback.message}</span>
         </div>
       ) : null}
-      <div style={{ display: "flex", gap: "var(--space-2)", justifyContent: "flex-end" }}>
-        <button
-          type="button"
-          onClick={() => {
-            setOpen(false);
-            setState(empty);
-          }}
-          className="btn"
-          disabled={state.saving}
-        >
-          キャンセル
-        </button>
-        <button type="submit" className="btn btn--primary" disabled={state.saving}>
-          {state.saving ? "登録中…" : "登録"}
-        </button>
-      </div>
-    </form>
+
+      {accounts.length === 0 ? (
+        <div className="empty-state">
+          <h3 className="empty-state__title">
+            {busy === "sync" ? "Metaから広告アカウントを取得しています。" : "選択できる広告アカウントはありません。"}
+          </h3>
+          <p className="empty-state__body">
+            {busy === "sync"
+              ? "取得が完了すると、ここに選択肢が表示されます。"
+              : "Meta接続と広告アカウントの割り当てを確認してください。"}
+          </p>
+        </div>
+      ) : (
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th scope="col">アカウント</th>
+              <th scope="col">Business</th>
+              <th scope="col">通貨 / TZ</th>
+              <th scope="col" style={{ width: "8rem" }}>
+                操作
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((account) => {
+              const selecting = busy === `select:${account.id}`;
+              return (
+                <tr key={account.id}>
+                  <td>
+                    <div style={{ display: "grid", gap: "0.15rem" }}>
+                      <span>{account.displayName || account.metaAccountId || account.key}</span>
+                      <span className="mono" style={{ color: "var(--color-text-secondary)" }}>
+                        {account.metaAccountId ?? account.key}
+                      </span>
+                    </div>
+                  </td>
+                  <td>{account.businessName ?? "—"}</td>
+                  <td className="mono">
+                    {[account.currency, account.timezoneName].filter(Boolean).join(" / ") || "—"}
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn--primary btn--sm"
+                      onClick={() => selectDefault(account.id)}
+                      disabled={busy !== null}
+                    >
+                      {selecting ? <BusyLabel>設定中</BusyLabel> : "選択"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
-
-const inputStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--size-sm)",
-  padding: "6px 10px",
-  border: "1px solid var(--color-border-default)",
-  borderRadius: "var(--radius-sm)",
-  background: "var(--color-bg-surface)",
-  color: "var(--color-text-primary)",
-};

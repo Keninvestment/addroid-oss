@@ -10,6 +10,7 @@
 
 import { prisma } from "../../lib/prisma";
 import {
+  ensureWebWorkspace,
   getActiveMetaAdapter,
   getMetaBusinessCache,
   sanitizeForDisplay,
@@ -26,6 +27,7 @@ import { AddAccountForm } from "./AddAccountForm";
 import { SetDefaultAccountForm } from "./SetDefaultAccountForm";
 import { ReauthButton } from "./ReauthButton";
 import { RefreshBusinessesButton } from "./RefreshBusinessesButton";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 
 export const dynamic = "force-dynamic";
 
@@ -76,9 +78,10 @@ export default async function AccountsPage({
   let dbReady = true;
 
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { id: true, defaultAdAccountId: true },
+    const currentWorkspace = await ensureWebWorkspace();
+    const ws = await prisma.workspace.findUnique({
+      where: { id: currentWorkspace.id },
+      select: { defaultAdAccountId: true },
     });
     if (ws) {
       defaultAdAccountId = ws.defaultAdAccountId ?? null;
@@ -94,7 +97,7 @@ export default async function AccountsPage({
           },
         }),
         prisma.adAccount.findMany({
-          where: { workspaceId: ws.id },
+          where: { workspaceId: currentWorkspace.id },
           orderBy: [{ active: "desc" }, { createdAt: "asc" }],
           select: {
             id: true,
@@ -107,7 +110,7 @@ export default async function AccountsPage({
         }),
         prisma.auditLog.findMany({
           where: {
-            workspaceId: ws.id,
+            workspaceId: currentWorkspace.id,
             action: {
               in: [
                 "oauth.meta.connected",
@@ -172,6 +175,7 @@ export default async function AccountsPage({
   const reasonQuery = single(resolvedSearchParams?.reason);
   const accountsQuery = single(resolvedSearchParams?.accounts);
   const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery);
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   return (
     <>
@@ -224,7 +228,15 @@ export default async function AccountsPage({
                   {
                     label: "接続方式",
                     value: (
-                      <StatusBadge state={adapterChoice === "real" || adapterChoice === "token" ? "ok" : adapterChoice === "mock" ? "info" : "warn"}>
+                      <StatusBadge
+                        state={
+                          adapterChoice === "real" || adapterChoice === "token"
+                            ? "ok"
+                            : adapterChoice === "mock"
+                              ? "info"
+                              : "warn"
+                        }
+                      >
                         {adapterChoice === "real" || adapterChoice === "token"
                           ? "本番"
                           : adapterChoice === "mock"
@@ -235,13 +247,17 @@ export default async function AccountsPage({
                   },
                   {
                     label: "接続日時",
-                    value: <span className="tabular mono">{oauth.connectedAt.toISOString()}</span>,
+                    value: (
+                      <span className="tabular mono">
+                        {formatDateTime(oauth.connectedAt, { timeZone: pageDisplayTimeZone })}
+                      </span>
+                    ),
                   },
                   {
                     label: "期限",
                     value: expiry ? (
                       <span className="tabular mono">
-                        {expiry.toISOString()}
+                        {formatDateTime(expiry, { timeZone: pageDisplayTimeZone })}
                         {expiryClass === "warn" ? " (もうすぐ期限切れ)" : ""}
                         {expiryClass === "error" ? " (期限切れ)" : ""}
                       </span>
@@ -251,11 +267,7 @@ export default async function AccountsPage({
                   },
                   {
                     label: "安全性",
-                    value: (
-                      <>
-                        接続情報は画面やログに表示しません。
-                      </>
-                    ),
+                    value: <>接続情報は画面やログに表示しません。</>,
                   },
                 ]}
               />
@@ -272,7 +284,7 @@ export default async function AccountsPage({
           title="Meta Business"
           subtitle={
             cache
-              ? `最終取得 ${cache.fetchedAt.toISOString()}`
+              ? `最終取得 ${formatDateTime(cache.fetchedAt, { timeZone: pageDisplayTimeZone })}`
               : "Meta と接続後に取得できます"
           }
           status={
@@ -285,7 +297,7 @@ export default async function AccountsPage({
               description={
                 !oauth
                   ? "Meta と接続すると自動で取得されます。"
-                  : "右上の更新ボタンを押すと、最新の Business と広告アカウントを取得します。"
+                  : "右上の更新ボタンを押すと、最新の Business と広告アカウント一覧を取得します。"
               }
             />
           ) : (
@@ -294,8 +306,8 @@ export default async function AccountsPage({
               rowKey={(row) => row.id}
               empty={
                 <EmptyState
-                  title="Business は取得できませんでした。"
-                  description="権限が不足している可能性があります。再認証してください。"
+                  title="取得できるBusinessはありません。"
+                  description="広告アカウント一覧が取得できていれば、レポート取得や予算チェックは続行できます。Business情報が必要な場合だけ、Business側の割り当てと権限を確認してください。"
                 />
               }
               columns={[
@@ -352,7 +364,7 @@ export default async function AccountsPage({
             columns={[
               {
                 header: "Time",
-                cell: (row) => row.createdAt.toISOString(),
+                cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },

@@ -7,6 +7,8 @@ import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable } from "../../components/ui/DataTable";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { BootstrapOpsRepoButton } from "./BootstrapOpsRepoButton";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -43,12 +45,14 @@ export default async function GithubPage({
   let prs: PrRow[] = [];
   let dbReady = true;
   try {
+    const workspace = await ensureWebWorkspace();
     [oauth, repos, prs] = await Promise.all([
       prisma.oAuthToken.findMany({
         where: { provider: "github" },
         select: { provider: true, accountIdentifier: true, scopes: true, connectedAt: true },
       }),
       prisma.githubRepo.findMany({
+        where: { workspace: { is: { id: workspace.id } } },
         select: {
           id: true,
           owner: true,
@@ -61,6 +65,7 @@ export default async function GithubPage({
         },
       }),
       prisma.githubPullRequest.findMany({
+        where: { repo: { workspace: { is: { id: workspace.id } } } },
         orderBy: { polledAt: "desc" },
         take: 50,
         select: { id: true, number: true, title: true, state: true, headSha: true, mergedAt: true, polledAt: true },
@@ -84,6 +89,7 @@ export default async function GithubPage({
   const bootstrapQuery = single(resolvedSearchParams?.bootstrap);
   const reasonQuery = single(resolvedSearchParams?.reason);
   const banner = renderBanner(oauthQuery, bootstrapQuery, reasonQuery);
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   return (
     <>
@@ -120,8 +126,8 @@ export default async function GithubPage({
                 { header: "アカウント", cell: (row) => row.accountIdentifier, className: "mono" },
                 { header: "許可された範囲", cell: (row) => row.scopes.join(", ") || "—", className: "mono" },
                 {
-                  header: "接続日時",
-                  cell: (row) => row.connectedAt.toISOString(),
+                    header: "接続日時",
+                    cell: (row) => formatDateTime(row.connectedAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
@@ -151,20 +157,22 @@ export default async function GithubPage({
                 { label: "リポジトリ", value: `${repo.owner}/${repo.name}`, mono: true },
                 { label: "既定ブランチ", value: repo.defaultBranch, mono: true },
                 {
-                  label: "準備日時",
-                  value: repo.bootstrappedAt ? repo.bootstrappedAt.toISOString() : "未実行",
-                },
-                {
-                  label: "前回確認",
-                  value: repo.pollingState?.lastPolledAt
-                    ? `${repo.pollingState.lastPolledAt.toISOString()} (HTTP ${repo.pollingState.lastStatusCode ?? "?"})`
-                    : "未実行",
-                },
-                {
-                  label: "次回確認",
-                  value: repo.pollingState?.nextPollAt
-                    ? repo.pollingState.nextPollAt.toISOString()
-                    : "未スケジュール",
+                    label: "準備日時",
+                    value: repo.bootstrappedAt
+                      ? formatDateTime(repo.bootstrappedAt, { timeZone: pageDisplayTimeZone })
+                      : "未実行",
+                  },
+                  {
+                    label: "前回確認",
+                    value: repo.pollingState?.lastPolledAt
+                      ? `${formatDateTime(repo.pollingState.lastPolledAt, { timeZone: pageDisplayTimeZone })} (HTTP ${repo.pollingState.lastStatusCode ?? "?"})`
+                      : "未実行",
+                  },
+                  {
+                    label: "次回確認",
+                    value: repo.pollingState?.nextPollAt
+                      ? formatDateTime(repo.pollingState.nextPollAt, { timeZone: pageDisplayTimeZone })
+                      : "未スケジュール",
                 },
               ]}
             />
@@ -193,14 +201,17 @@ export default async function GithubPage({
                 ),
               },
               {
-                header: "承認日時",
-                cell: (row) => (row.mergedAt ? row.mergedAt.toISOString() : "—"),
+                  header: "承認日時",
+                  cell: (row) =>
+                    row.mergedAt
+                      ? formatDateTime(row.mergedAt, { timeZone: pageDisplayTimeZone })
+                      : "—",
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
               {
-                header: "確認日時",
-                cell: (row) => row.polledAt.toISOString(),
+                  header: "確認日時",
+                  cell: (row) => formatDateTime(row.polledAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },

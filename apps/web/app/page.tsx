@@ -9,6 +9,8 @@ import { DataTable } from "../components/ui/DataTable";
 import { InlineCode } from "../components/ui/CodeBlock";
 import { PageHeader } from "../components/ui/PageHeader";
 import { DashboardChatPanel } from "./DashboardChatPanel";
+import { formatDateTime, resolveDisplayTimeZone } from "../lib/datetime";
+import { ensureWebWorkspace } from "../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +50,8 @@ function readDailyReportSnapshot(value: unknown): DailyReportSnapshot | null {
 
 export default async function DashboardPage() {
   const status = await loadDashboardStatus();
+  const workspace = await ensureWebWorkspace().catch(() => null);
+  const workspaceId = workspace?.id ?? null;
 
   let recentRuns: { id: string; name: string; state: string; startedAt: Date; durationMs: number | null }[] = [];
   let recentAudit: { id: string; createdAt: Date; actor: string; action: string; target: string | null }[] = [];
@@ -56,27 +60,40 @@ export default async function DashboardPage() {
   let metaAccountsCount = 0;
   let dailyReport: DailyReportSnapshot | null = null;
   try {
-    recentRuns = await prisma.cronRun.findMany({
-      orderBy: { startedAt: "desc" },
-      take: 5,
-      select: { id: true, name: true, state: true, startedAt: true, durationMs: true },
-    });
+    if (workspaceId) {
+      recentRuns = await prisma.cronRun.findMany({
+        where: {
+          OR: [
+            { schedule: { is: { workspaceId } } },
+            { executionLogs: { some: { workspaceId } } },
+          ],
+        },
+        orderBy: { startedAt: "desc" },
+        take: 5,
+        select: { id: true, name: true, state: true, startedAt: true, durationMs: true },
+      });
+    }
   } catch {
     /* DB 未反映時はクエリエラー → 空状態に倒す */
   }
   try {
-    recentAudit = await prisma.auditLog.findMany({
-      orderBy: { createdAt: "desc" },
-      take: 5,
-      select: { id: true, createdAt: true, actor: true, action: true, target: true },
-    });
+    if (workspaceId) {
+      recentAudit = await prisma.auditLog.findMany({
+        where: { workspaceId },
+        orderBy: { createdAt: "desc" },
+        take: 5,
+        select: { id: true, createdAt: true, actor: true, action: true, target: true },
+      });
+    }
   } catch {
     /* same */
   }
   try {
-    pendingPrCount = await prisma.githubPullRequest.count({
-      where: { state: "open" },
-    });
+    if (workspaceId) {
+      pendingPrCount = await prisma.githubPullRequest.count({
+        where: { state: "open", repo: { workspace: { is: { id: workspaceId } } } },
+      });
+    }
   } catch {
     /* same */
   }
@@ -87,20 +104,32 @@ export default async function DashboardPage() {
       select: { id: true },
     });
     metaConnected = !!metaToken;
-    metaAccountsCount = await prisma.adAccount.count({ where: { active: true } });
+    metaAccountsCount = workspaceId
+      ? await prisma.adAccount.count({ where: { workspaceId, active: true } })
+      : 0;
   } catch {
     /* same */
   }
   try {
-    const latestDailyReport = await prisma.cronRun.findFirst({
-      where: { name: "daily_report", state: "success" },
-      orderBy: { startedAt: "desc" },
-      select: { output: true },
-    });
-    dailyReport = readDailyReportSnapshot(latestDailyReport?.output);
+    if (workspaceId) {
+      const latestDailyReport = await prisma.cronRun.findFirst({
+        where: {
+          name: "daily_report",
+          state: "success",
+          OR: [
+            { schedule: { is: { workspaceId } } },
+            { executionLogs: { some: { workspaceId } } },
+          ],
+        },
+        orderBy: { startedAt: "desc" },
+        select: { output: true },
+      });
+      dailyReport = readDailyReportSnapshot(latestDailyReport?.output);
+    }
   } catch {
     /* same */
   }
+  const pageDisplayTimeZone = resolveDisplayTimeZone(dailyReport?.metricTimeZone);
 
   return (
     <>
@@ -356,7 +385,7 @@ export default async function DashboardPage() {
               columns={[
                 {
                   header: "Started",
-                  cell: (row) => row.startedAt.toISOString(),
+                  cell: (row) => formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
@@ -387,7 +416,7 @@ export default async function DashboardPage() {
               columns={[
                 {
                   header: "Time",
-                  cell: (row) => row.createdAt.toISOString(),
+                  cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
@@ -407,6 +436,7 @@ function workflowLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
     budget_guard: "予算チェック",
+    automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",

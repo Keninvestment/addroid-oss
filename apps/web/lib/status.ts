@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import { homeAnchorPath, resolveAddroidPaths, resolveWebBinding } from "@addroid/config";
 import { prisma } from "./prisma";
+import { ensureWebWorkspace } from "./github-runtime";
 
 export interface SubsystemStatus {
   state: "ok" | "warn" | "error" | "info" | "idle";
@@ -80,9 +81,11 @@ export async function inspectDatabase(): Promise<SubsystemStatus> {
  * Worker / pg-boss の起動状況。the current implementation の skeleton では `cron_schedules` の
  * 登録件数で間接的に「worker が一度でも起動した形跡」があるかを判定する。
  */
-export async function inspectWorker(): Promise<SubsystemStatus> {
+export async function inspectWorker(workspaceId?: string): Promise<SubsystemStatus> {
   try {
-    const count = await prisma.cronSchedule.count();
+    const count = await prisma.cronSchedule.count(
+      workspaceId ? { where: { workspaceId } } : undefined
+    );
     if (count === 0) {
       return {
         state: "warn",
@@ -134,9 +137,10 @@ export async function loadDashboardStatus(): Promise<DashboardStatus> {
     /* keep default */
   }
   const config = inspectConfig();
+  const workspace = await ensureWebWorkspace().catch(() => null);
   const [database, worker, github] = await Promise.all([
     inspectDatabase(),
-    inspectWorker(),
+    inspectWorker(workspace?.id),
     inspectGithub(),
   ]);
   return { config, database, worker, github, binding };

@@ -58,7 +58,13 @@ import type { SlackNotificationPayload } from "@addroid/config";
 import { resolveGithubAdapter } from "./lib/github-adapter-wiring.js";
 import { resolveExecutionMode } from "./lib/execution-mode-resolution.js";
 import { createLocalDirAdsLoaderFromEnv } from "./lib/apply-source.js";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "./lib/ops-repo-local.js";
 import { resolveApplyExecutor } from "./lib/apply-meta-executor.js";
+import { resolveAutomationMutationExecutor } from "./lib/automation-action-executor.js";
+import { runAutomationRulesOnce } from "./lib/automation-rules-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./lib/meta-runtime.js";
 import { createPostgresAdAccountLockProvider } from "./lib/account-lock.js";
 import {
@@ -149,6 +155,20 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   log.info(
     `[worker] workspace ready: ${workspace.slug} (${workspace.id}) mode=${workspace.executionMode}`
   );
+  const opsRepoCheckout = await ensureOpsRepoLocalCheckout({
+    prisma: prisma as never,
+    workspaceId: workspace.id,
+  }).catch((err) => {
+    log.warn(`[worker] ops repo local checkout not ready: ${(err as Error).message}`);
+    return null;
+  });
+  const opsRepoRootDir =
+    opsRepoCheckout?.rootDir ??
+    (await resolveOpsRepoLocalDirForWorkspace({
+      prisma: prisma as never,
+      workspaceId: workspace.id,
+    })).rootDir ??
+    null;
 
   const cronStore = createCronOpsStore(prisma, workspace.id);
   const githubStore = createGithubPollStore(prisma);
@@ -241,6 +261,33 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   );
   const dailyReportInsights =
     metaCliInsightsSelection.provider ?? new MockDailyReportInsightsProvider();
+  const automationMutationSelection = await resolveAutomationMutationExecutor({
+    env: process.env,
+    metaAdapter: metaAdapterSelection.adapter,
+    resolver: {
+      async resolveExternalId(input) {
+        if (input.hierarchyId) {
+          const node = await prisma.adsHierarchyNode.findFirst({
+            where: { accountId: input.accountId, id: input.hierarchyId },
+            select: { externalId: true, nodeKey: true },
+          });
+          return node?.externalId ?? node?.nodeKey ?? null;
+        }
+        const node = await prisma.adsHierarchyNode.findFirst({
+          where: {
+            accountId: input.accountId,
+            nodeType: input.level,
+            nodeKey: input.targetKey,
+          },
+          select: { externalId: true, nodeKey: true },
+        });
+        return node?.externalId ?? node?.nodeKey ?? input.targetKey ?? null;
+      },
+    },
+  });
+  log.info(
+    `[worker] automation mutation executor: ${automationMutationSelection.mode} (${automationMutationSelection.reason})`
+  );
   const dailyReportAnalyst = createAnalystRunner({
     provider: llmSelection.provider,
     workspaceId: workspace.id,
@@ -664,6 +711,43 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   : {}),
               });
             }
+          } else if (preset.name === "automation_rules") {
+            const summary = await runAutomationRulesOnce({
+              prisma,
+              workspaceId: workspace.id,
+              insightsProvider: dailyReportInsights,
+              mutationExecutor: automationMutationSelection.executor,
+              env: process.env,
+              fallbackTimeZone: userTimeZone,
+            });
+            const level: "info" | "warn" | "error" =
+              summary.status === "succeeded"
+                ? "info"
+                : summary.status === "policy_missing"
+                  ? "warn"
+                  : "error";
+            await cronStore.recordExecutionLog({
+              cronRunId: handle.cronRunId,
+              workspaceId: workspace.id,
+              kind: "cron",
+              refType: "cron_run",
+              refId: handle.cronRunId,
+              level,
+              message:
+                `automation_rules: ${summary.status} ` +
+                `(rules=${summary.rulesLoaded}, evaluated=${summary.rulesEvaluated}, ` +
+                `planned=${summary.actionsPlanned}, executed=${summary.actionsExecuted}, blocked=${summary.actionsBlocked})`,
+              payload: summary as unknown as JsonValue,
+            });
+            if (summary.status === "failed") {
+              await failCronRun(
+                cronStore,
+                handle,
+                `automation_rules failed: ${summary.errors.join("; ")}`
+              );
+            } else {
+              await finishCronRun(cronStore, handle, summary as unknown as JsonValue);
+            }
           } else if (preset.name === "improvement_pr") {
             // regression fix: workspace mode + per-account modeOverride を取得し、
             // 解決した実効 mode を ad_account ごとに改めて渡す。dangerous category
@@ -695,7 +779,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             // regression fix: 生成された YAML 変更を CLI / `/api/plan` と同じ
             // runPlanForRoot で検証し、PR body と audit metadata に実 plan 結果を残す。
             const planValidator = createImprovementPrPlanValidator({
-              rootDir: process.env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || null,
+              rootDir: opsRepoRootDir,
               baseDir: process.env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null,
             });
             const auditWriter = createImprovementPrAuditWriter({ prisma });
@@ -912,6 +996,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               workspaceId: workspace.id,
               provider: llmSelection.provider,
               boss,
+              githubAdapter: getGithubAdapter(),
             });
             const level: "info" | "warn" | "error" =
               summary.status === "succeeded"
@@ -1034,6 +1119,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   });
   const adsLoader = createLocalDirAdsLoaderFromEnv(process.env, {
     expectedRepoId: wsRow?.opsRepoId ?? null,
+    localDir: opsRepoRootDir,
   });
   const applyExecutorSelection = await resolveApplyExecutor({
     env: process.env,
@@ -1230,7 +1316,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       workspaceId: workspace.id,
     }),
     improvementPrPlanValidator: createImprovementPrPlanValidator({
-      rootDir: process.env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || null,
+      rootDir: opsRepoRootDir,
       baseDir: process.env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null,
     }),
     improvementPrAudit: createImprovementPrAuditWriter({ prisma }),

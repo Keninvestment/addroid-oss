@@ -29,6 +29,12 @@ export const CRON_PRESETS = [
     enabledByDefault: false,
   },
   {
+    name: "automation_rules",
+    cron: "*/15 * * * *",
+    description: "事前承認済み automation-rules.yaml を評価し、許可された自動運用だけ実行する",
+    enabledByDefault: false,
+  },
+  {
     name: "improvement_pr",
     cron: "0 10 * * 1",
     description: "AI 改善提案 PR を週次で作成 (後続コントラクト)",

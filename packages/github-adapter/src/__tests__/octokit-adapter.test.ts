@@ -237,6 +237,25 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the 
   assert.equal(api?.calls.protections.length, 1);
 });
 
+test("OctokitGithubAdapter.bootstrapOpsRepo includes brand.yaml for all initially synced ad accounts", async () => {
+  const { adapter, getLastApi } = makeAdapter({ login: "octo-test-user" });
+  const begin = await adapter.beginOAuth();
+  await adapter.completeOAuth({ code: "c", state: begin.state });
+  const result = await adapter.bootstrapOpsRepo({
+    ...BOOTSTRAP_INPUT,
+    initialAccounts: [
+      { key: "primary", displayName: "Primary Account" },
+      { key: "act_222", displayName: "Second Account" },
+      { key: "act_333", displayName: "Third Account" },
+    ],
+  });
+  assert.equal(result.filesCommitted, 9);
+  const paths = getLastApi()?.calls.templateCommits[0]?.files.map((f) => f.path).sort() ?? [];
+  assert.ok(paths.includes("ads/accounts/primary/brand.yaml"));
+  assert.ok(paths.includes("ads/accounts/act_222/brand.yaml"));
+  assert.ok(paths.includes("ads/accounts/act_333/brand.yaml"));
+});
+
 test("OctokitGithubAdapter.bootstrapOpsRepo reports branch protection failure as fail-soft", async () => {
   const { adapter } = makeAdapter({ login: "octo-test-user", protectionWillFail: true });
   const begin = await adapter.beginOAuth();

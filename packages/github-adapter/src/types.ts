@@ -42,6 +42,11 @@ export interface BootstrapOpsRepoInput {
   workspaceDisplayName: string;
   initialAccountKey: string;
   initialAccountDisplayName: string;
+  /**
+   * 初期 bootstrap 時に同時に用意する Meta ad accounts。
+   * 複数アカウント連携済みの場合、各 account の brand.yaml を作る。
+   */
+  initialAccounts?: { key: string; displayName: string }[];
   /** 作成する repo 名。owner は OAuth 接続済みアカウント。 */
   desiredName: string;
   /** 既定 "main"。 */

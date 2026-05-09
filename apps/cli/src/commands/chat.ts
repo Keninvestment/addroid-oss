@@ -21,6 +21,7 @@ import type {
 } from "@addroid/llm-provider";
 import {
   buildAgentContext,
+  buildAgentLoopInput,
   runAgentTurn,
   type AgentContext,
 } from "@addroid/agent-runtime";
@@ -39,6 +40,24 @@ import {
   runSubmitCommand,
 } from "./public.js";
 import { ensureWebUiStarted } from "../lib/web-service.js";
+import {
+  createOpsChangeProposal,
+  type OpsChangeProposalInput,
+} from "../../../worker/src/lib/ops-proposal-runtime.js";
+import {
+  createAutomationRuleCalibrationUpdateProposal,
+  createAutomationRuleProposal,
+  type AutomationRuleCalibrationUpdateInput,
+  type AutomationRuleProposalInput,
+} from "../../../worker/src/lib/automation-rule-proposal-runtime.js";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "../../../worker/src/lib/ops-repo-local.js";
+import {
+  createOrReuseAgentTask,
+  normalizeAgentTaskPrompt,
+} from "../../../worker/src/lib/agent-task-store.js";
 
 type ChatCommandName =
   | "doctor"
@@ -272,82 +291,126 @@ async function handleChatInput(
     chatMemory?: ChatMemory;
   }
 ): Promise<number> {
-  let response: Awaited<ReturnType<typeof runAgentTurn>>;
   const progress = createWorkingIndicator(opts.out, opts.input);
   const agentContext = appendChatMemoryToAgentContext(opts.agentContext, opts.chatMemory);
-  try {
-    response = await progress.run(
-      runAgentTurn({
-        input,
-        provider: opts.provider,
-        agentContext,
-        model: opts.model,
-        purpose: "cli:chat-agent",
-        surface: "cli-chat",
-      })
-    );
-  } catch (err) {
-    if (err instanceof ChatInterruptedError) {
-      opts.out.write("interrupted\n");
-      return 130;
+  let finalMessage = "";
+  let lastCode = 0;
+  const toolSummaries: string[] = [];
+  let lastIntent: string | null = null;
+  const loopExecutions: Array<{ display: string; status: string; message: string; data?: unknown }> = [];
+  const seenTools = new Set<string>();
+
+  for (let i = 0; i < 4; i += 1) {
+    let response: Awaited<ReturnType<typeof runAgentTurn>>;
+    try {
+      response = await progress.run(
+        runAgentTurn({
+          input: buildAgentLoopInput(input, loopExecutions),
+          provider: opts.provider,
+          agentContext,
+          model: opts.model,
+          purpose: "cli:chat-agent",
+          surface: "cli-chat",
+        })
+      );
+    } catch (err) {
+      if (err instanceof ChatInterruptedError) {
+        opts.out.write("interrupted\n");
+        return 130;
+      }
+      throw err;
     }
-    throw err;
+    if (response.message) {
+      finalMessage = response.message;
+      opts.out.write(`${response.message}\n`);
+    }
+    if (response.toolResults.length === 0) break;
+    let executedAny = false;
+    for (const tool of response.toolResults) {
+      const signature = toolSignature(tool);
+      if (signature && seenTools.has(signature)) {
+        opts.out.write(`skipped duplicate tool: ${signature}\n`);
+        loopExecutions.push({
+          display: signature,
+          status: "unsupported",
+          message: "duplicate tool call skipped",
+        });
+        continue;
+      }
+      if (signature) seenTools.add(signature);
+      if (tool.status === "denied") {
+        opts.out.write(`denied: ${tool.toolName} (${tool.reason})\n`);
+        toolSummaries.push(`denied ${tool.toolName}: ${tool.reason}`);
+        loopExecutions.push({ display: tool.toolName, status: "denied", message: tool.reason });
+        continue;
+      }
+      if (tool.status === "unsupported") {
+        opts.out.write(`unsupported tool: ${tool.toolName} (${tool.reason})\n`);
+        toolSummaries.push(`unsupported ${tool.toolName}: ${tool.reason}`);
+        loopExecutions.push({ display: tool.toolName, status: "unsupported", message: tool.reason });
+        continue;
+      }
+      lastIntent = intentFromTool(tool) ?? lastIntent;
+      if (opts.userFacingTools) {
+        const handled = await executeUserFacingTool(tool, opts);
+        if (handled.handled) {
+          toolSummaries.push(`${tool.tool}: exit ${handled.code}`);
+          loopExecutions.push({
+            display: tool.display,
+            status: handled.code === 0 ? "ok" : "error",
+            message: handled.message,
+            ...(handled.data !== undefined ? { data: handled.data } : {}),
+          });
+          executedAny = true;
+          if (handled.code !== 0) {
+            lastCode = handled.code;
+            break;
+          }
+          continue;
+        }
+      }
+      opts.out.write(`> ${tool.display}${tool.why ? `  # ${tool.why}` : ""}\n`);
+      if (tool.command === null) {
+        opts.out.write(`unsupported local tool: ${tool.tool}\n`);
+        lastCode = 1;
+        toolSummaries.push(`${tool.tool}: unsupported`);
+        loopExecutions.push({
+          display: tool.display,
+          status: "unsupported",
+          message: `unsupported local tool: ${tool.tool}`,
+        });
+        continue;
+      }
+      const code = await opts.runCommand(tool.command as ChatCommandName, tool.args);
+      toolSummaries.push(`${tool.display}: exit ${code}`);
+      loopExecutions.push({
+        display: tool.display,
+        status: code === 0 ? "ok" : "error",
+        message: `exit ${code}`,
+      });
+      executedAny = true;
+      if (code !== 0) {
+        lastCode = code;
+        break;
+      }
+    }
+    if (!executedAny || lastCode !== 0) break;
   }
-  if (response.message) opts.out.write(`${response.message}\n`);
-  if (response.toolResults.length === 0) {
+
+  if (toolSummaries.length === 0) {
     await rememberChatTurn(opts.chatMemory, {
       createdAt: new Date().toISOString(),
       user: input,
-      assistant: response.message,
+      assistant: finalMessage,
       tools: [],
       lastIntent: null,
     });
     return 0;
   }
-  let lastCode = 0;
-  const toolSummaries: string[] = [];
-  let lastIntent: string | null = null;
-  for (const tool of response.toolResults) {
-    if (tool.status === "denied") {
-      opts.out.write(`denied: ${tool.toolName} (${tool.reason})\n`);
-      toolSummaries.push(`denied ${tool.toolName}: ${tool.reason}`);
-      continue;
-    }
-    if (tool.status === "unsupported") {
-      opts.out.write(`unsupported tool: ${tool.toolName} (${tool.reason})\n`);
-      toolSummaries.push(`unsupported ${tool.toolName}: ${tool.reason}`);
-      continue;
-    }
-    lastIntent = intentFromTool(tool) ?? lastIntent;
-    if (opts.userFacingTools) {
-      const handled = await executeUserFacingTool(tool, opts);
-      if (handled.handled) {
-        toolSummaries.push(`${tool.tool}: exit ${handled.code}`);
-        if (handled.code !== 0) {
-          lastCode = handled.code;
-          break;
-        }
-        continue;
-      }
-    }
-    opts.out.write(`> ${tool.display}${tool.why ? `  # ${tool.why}` : ""}\n`);
-    if (tool.command === null) {
-      opts.out.write(`unsupported local tool: ${tool.tool}\n`);
-      lastCode = 1;
-      toolSummaries.push(`${tool.tool}: ok`);
-      continue;
-    }
-    const code = await opts.runCommand(tool.command as ChatCommandName, tool.args);
-    toolSummaries.push(`${tool.display}: exit ${code}`);
-    if (code !== 0) {
-      lastCode = code;
-      break;
-    }
-  }
   await rememberChatTurn(opts.chatMemory, {
     createdAt: new Date().toISOString(),
     user: input,
-    assistant: response.message,
+    assistant: finalMessage,
     tools: toolSummaries,
     lastIntent,
   });
@@ -453,29 +516,52 @@ async function executeUserFacingTool(
     provider: LLMProvider;
     model?: string;
   }
-): Promise<{ handled: true; code: number } | { handled: false }> {
+): Promise<{ handled: true; code: number; message: string; data?: unknown } | { handled: false }> {
   if (tool.tool === "get_report") {
     const kind = typeof tool.toolArgs.kind === "string" ? tool.toolArgs.kind : "daily";
     if (normalizeReportKind(kind) !== "daily") return { handled: false };
-    return { handled: true, code: await runDailyReportForChat(tool, opts) };
+    const code = await runDailyReportForChat(tool, opts);
+    return { handled: true, code, message: `daily report exit ${code}` };
   }
   if (tool.tool === "check_submission") {
-    return { handled: true, code: await runSubmissionCheckForChat(tool, opts) };
+    const code = await runSubmissionCheckForChat(tool, opts);
+    return { handled: true, code, message: `submission check exit ${code}` };
   }
   if (tool.tool === "create_scheduled_agent_task") {
-    return { handled: true, code: await createScheduledAgentTaskForChat(tool, opts) };
+    const code = await createScheduledAgentTaskForChat(tool, opts);
+    return { handled: true, code, message: `scheduled agent task exit ${code}` };
   }
   if (tool.tool === "set_schedule_enabled") {
-    return { handled: true, code: await setScheduleEnabledForChat(tool, opts) };
+    const code = await setScheduleEnabledForChat(tool, opts);
+    return { handled: true, code, message: `schedule update exit ${code}` };
   }
   if (tool.tool === "open_web_ui") {
     opts.out.write(`Web UI を開くにはこちらを使ってください:\n${opts.agentContext.webUrl}\n`);
-    return { handled: true, code: 0 };
+    return { handled: true, code: 0, message: opts.agentContext.webUrl };
   }
   if (tool.tool === "query_meta_ads") {
-    return { handled: true, code: await runMetaAdsReadOnlyForChat(tool, opts) };
+    const code = await runMetaAdsReadOnlyForChat(tool, opts);
+    return { handled: true, code, message: `Meta Ads read-only query exit ${code}` };
+  }
+  if (tool.tool === "propose_ops_change") {
+    return await proposeOpsChangeForChat(tool, opts);
+  }
+  if (tool.tool === "propose_automation_rule") {
+    return await proposeAutomationRuleForChat(tool, opts);
+  }
+  if (tool.tool === "propose_automation_rule_update") {
+    return await proposeAutomationRuleUpdateForChat(tool, opts);
   }
   return { handled: false };
+}
+
+function toolSignature(tool: Awaited<ReturnType<typeof runAgentTurn>>["toolResults"][number]): string | null {
+  if (tool.status !== "ready") return null;
+  try {
+    return `${tool.tool}:${JSON.stringify(tool.toolArgs)}`;
+  } catch {
+    return tool.tool;
+  }
 }
 
 function normalizeReportKind(value: string): "daily" | "budget" | "improvement" {
@@ -565,7 +651,8 @@ async function createScheduledAgentTaskForChat(
   try {
     const prompt = readRequiredToolString(tool.toolArgs, "prompt");
     const cron = readRequiredToolString(tool.toolArgs, "cron");
-    const title = readMetaStringArg(tool.toolArgs, "title") ?? deriveAgentTaskTitle(prompt);
+    const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
+    const title = readMetaStringArg(tool.toolArgs, "title") ?? deriveAgentTaskTitle(normalizedPrompt);
     const runNow = tool.toolArgs.runNow === true;
     const { validateCronExpression } = await import("@addroid/queue");
     const validation = validateCronExpression(cron);
@@ -575,25 +662,21 @@ async function createScheduledAgentTaskForChat(
     }
     ctx = await prepareChatCronContext(opts.env);
     const nextRunAt = runNow ? new Date() : await computeNextRunAt(cron);
-    const task = await ctx.prisma.agentTask.create({
-      data: {
-        workspaceId: ctx.workspaceId,
-        title,
-        prompt,
-        cron,
-        enabled: true,
-        nextRunAt,
-        createdBy: "agent:cli-chat",
-      },
-      select: { id: true, title: true, prompt: true, cron: true, nextRunAt: true },
+    const { task, created } = await createOrReuseAgentTask(ctx.prisma as never, {
+      workspaceId: ctx.workspaceId,
+      title,
+      prompt: normalizedPrompt,
+      cron,
+      nextRunAt,
+      createdBy: "agent:cli-chat",
     });
     await ctx.prisma.auditLog.create({
       data: {
         workspaceId: ctx.workspaceId,
         actor: "agent:cli-chat",
-        action: "agent_task.created_via_chat",
+        action: created ? "agent_task.created_via_chat" : "agent_task.reused_via_chat",
         target: `agent_task:${task.id}`,
-        metadata: { title, cron, prompt, runNow },
+        metadata: { title, cron, prompt: normalizedPrompt, runNow, created },
       },
     }).catch(() => undefined);
     let jobId: string | null = null;
@@ -606,7 +689,7 @@ async function createScheduledAgentTaskForChat(
     }
     opts.out.write(
       [
-        "Agent task を設定しました。",
+        created ? "Agent task を設定しました。" : "同じ Agent task が既にあるため再利用しました。",
         `- 実行内容: ${task.prompt}`,
         `- schedule: ${task.cron}`,
         `- 次回実行: ${task.nextRunAt ? task.nextRunAt.toISOString() : "(未定)"}`,
@@ -687,6 +770,126 @@ async function setScheduleEnabledForChat(
   }
 }
 
+async function proposeOpsChangeForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "GitOps PR を作成できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const [{ resolveGithubAdapter }] = await Promise.all([
+      import("../../../worker/src/lib/github-adapter-wiring.js"),
+    ]);
+    ctx = await prepareChatCronContext(opts.env);
+    const github = await resolveGithubAdapter({ prisma: ctx.prisma, env: opts.env });
+    const result = await createOpsChangeProposal({
+      prisma: ctx.prisma,
+      githubAdapter: github.adapter,
+      workspaceId: ctx.workspaceId,
+      input: normalizeOpsProposalInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+    });
+    const message = `GitOps PR #${result.prNumber} を作成しました。人間の承認・merge 後に反映されます。`;
+    opts.out.write([message, result.htmlUrl, ""].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `GitOps PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function proposeAutomationRuleForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "自動化ルール PR を作成できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const [{ resolveGithubAdapter }] = await Promise.all([
+      import("../../../worker/src/lib/github-adapter-wiring.js"),
+    ]);
+    ctx = await prepareChatCronContext(opts.env);
+    const github = await resolveGithubAdapter({ prisma: ctx.prisma, env: opts.env });
+    const result = await createAutomationRuleProposal({
+      prisma: ctx.prisma,
+      githubAdapter: github.adapter,
+      workspaceId: ctx.workspaceId,
+      input: normalizeAutomationRuleProposalInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+    });
+    const message = `自動化ルール PR #${result.prNumber} を作成しました。承認・merge 後に automation_rules cron で評価されます。`;
+    opts.out.write([message, result.htmlUrl, ""].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `自動化ルール PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function proposeAutomationRuleUpdateForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "自動化ルール更新PR を作成できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const [{ resolveGithubAdapter }] = await Promise.all([
+      import("../../../worker/src/lib/github-adapter-wiring.js"),
+    ]);
+    ctx = await prepareChatCronContext(opts.env);
+    const github = await resolveGithubAdapter({ prisma: ctx.prisma, env: opts.env });
+    const result = await createAutomationRuleCalibrationUpdateProposal({
+      prisma: ctx.prisma,
+      githubAdapter: github.adapter,
+      workspaceId: ctx.workspaceId,
+      input: normalizeAutomationRuleUpdateInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+    });
+    const message = `自動化ルールの安全レール更新PR #${result.prNumber} を作成しました。承認・merge 後に auto_apply が再開可能になります。`;
+    opts.out.write([message, result.htmlUrl, ""].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `自動化ルール更新PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
 async function prepareChatCronContext(env: NodeJS.ProcessEnv): Promise<{
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   prisma: any;
@@ -721,6 +924,22 @@ async function prepareChatCronContext(env: NodeJS.ProcessEnv): Promise<{
       await prisma.$disconnect().catch(() => undefined);
     },
   };
+}
+
+async function ensureCliWorkspaceForChat(env: NodeJS.ProcessEnv): Promise<{ id: string }> {
+  const [{ prisma }, stores] = await Promise.all([
+    import("@addroid/db"),
+    import("../../../worker/src/lib/prisma-stores.js"),
+  ]);
+  const paths = await ensureAddroidPaths(env);
+  const config = (await readAddroidConfig(env).catch(() => null)) ?? defaultAddroidConfig();
+  return stores.ensureWorkspace(prisma, {
+    slug: config.workspace.slug,
+    displayName: config.workspace.displayName,
+    configPath: paths.configFile,
+    storageDir: paths.storageDir,
+    databaseUrlRef: config.database.urlRef,
+  });
 }
 
 async function waitForCronRun(
@@ -903,15 +1122,15 @@ function parseDailyReportUserSummary(value: unknown): DailyReportUserSummary | n
   };
 }
 
-function runSubmissionCheckForChat(
+async function runSubmissionCheckForChat(
   tool: ReadyAgentTool,
   opts: {
     out: NodeJS.WritableStream;
     env: NodeJS.ProcessEnv;
     agentContext: AgentContext;
   }
-): number {
-  const rootDir = resolveOpsPath(tool.toolArgs.root, opts.env.ADDROID_OPS_REPO_LOCAL_DIR, process.cwd());
+): Promise<number> {
+  const rootDir = await resolveSubmissionRootForChat(tool, opts.env);
   const baseDir = resolveOptionalOpsPath(tool.toolArgs.base, opts.env.ADDROID_OPS_REPO_BASE_DIR);
   const accountFilter = typeof tool.toolArgs.account === "string" ? tool.toolArgs.account.trim() || null : null;
   try {
@@ -922,6 +1141,34 @@ function runSubmissionCheckForChat(
     opts.out.write(`入稿チェックを実行できませんでした: ${(err as Error).message}\n`);
     return 1;
   }
+}
+
+async function resolveSubmissionRootForChat(
+  tool: ReadyAgentTool,
+  env: NodeJS.ProcessEnv
+): Promise<string> {
+  if (typeof tool.toolArgs.root === "string" && tool.toolArgs.root.trim()) {
+    return path.resolve(tool.toolArgs.root.trim());
+  }
+  if (env.ADDROID_OPS_REPO_LOCAL_DIR?.trim()) {
+    return path.resolve(env.ADDROID_OPS_REPO_LOCAL_DIR.trim());
+  }
+  const [{ prisma }] = await Promise.all([import("@addroid/db")]);
+  const workspace = await ensureCliWorkspaceForChat(env);
+  const checkout = await ensureOpsRepoLocalCheckout({
+    prisma: prisma as never,
+    workspaceId: workspace.id,
+    env,
+  }).catch(() => null);
+  return (
+    checkout?.rootDir ??
+    (await resolveOpsRepoLocalDirForWorkspace({
+      prisma: prisma as never,
+      workspaceId: workspace.id,
+      env,
+    })).rootDir ??
+    process.cwd()
+  );
 }
 
 async function runMetaAdsReadOnlyForChat(
@@ -1465,6 +1712,84 @@ function readRequiredToolString(args: Record<string, unknown>, key: string): str
   return value;
 }
 
+function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProposalInput {
+  const intentRaw = readOptionalString(args.intent)?.toLowerCase().replace(/-/g, "_");
+  const intent: OpsChangeProposalInput["intent"] =
+    intentRaw === "activate" ||
+    intentRaw === "status_change" ||
+    intentRaw === "budget_change" ||
+    intentRaw === "other"
+      ? intentRaw
+      : "pause";
+  const targets: NonNullable<OpsChangeProposalInput["targets"]> = Array.isArray(args.targets)
+    ? args.targets.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const level = readOptionalString(item.level);
+        const id = readOptionalString(item.id);
+        if (!id || (level !== "campaign" && level !== "adset" && level !== "ad")) return [];
+        return [{ level, id }];
+      })
+    : [];
+  const targetIds = Array.isArray(args.targetIds)
+    ? args.targetIds.flatMap((item) => {
+        const id = readOptionalString(item);
+        return id ? [id] : [];
+      })
+    : [];
+  const desiredChanges = isRecord(args.desiredChanges) ? args.desiredChanges : undefined;
+  const urgencyRaw = readOptionalString(args.urgency);
+  const urgency =
+    urgencyRaw === "low" || urgencyRaw === "high" || urgencyRaw === "normal"
+      ? urgencyRaw
+      : undefined;
+  const accountKey = readOptionalString(args.accountKey);
+  const rationale = readOptionalString(args.rationale);
+  return {
+    intent,
+    ...(accountKey ? { accountKey } : {}),
+    ...(targets.length > 0 ? { targets } : {}),
+    ...(targetIds.length > 0 ? { targetIds } : {}),
+    ...(desiredChanges ? { desiredChanges } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(urgency ? { urgency } : {}),
+  };
+}
+
+function normalizeAutomationRuleProposalInput(
+  args: Record<string, unknown>
+): AutomationRuleProposalInput {
+  const sourceText =
+    readOptionalString(args.sourceText) ??
+    readOptionalString(args.source_text) ??
+    readOptionalString(args.prompt);
+  const rule = isRecord(args.rule) ? args.rule : undefined;
+  const rationale = readOptionalString(args.rationale);
+  const title = readOptionalString(args.title);
+  return {
+    ...(sourceText ? { sourceText } : {}),
+    ...(rule ? { rule } : {}),
+    ...(rationale ? { rationale } : {}),
+    ...(title ? { title } : {}),
+  };
+}
+
+function normalizeAutomationRuleUpdateInput(
+  args: Record<string, unknown>
+): AutomationRuleCalibrationUpdateInput {
+  const ruleId =
+    readOptionalString(args.ruleId) ??
+    readOptionalString(args.rule_id) ??
+    readOptionalString(args.id);
+  if (!ruleId) throw new Error("ruleId が必要です。");
+  const rationale = readOptionalString(args.rationale);
+  const title = readOptionalString(args.title);
+  return {
+    ruleId,
+    ...(rationale ? { rationale } : {}),
+    ...(title ? { title } : {}),
+  };
+}
+
 function resolveMetricDateArg(args: Record<string, unknown>): string | null {
   const explicit = readMetaStringArg(args, "metricDate", "metric_date");
   if (explicit) return explicit;
@@ -1490,6 +1815,7 @@ function normalizePresetName(value: string): string {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
   if (v === "budget" || v === "budget_guard") return "budget_guard";
+  if (v === "automation" || v === "automation_rules" || v === "autopilot") return "automation_rules";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";

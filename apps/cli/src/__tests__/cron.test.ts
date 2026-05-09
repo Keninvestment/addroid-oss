@@ -56,6 +56,7 @@ test("cron --help は Usage を出して 0 を返す", async () => {
   assert.match(out.stdout, /disable\s+<name>/);
   assert.match(out.stdout, /set\s+<name>/);
   assert.match(out.stdout, /run\s+<name>/);
+  assert.match(out.stdout, /--metric-date/);
   assert.match(out.stdout, /logs\s+<name>/);
 });
 
@@ -124,6 +125,17 @@ test("cron run は未知のプリセット名を exit 2 で拒否する", async 
   );
   assert.equal(code, 2);
   assert.match(out.stderr, /未知のプリセット名/);
+});
+
+test("cron run は metric-date-relative の不正値を DB 起動前に拒否する", async () => {
+  await withoutDatabaseUrl(async () => {
+    const { code, out } = await capture(() =>
+      runCronCommand(["run", "daily_report", "--metric-date-relative", "tomorrow"])
+    );
+    assert.equal(code, 2);
+    assert.match(out.stderr, /today \/ yesterday/);
+    assert.doesNotMatch(out.stderr, /DATABASE_URL/);
+  });
 });
 
 test("cron logs は <name> なしで exit 2", async () => {

@@ -7,6 +7,7 @@ import type {
   LLMProvider,
 } from "@addroid/llm-provider";
 import {
+  buildAgentLoopInput,
   buildAgentSystemPrompt,
   evaluateAgentToolPolicy,
   runAgentTurn,
@@ -62,6 +63,18 @@ test("system prompt exposes scheduled task creation to chat surfaces only", () =
     buildAgentSystemPrompt(context, "scheduled-agent"),
     /create_scheduled_agent_task/
   );
+});
+
+test("system prompt exposes read-only Meta query and GitOps proposal to scheduled agents", () => {
+  const context = {
+    content: "test agent context",
+    webUrl: "http://127.0.0.1:3000",
+    loadedDocs: ["test"],
+  };
+  const prompt = buildAgentSystemPrompt(context, "scheduled-agent");
+  assert.match(prompt, /query_meta_ads/);
+  assert.match(prompt, /propose_ops_change/);
+  assert.doesNotMatch(prompt, /^- start_delivery:/m);
 });
 
 test("runAgentTurn resolves create_scheduled_agent_task on cli-chat", async () => {
@@ -123,6 +136,67 @@ test("runAgentTurn denies unavailable tools on scheduled-agent surface", async (
     surface: "scheduled-agent",
   });
   assert.equal(result.toolResults[0]?.status, "unsupported");
+});
+
+test("runAgentTurn keeps nested proposal args and rejects direct activation on chat surfaces", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "PRを作成します。",
+      tools: [
+        {
+          name: "propose_ops_change",
+          args: {
+            intent: "pause",
+            accountKey: "act_123",
+            targets: [{ level: "campaign", id: "cmp_1" }],
+            desiredChanges: { initialState: "PAUSED", budget: { dailyUsd: 10 } },
+            rationale: "CV0のため",
+          },
+        },
+        {
+          name: "start_delivery",
+          args: { hierarchyId: "cmp_2" },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "CV0のキャンペーンを止めて",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "cli-chat",
+  });
+
+  const proposal = result.toolResults[0];
+  assert.equal(proposal?.status, "ready");
+  if (proposal?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(proposal.tool, "propose_ops_change");
+  assert.deepEqual(proposal.toolArgs.targets, [{ level: "campaign", id: "cmp_1" }]);
+  assert.deepEqual(proposal.toolArgs.desiredChanges, {
+    initialState: "PAUSED",
+    budget: { dailyUsd: 10 },
+  });
+  assert.equal(result.toolResults[1]?.status, "unsupported");
+});
+
+test("buildAgentLoopInput includes prior tool results for multi-step reasoning", () => {
+  const input = buildAgentLoopInput("CV0を確認して必要なら止めて", [
+    {
+      display: "Meta Ads CLI read-only query",
+      status: "success",
+      message: "2件取得しました",
+      data: { rows: [{ campaign_id: "cmp_1", conversions: 0 }] },
+    },
+  ]);
+  assert.match(input, /Original user request:/);
+  assert.match(input, /Tool results already executed/);
+  assert.match(input, /cmp_1/);
+  assert.match(input, /Do not repeat a successful tool call/);
 });
 
 class ThrowingProvider implements LLMProvider {

@@ -9,6 +9,7 @@
 // SSR ページ。実データが無い場合は ガードレール「No Placeholder Data」に従い
 // 明示的な空状態 UI を出す。
 
+import Link from "next/link";
 import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
 import { PageHeader } from "../../../components/ui/PageHeader";
@@ -18,6 +19,9 @@ import { KeyValueList, type KeyValueEntry } from "../../../components/ui/KeyValu
 import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../../components/ui/StatusDot";
 import { InlineCode } from "../../../components/ui/CodeBlock";
+import { RunCronButton } from "../../../components/RunCronButton";
+import { formatDateTime, formatStoredDateOnly, resolveDisplayTimeZone } from "../../../lib/datetime";
+import { ensureWebWorkspace } from "../../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -85,6 +89,21 @@ interface SnapshotRow {
   conversions: number;
   source: string;
   createdAt: Date;
+}
+
+interface AdAccountTimeZoneRow {
+  workspaceId: string;
+  key: string;
+  timezoneName: string | null;
+}
+
+interface SearchParamsInput {
+  runId?: string | string[];
+}
+
+function single(v: string | string[] | undefined): string | undefined {
+  if (Array.isArray(v)) return v[0];
+  return v;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -283,19 +302,6 @@ function modeLabel(mode: string): string {
   return labels[mode] ?? mode;
 }
 
-function formatTimestamp(d: Date): string {
-  return new Intl.DateTimeFormat("ja-JP", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(d);
-}
-
-function formatDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
 function microsToMajor(micros: bigint): number {
   const div = Number(micros / 1_000_000n);
   const rem = Number(micros % 1_000_000n) / 1_000_000;
@@ -369,14 +375,230 @@ function KpiCell({ label, value, delta, hint }: KpiCellProps) {
   );
 }
 
-export default async function ReportsDailyPage() {
+function reportKpiRows(currency: string | null): {
+  label: string;
+  valueOf: (k: KpiSet) => string;
+  deltaKey: string;
+  hint?: string;
+}[] {
+  return [
+    {
+      label: "Spend",
+      valueOf: (k) => formatCurrency(k.spend, currency),
+      deltaKey: "spend",
+    },
+    { label: "Impressions", valueOf: (k) => formatNumber(k.impressions), deltaKey: "impressions" },
+    { label: "Clicks", valueOf: (k) => formatNumber(k.clicks), deltaKey: "clicks" },
+    { label: "CTR", valueOf: (k) => formatPercent(k.ctr), deltaKey: "ctr" },
+    {
+      label: "CPC",
+      valueOf: (k) => formatCurrency(k.cpc, currency),
+      deltaKey: "cpc",
+    },
+    {
+      label: "CV",
+      valueOf: (k) => formatNumber(k.conversions),
+      deltaKey: "conversions",
+      hint: "= conversions",
+    },
+    {
+      label: "CPA",
+      valueOf: (k) => formatCurrency(k.cpa, currency),
+      deltaKey: "cpa",
+    },
+    { label: "Frequency", valueOf: (k) => formatFrequency(k.frequency), deltaKey: "frequency" },
+  ];
+}
+
+function summaryItems(summary: DailyReportSummary, displayTimeZone: string): KeyValueEntry[] {
+  return [
+    {
+      label: "広告アカウント",
+      value: <InlineCode>{summary.accountKey}</InlineCode>,
+    },
+    {
+      label: "対象日",
+      value: (
+        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
+          {summary.metricDate || "—"}
+          {summary.priorMetricDate ? ` (vs ${summary.priorMetricDate})` : ""}
+        </span>
+      ),
+    },
+    {
+      label: "タイムゾーン",
+      value: <InlineCode>{displayTimeZone}</InlineCode>,
+    },
+    {
+      label: "通貨",
+      value: summary.currency ? <InlineCode>{summary.currency}</InlineCode> : <span>—</span>,
+    },
+    {
+      label: "取得元",
+      value: sourceLabel(summary.insightsSource),
+    },
+    {
+      label: "取得結果",
+      value: (
+        <StatusBadge state={reportSummaryStatusToState(summary.status)}>
+          {reportStatusLabel(summary.status)}
+        </StatusBadge>
+      ),
+    },
+    {
+      label: "実行モード",
+      value: (
+        <StatusBadge state={modeToState(summary.mode)}>
+          {modeLabel(summary.mode)}
+        </StatusBadge>
+      ),
+    },
+    {
+      label: "保存データ",
+      value:
+        summary.snapshotIds.length === 0 ? (
+          <span>—</span>
+        ) : (
+          <span style={{ fontFamily: "var(--font-mono)" }}>
+            {summary.snapshotIds.length} 件 ({summary.snapshotIds.slice(0, 4).join(", ")}
+            {summary.snapshotIds.length > 4 ? ", …" : ""})
+          </span>
+        ),
+    },
+    {
+      label: "AI実行ID",
+      value: summary.aiRunId ? <InlineCode>{summary.aiRunId}</InlineCode> : <span>—</span>,
+    },
+  ];
+}
+
+function DailyReportDetail({
+  summary,
+  displayTimeZone,
+}: {
+  summary: DailyReportSummary;
+  displayTimeZone: string;
+}) {
+  const kpiRows = reportKpiRows(summary.currency);
+  return (
+    <div style={{ display: "grid", gap: "1.25rem" }}>
+      <KeyValueList items={summaryItems(summary, displayTimeZone)} />
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+          gap: "0.75rem",
+        }}
+      >
+        {kpiRows.map((kpi) => (
+          <KpiCell
+            key={kpi.label}
+            label={kpi.label}
+            value={kpi.valueOf(summary.current)}
+            delta={formatDelta(summary.deltas[kpi.deltaKey])}
+            {...(kpi.hint ? { hint: kpi.hint } : {})}
+          />
+        ))}
+      </div>
+
+      {summary.aiCommentary ? (
+        <div>
+          <div
+            style={{
+              fontSize: "0.75rem",
+              fontWeight: 600,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              color: "var(--color-text-secondary)",
+              marginBottom: "0.25rem",
+            }}
+          >
+            AIコメント
+          </div>
+          <p style={{ margin: 0 }}>{summary.aiCommentary}</p>
+        </div>
+      ) : null}
+
+      {summary.topImprovements.length > 0 ? (
+        <div>
+          <div
+            style={{
+              fontSize: "0.75rem",
+              fontWeight: 600,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              color: "var(--color-text-secondary)",
+              marginBottom: "0.25rem",
+            }}
+          >
+            改善候補
+          </div>
+          <ol style={{ margin: 0, paddingLeft: "1.25rem" }}>
+            {summary.topImprovements.map((imp, idx) => (
+              <li key={idx} style={{ marginBottom: "0.25rem" }}>
+                <InlineCode>{imp.hierarchy}</InlineCode> <InlineCode>{imp.target}</InlineCode> —{" "}
+                {imp.rationale}
+                {imp.expectedImpact ? (
+                  <span
+                    style={{
+                      color: "var(--color-text-secondary)",
+                      marginLeft: "0.25rem",
+                    }}
+                  >
+                    ({imp.expectedImpact})
+                  </span>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      {summary.errorMessage ? (
+        <div
+          style={{
+            fontSize: "0.8125rem",
+            color: "var(--color-status-error)",
+          }}
+        >
+          {summary.errorMessage}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function combinedReportStatus(summaries: DailyReportSummary[]): StatusState {
+  if (summaries.length === 0) return "idle";
+  if (summaries.some((s) => reportSummaryStatusToState(s.status) === "error")) return "error";
+  if (summaries.some((s) => reportSummaryStatusToState(s.status) === "warn")) return "warn";
+  if (summaries.some((s) => reportSummaryStatusToState(s.status) === "ok")) return "ok";
+  return "idle";
+}
+
+export default async function ReportsDailyPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
+  const selectedRunId = single(resolvedSearchParams?.runId) ?? null;
   let runs: CronRunRow[] = [];
   let snapshots: SnapshotRow[] = [];
+  let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
   let dbReady = true;
   try {
-    [runs, snapshots] = await Promise.all([
+    const workspace = await ensureWebWorkspace();
+    [runs, snapshots, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: { name: "daily_report" },
+        where: {
+          name: "daily_report",
+          OR: [
+            { schedule: { is: { workspaceId: workspace.id } } },
+            { executionLogs: { some: { workspaceId: workspace.id } } },
+          ],
+        },
         orderBy: { startedAt: "desc" },
         take: 25,
         select: {
@@ -391,6 +613,7 @@ export default async function ReportsDailyPage() {
         },
       }),
       prisma.performanceSnapshot.findMany({
+        where: { account: { workspaceId: workspace.id } },
         orderBy: [{ metricDate: "desc" }, { createdAt: "desc" }],
         take: 50,
         select: {
@@ -407,6 +630,10 @@ export default async function ReportsDailyPage() {
           createdAt: true,
         },
       }),
+      prisma.adAccount.findMany({
+        where: { workspaceId: workspace.id, active: true },
+        select: { workspaceId: true, key: true, timezoneName: true },
+      }),
     ]);
   } catch {
     dbReady = false;
@@ -420,42 +647,33 @@ export default async function ReportsDailyPage() {
     parsedSummaries.find(({ summary }) => summary.status === "succeeded") ??
     parsedSummaries[0] ??
     null;
+  const selectedRun = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : null;
+  const selectedSummaries = selectedRun ? parseDailyReportSummaries(selectedRun.output) : [];
+  const displayedSummaries = selectedRun ? selectedSummaries : latestSucceeded ? [latestSucceeded.summary] : [];
+  const showMissingSelectedRun = Boolean(selectedRunId && !selectedRun);
 
   const runsCount = runs.length;
   const snapshotsCount = snapshots.length;
-
-  const kpiRows: { label: string; valueOf: (k: KpiSet) => string; deltaKey: string; hint?: string }[] = [
-    {
-      label: "Spend",
-      valueOf: (k) => formatCurrency(k.spend, latestSucceeded?.summary.currency ?? null),
-      deltaKey: "spend",
-    },
-    { label: "Impressions", valueOf: (k) => formatNumber(k.impressions), deltaKey: "impressions" },
-    { label: "Clicks", valueOf: (k) => formatNumber(k.clicks), deltaKey: "clicks" },
-    { label: "CTR", valueOf: (k) => formatPercent(k.ctr), deltaKey: "ctr" },
-    {
-      label: "CPC",
-      valueOf: (k) => formatCurrency(k.cpc, latestSucceeded?.summary.currency ?? null),
-      deltaKey: "cpc",
-    },
-    {
-      label: "CV",
-      valueOf: (k) => formatNumber(k.conversions),
-      deltaKey: "conversions",
-      hint: "= conversions",
-    },
-    {
-      label: "CPA",
-      valueOf: (k) => formatCurrency(k.cpa, latestSucceeded?.summary.currency ?? null),
-      deltaKey: "cpa",
-    },
-    { label: "Frequency", valueOf: (k) => formatFrequency(k.frequency), deltaKey: "frequency" },
-  ];
+  const timeZoneByAccount = new Map(
+    adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
+  );
+  const summaryTimeZone = (summary: DailyReportSummary | null): string =>
+    resolveDisplayTimeZone(
+      summary ? timeZoneByAccount.get(`${summary.workspaceId}:${summary.accountKey}`) : null,
+      summary?.metricTimeZone
+    );
+  const pageDisplayTimeZone = displayedSummaries[0]
+    ? summaryTimeZone(displayedSummaries[0])
+    : resolveDisplayTimeZone();
+  const runTimeZone = (row: CronRunRow): string => {
+    const summary = parseDailyReportSummaries(row.output)[0] ?? null;
+    return summary ? summaryTimeZone(summary) : pageDisplayTimeZone;
+  };
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
       header: "開始日時",
-      cell: (row) => formatTimestamp(row.startedAt),
+      cell: (row) => formatDateTime(row.startedAt, { timeZone: runTimeZone(row) }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -468,8 +686,19 @@ export default async function ReportsDailyPage() {
     {
       header: "広告アカウント",
       cell: (row) => {
-        const summary = parseDailyReportSummaries(row.output)[0] ?? null;
-        return summary ? <InlineCode>{summary.accountKey}</InlineCode> : <span>—</span>;
+        const summaries = parseDailyReportSummaries(row.output);
+        const first = summaries[0] ?? null;
+        if (!first) return <span>—</span>;
+        return (
+          <span>
+            <InlineCode>{first.accountKey}</InlineCode>
+            {summaries.length > 1 ? (
+              <span style={{ color: "var(--color-text-secondary)", marginLeft: "0.25rem" }}>
+                +{summaries.length - 1}
+              </span>
+            ) : null}
+          </span>
+        );
       },
     },
     {
@@ -519,12 +748,28 @@ export default async function ReportsDailyPage() {
       className: "tabular",
       headerClassName: "tabular",
     },
+    {
+      header: "表示",
+      cell: (row) => {
+        const summaries = parseDailyReportSummaries(row.output);
+        if (summaries.length === 0) return <span>—</span>;
+        return (
+          <Link
+            href={`/reports/daily?runId=${encodeURIComponent(row.id)}#report-detail`}
+            className="btn btn--ghost btn--sm"
+            aria-current={row.id === selectedRunId ? "true" : undefined}
+          >
+            {row.id === selectedRunId ? "表示中" : "表示"}
+          </Link>
+        );
+      },
+    },
   ];
 
   const snapshotColumns: DataTableColumn<SnapshotRow>[] = [
     {
       header: "日付",
-      cell: (row) => formatDate(row.metricDate),
+      cell: (row) => formatStoredDateOnly(row.metricDate),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -582,89 +827,28 @@ export default async function ReportsDailyPage() {
     },
   ];
 
-  const latestSummaryItems: KeyValueEntry[] = latestSucceeded
-    ? [
-        {
-          label: "広告アカウント",
-          value: <InlineCode>{latestSucceeded.summary.accountKey}</InlineCode>,
-        },
-        {
-          label: "対象日",
-          value: (
-            <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
-              {latestSucceeded.summary.metricDate || "—"}
-              {latestSucceeded.summary.priorMetricDate
-                ? ` (vs ${latestSucceeded.summary.priorMetricDate})`
-                : ""}
-            </span>
-          ),
-        },
-        {
-          label: "タイムゾーン",
-          value: <InlineCode>{latestSucceeded.summary.metricTimeZone}</InlineCode>,
-        },
-        {
-          label: "通貨",
-          value: latestSucceeded.summary.currency ? (
-            <InlineCode>{latestSucceeded.summary.currency}</InlineCode>
-          ) : (
-            <span>—</span>
-          ),
-        },
-        {
-          label: "取得元",
-          value: sourceLabel(latestSucceeded.summary.insightsSource),
-        },
-        {
-          label: "取得結果",
-          value: (
-            <StatusBadge state={reportSummaryStatusToState(latestSucceeded.summary.status)}>
-              {reportStatusLabel(latestSucceeded.summary.status)}
-            </StatusBadge>
-          ),
-        },
-        {
-          label: "実行モード",
-          value: (
-            <StatusBadge state={modeToState(latestSucceeded.summary.mode)}>
-              {modeLabel(latestSucceeded.summary.mode)}
-            </StatusBadge>
-          ),
-        },
-        {
-          label: "保存データ",
-          value:
-            latestSucceeded.summary.snapshotIds.length === 0 ? (
-              <span>—</span>
-            ) : (
-              <span style={{ fontFamily: "var(--font-mono)" }}>
-                {latestSucceeded.summary.snapshotIds.length} 件 (
-                {latestSucceeded.summary.snapshotIds.slice(0, 4).join(", ")}
-                {latestSucceeded.summary.snapshotIds.length > 4 ? ", …" : ""})
-              </span>
-            ),
-        },
-        {
-          label: "AI実行ID",
-          value: latestSucceeded.summary.aiRunId ? (
-            <InlineCode>{latestSucceeded.summary.aiRunId}</InlineCode>
-          ) : (
-            <span>—</span>
-          ),
-        },
-      ]
-    : [];
-
   const latestSummaryStatus: StatusState = !dbReady
     ? "warn"
+    : showMissingSelectedRun
+      ? "warn"
+    : selectedRun
+      ? combinedReportStatus(selectedSummaries)
     : latestSucceeded
-      ? reportSummaryStatusToState(latestSucceeded.summary.status)
+      ? combinedReportStatus([latestSucceeded.summary])
       : "idle";
   const latestSummaryStatusLabel = !dbReady
     ? "warn"
+    : showMissingSelectedRun
+      ? "履歴なし"
+    : selectedRun
+      ? `${selectedSummaries.length} 件`
     : latestSucceeded
       ? reportStatusLabel(latestSucceeded.summary.status)
       : "未実行";
+  const reportPanelTitle = selectedRun ? "過去レポート" : "最新レポート";
+  const reportPanelSubtitle = selectedRun
+    ? `${formatDateTime(selectedRun.startedAt, { timeZone: pageDisplayTimeZone })} に実行したレポート`
+    : "直近に取得した広告アカウント全体のKPIとAIコメント";
 
   return (
     <>
@@ -675,12 +859,13 @@ export default async function ReportsDailyPage() {
             広告成果のKPIとAIコメントを確認します。この画面からMetaの広告設定は変更しません。
           </>
         }
+        actions={<RunCronButton presetName="daily_report" label="今すぐ取得" />}
       />
 
       <div className="page-body page-body--single">
         <Panel
-          title="最新レポート"
-          subtitle="直近に取得した広告アカウント全体のKPIとAIコメント"
+          title={reportPanelTitle}
+          subtitle={reportPanelSubtitle}
           status={
             <StatusDot state={latestSummaryStatus}>{latestSummaryStatusLabel}</StatusDot>
           }
@@ -690,96 +875,68 @@ export default async function ReportsDailyPage() {
               title="日次レポートを読み出せません"
               description="接続と健康状態を確認してください。"
             />
-          ) : !latestSucceeded ? (
+          ) : showMissingSelectedRun ? (
             <EmptyState
-              title="日次レポートはまだ実行されていません"
-              description="自動実行画面から日次レポートを有効化するか、ホームのチャットから依頼すると、ここに成果とAIコメントが表示されます。"
+              title="指定された実行履歴が見つかりません"
+              description="下の実行履歴から表示するレポートを選び直してください。"
+            />
+          ) : displayedSummaries.length === 0 ? (
+            <EmptyState
+              title={selectedRun ? "この実行には表示できるレポートがありません" : "日次レポートはまだ実行されていません"}
+              description={
+                selectedRun
+                  ? "実行履歴には残っていますが、レポート本文に必要な出力が保存されていません。"
+                  : "自動実行画面から日次レポートを有効化するか、ホームのチャットから依頼すると、ここに成果とAIコメントが表示されます。"
+              }
             />
           ) : (
-            <div style={{ display: "grid", gap: "1.25rem" }}>
-              <KeyValueList items={latestSummaryItems} />
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
-                  gap: "0.75rem",
-                }}
-              >
-                {kpiRows.map((kpi) => (
-                  <KpiCell
-                    key={kpi.label}
-                    label={kpi.label}
-                    value={kpi.valueOf(latestSucceeded.summary.current)}
-                    delta={formatDelta(latestSucceeded.summary.deltas[kpi.deltaKey])}
-                    {...(kpi.hint ? { hint: kpi.hint } : {})}
-                  />
-                ))}
-              </div>
-
-              {latestSucceeded.summary.aiCommentary ? (
-                <div>
-                  <div
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      letterSpacing: "0.06em",
-                      textTransform: "uppercase",
-                      color: "var(--color-text-secondary)",
-                      marginBottom: "0.25rem",
-                    }}
-                  >
-                    AIコメント
-                  </div>
-                  <p style={{ margin: 0 }}>{latestSucceeded.summary.aiCommentary}</p>
-                </div>
-              ) : null}
-
-              {latestSucceeded.summary.topImprovements.length > 0 ? (
-                <div>
-                  <div
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      letterSpacing: "0.06em",
-                      textTransform: "uppercase",
-                      color: "var(--color-text-secondary)",
-                      marginBottom: "0.25rem",
-                    }}
-                  >
-                    改善候補
-                  </div>
-                  <ol style={{ margin: 0, paddingLeft: "1.25rem" }}>
-                    {latestSucceeded.summary.topImprovements.map((imp, idx) => (
-                      <li key={idx} style={{ marginBottom: "0.25rem" }}>
-                        <InlineCode>{imp.hierarchy}</InlineCode>{" "}
-                        <InlineCode>{imp.target}</InlineCode> — {imp.rationale}
-                        {imp.expectedImpact ? (
-                          <span
-                            style={{
-                              color: "var(--color-text-secondary)",
-                              marginLeft: "0.25rem",
-                            }}
-                          >
-                            ({imp.expectedImpact})
-                          </span>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              ) : null}
-
-              {latestSucceeded.summary.errorMessage ? (
+            <div id="report-detail" style={{ display: "grid", gap: "1.5rem" }}>
+              {selectedRun ? (
                 <div
                   style={{
                     fontSize: "0.8125rem",
-                    color: "var(--color-status-error)",
+                    color: "var(--color-text-secondary)",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "0.75rem",
+                    flexWrap: "wrap",
                   }}
                 >
-                  {latestSucceeded.summary.errorMessage}
+                  <span>
+                    実行ID <InlineCode>{selectedRun.id}</InlineCode>
+                  </span>
+                  <Link href="/reports/daily" className="btn btn--ghost btn--sm">
+                    最新に戻る
+                  </Link>
                 </div>
               ) : null}
+              {displayedSummaries.map((summary, idx) => (
+                <div
+                  key={`${summary.accountKey}:${summary.metricDate}:${idx}`}
+                  style={{
+                    display: "grid",
+                    gap: "1.25rem",
+                    ...(idx > 0
+                      ? {
+                          borderTop: "1px solid var(--color-border-subtle)",
+                          paddingTop: "1.5rem",
+                        }
+                      : {}),
+                  }}
+                >
+                  {displayedSummaries.length > 1 ? (
+                    <div
+                      style={{
+                        fontSize: "0.875rem",
+                        fontWeight: 600,
+                      }}
+                    >
+                      <InlineCode>{summary.accountKey}</InlineCode>
+                    </div>
+                  ) : null}
+                  <DailyReportDetail summary={summary} displayTimeZone={summaryTimeZone(summary)} />
+                </div>
+              ))}
             </div>
           )}
         </Panel>

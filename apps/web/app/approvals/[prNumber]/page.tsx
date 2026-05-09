@@ -17,6 +17,8 @@ import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../../components/ui/StatusDot";
 import { CodeBlock, InlineCode } from "../../../components/ui/CodeBlock";
 import { MergePrButton } from "./MergePrButton";
+import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
+import { ensureWebWorkspace } from "../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -125,9 +127,17 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
     notFound();
   }
 
+  const workspace = await ensureWebWorkspace().catch(() => null);
+  if (!workspace) {
+    notFound();
+  }
+
   const pr = await prisma.githubPullRequest
     .findFirst({
-      where: { number: prNumber },
+      where: {
+        number: prNumber,
+        repo: { workspace: { is: { id: workspace.id } } },
+      },
       orderBy: { polledAt: "desc" },
       select: {
         id: true,
@@ -156,6 +166,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           },
         },
         approvalRecords: {
+          where: { workspaceId: workspace.id },
           orderBy: { createdAt: "desc" },
           select: {
             id: true,
@@ -180,6 +191,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
   try {
     const aiRun = await prisma.aiRun.findFirst({
       where: {
+        workspaceId: workspace.id,
         OR: [
           { linkedRefType: "github_pull_request", linkedRefId: pr.id },
           { linkedRefType: "improvement_pr", linkedRefId: pr.id },
@@ -207,6 +219,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
   const latestDecision = approvals[0]?.decision ?? null;
   const latestSource = approvals[0]?.decisionSource ?? null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   const canMerge =
     pr.state === "open" &&
@@ -281,12 +294,18 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
     },
     {
       label: "Polled",
-      value: <span className="tabular mono">{pr.polledAt.toISOString()}</span>,
+      value: (
+        <span className="tabular mono">
+          {formatDateTime(pr.polledAt, { timeZone: pageDisplayTimeZone })}
+        </span>
+      ),
     },
     {
       label: "Merged",
       value: pr.mergedAt ? (
-        <span className="tabular mono">{pr.mergedAt.toISOString()}</span>
+        <span className="tabular mono">
+          {formatDateTime(pr.mergedAt, { timeZone: pageDisplayTimeZone })}
+        </span>
       ) : (
         <span className="mono">—</span>
       ),
@@ -318,7 +337,9 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
   const previewSubtitleParts: string[] = [];
   if (previewSource) previewSubtitleParts.push(`source=${previewSource}`);
   if (previewUpdatedAt) {
-    previewSubtitleParts.push(`captured=${previewUpdatedAt.toISOString()}`);
+    previewSubtitleParts.push(
+      `captured=${formatDateTime(previewUpdatedAt, { timeZone: pageDisplayTimeZone })}`
+    );
   }
   const previewSubtitle =
     previewSubtitleParts.length > 0 ? previewSubtitleParts.join(" · ") : null;
@@ -523,7 +544,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
             columns={[
               {
                 header: "日時",
-                cell: (row) => row.createdAt.toISOString(),
+                cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
@@ -562,10 +583,10 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                 },
                 {
                   label: "開始日時",
-                  value: linkedImprovementPrAuditAt ? (
-                    <span className="tabular mono">
-                      {linkedImprovementPrAuditAt.toISOString()}
-                    </span>
+                    value: linkedImprovementPrAuditAt ? (
+                      <span className="tabular mono">
+                        {formatDateTime(linkedImprovementPrAuditAt, { timeZone: pageDisplayTimeZone })}
+                      </span>
                   ) : (
                     <span className="mono">—</span>
                   ),

@@ -20,7 +20,8 @@
     "@addroid/meta-adapter": "*",
     "@addroid/queue": "*",
     "@addroid/yaml-schemas": "*",
-    "cron-parser": "^4.9.0"
+    "cron-parser": "^4.9.0",
+    "yaml": "^2.5.1"
   },
   "devDependencies": {
     "tsx": "^4.16.5",

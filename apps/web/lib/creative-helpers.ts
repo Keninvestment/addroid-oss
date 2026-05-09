@@ -15,6 +15,7 @@
 import path from "node:path";
 import { LocalDiskStorage } from "@addroid/config";
 import type { StatusState } from "../components/ui/StatusDot";
+import { formatDateTime } from "./datetime";
 import { sanitizeForDisplay } from "./meta-runtime";
 
 // ---------------------------------------------------------------------
@@ -539,9 +540,7 @@ export async function readCreativeAssetByMetadata(
 // ---------------------------------------------------------------------
 
 export function formatTimestamp(d: Date | string): string {
-  const date = typeof d === "string" ? new Date(d) : d;
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toISOString().replace("T", " ").replace(/\..+$/, "Z");
+  return formatDateTime(d);
 }
 
 export function formatBytes(bytes: number): string {

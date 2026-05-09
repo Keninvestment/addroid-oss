@@ -1,16 +1,26 @@
 import { spawnSync } from "node:child_process";
-import { resolveWebBinding } from "@addroid/config";
+import {
+  defaultAddroidConfig,
+  ensureAddroidPaths,
+  readAddroidConfig,
+  resolveWebBinding,
+} from "@addroid/config";
 import { runAccountsCommand } from "./accounts.js";
 import { runAuthCommand } from "./auth.js";
 import { runCronCommand } from "./cron.js";
 import { runPlan } from "./plan.js";
 import { runValidate } from "./validate.js";
 import { ensureWebUiStarted } from "../lib/web-service.js";
+import {
+  ensureOpsRepoLocalCheckout,
+  resolveOpsRepoLocalDirForWorkspace,
+} from "../../../worker/src/lib/ops-repo-local.js";
 
 type CronPreset =
   | "github_poll"
   | "daily_report"
   | "budget_guard"
+  | "automation_rules"
   | "improvement_pr"
   | "retention_sweep"
   | "agent_tasks";
@@ -110,7 +120,7 @@ export async function runSubmitCommand(args: string[]): Promise<number> {
     printSubmitHelp();
     return 0;
   }
-  const parsed = parseSubmitArgs(args);
+  const parsed = parseSubmitArgs(args, await resolveDefaultSubmitRoot(process.env));
   if (!parsed.ok) {
     process.stderr.write(`[addroid submit] ${parsed.error}\n`);
     printSubmitHelp();
@@ -126,20 +136,23 @@ export async function runSubmitCommand(args: string[]): Promise<number> {
   return await runPlan(parsed.planArgs);
 }
 
-function parseSubmitArgs(args: string[]):
+function parseSubmitArgs(args: string[], defaultRoot: string | null):
   | { ok: true; validateArgs: string[]; planArgs: string[] }
   | { ok: false; error: string } {
   const validateArgs: string[] = [];
   const planArgs: string[] = ["--dry-run"];
+  let hasRoot = false;
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i]!;
     if (a === "--root" || a === "-r" || a === "--base" || a === "--account") {
       const next = args[i + 1];
       if (!next) return { ok: false, error: `${a} に値がありません` };
+      if (a === "--root" || a === "-r") hasRoot = true;
       if (a !== "--account") validateArgs.push(a, next);
       planArgs.push(a, next);
       i += 1;
     } else if (a.startsWith("--root=") || a.startsWith("--base=")) {
+      if (a.startsWith("--root=")) hasRoot = true;
       validateArgs.push(a);
       planArgs.push(a);
     } else if (a.startsWith("--account=")) {
@@ -150,7 +163,47 @@ function parseSubmitArgs(args: string[]):
       return { ok: false, error: `未知のオプション: ${a}` };
     }
   }
+  if (!hasRoot && defaultRoot) {
+    validateArgs.unshift("--root", defaultRoot);
+    planArgs.splice(1, 0, "--root", defaultRoot);
+  }
   return { ok: true, validateArgs, planArgs };
+}
+
+async function resolveDefaultSubmitRoot(env: NodeJS.ProcessEnv): Promise<string | null> {
+  const envRoot = env.ADDROID_OPS_REPO_LOCAL_DIR?.trim();
+  if (envRoot) return envRoot;
+  if (!env.DATABASE_URL) return null;
+  try {
+    const [{ prisma }, stores] = await Promise.all([
+      import("@addroid/db"),
+      import("../../../worker/src/lib/prisma-stores.js"),
+    ]);
+    const paths = await ensureAddroidPaths(env);
+    const config = (await readAddroidConfig(env).catch(() => null)) ?? defaultAddroidConfig(env);
+    const workspace = await stores.ensureWorkspace(prisma, {
+      slug: config.workspace.slug,
+      displayName: config.workspace.displayName,
+      configPath: paths.configFile,
+      storageDir: paths.storageDir,
+      databaseUrlRef: config.database.urlRef,
+    });
+    const checkout = await ensureOpsRepoLocalCheckout({
+      prisma: prisma as never,
+      workspaceId: workspace.id,
+      env,
+    }).catch(() => null);
+    return (
+      checkout?.rootDir ??
+      (await resolveOpsRepoLocalDirForWorkspace({
+        prisma: prisma as never,
+        workspaceId: workspace.id,
+        env,
+      })).rootDir
+    );
+  } catch {
+    return null;
+  }
 }
 
 function normalizeService(value: string): "meta" | "github" | "llm" | "slack" | null {
@@ -188,6 +241,7 @@ function reportPreset(value: string): CronPreset | null {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
   if (v === "budget" || v === "budget_guard") return "budget_guard";
+  if (v === "automation" || v === "automation_rules" || v === "autopilot") return "automation_rules";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";
@@ -292,7 +346,7 @@ function printSubmitHelp(): void {
       "  addroid submit [--root <ops-repo>] [--base <previous-repo>] [--account <key>] [--save]",
       "",
       "Options:",
-      "  --root <dir>     チェック対象の ops repo (既定: 現在のディレクトリ)",
+      "  --root <dir>     チェック対象の ops repo (既定: ADDROID_OPS_REPO_LOCAL_DIR、未設定なら現在のディレクトリ)",
       "  --base <dir>     比較元の ops repo",
       "  --account <key>  特定アカウントだけ変更予定を表示",
       "  --save           結果を履歴に保存",

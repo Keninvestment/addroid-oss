@@ -4,6 +4,8 @@ import { DataTable } from "../../../components/ui/DataTable";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { PageHeader } from "../../../components/ui/PageHeader";
 import { KeyValueList } from "../../../components/ui/KeyValueList";
+import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
+import { ensureWebWorkspace } from "../../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +22,9 @@ export default async function AuditLogPage() {
   let rows: Row[] = [];
   let warning: string | null = null;
   try {
+    const workspace = await ensureWebWorkspace();
     rows = await prisma.auditLog.findMany({
+      where: { workspaceId: workspace.id },
       orderBy: { createdAt: "desc" },
       take: 100,
       select: { id: true, createdAt: true, actor: true, action: true, target: true, ref: true },
@@ -37,6 +41,7 @@ export default async function AuditLogPage() {
   const approvalActions = rows.filter(
     (row) => row.action.includes("pr.") || row.action.includes("approval")
   ).length;
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   return (
     <>
@@ -52,7 +57,7 @@ export default async function AuditLogPage() {
               {
                 label: "最新の操作",
                 value: latest
-                  ? `${actionLabel(latest.action)} / ${formatTimestamp(latest.createdAt)}`
+                  ? `${actionLabel(latest.action)} / ${formatDateTime(latest.createdAt, { timeZone: pageDisplayTimeZone })}`
                   : "まだありません",
               },
               {
@@ -80,7 +85,7 @@ export default async function AuditLogPage() {
             columns={[
               {
                 header: "日時",
-                cell: (row) => formatTimestamp(row.createdAt),
+                cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
@@ -124,13 +129,4 @@ function targetLabel(target: string | null): string {
 
 function shortId(id: string): string {
   return id.length > 18 ? id.slice(0, 18) : id;
-}
-
-function formatTimestamp(date: Date): string {
-  return new Intl.DateTimeFormat("ja-JP", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }

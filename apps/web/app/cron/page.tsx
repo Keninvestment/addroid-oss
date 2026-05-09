@@ -9,10 +9,14 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { CronControls } from "./CronControls";
 import { CronRateLimitSummary } from "./CronRateLimitSummary";
 import { AgentTaskForm, type AgentTaskRow } from "./AgentTaskForm";
+import { AutomationModeControl } from "./AutomationModeControl";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
 
 export const dynamic = "force-dynamic";
 
 export default async function CronSchedulesPage() {
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
   type Row = {
     name: string;
     cron: string;
@@ -32,11 +36,20 @@ export default async function CronSchedulesPage() {
   }[] = [];
   let dbReady = true;
   let agentTasks: AgentTaskRow[] = [];
+  let executionMode = "proposal";
   try {
+    const workspace = await ensureWebWorkspace();
+    const workspaceRow = await prisma.workspace.findUnique({
+      where: { id: workspace.id },
+      select: { executionMode: true },
+    });
+    executionMode = workspaceRow?.executionMode ?? executionMode;
     registered = await prisma.cronSchedule.findMany({
+      where: { workspaceId: workspace.id },
       select: { name: true, cron: true, enabled: true, lastRunState: true, nextRunAt: true },
     });
     const taskRows = await prisma.agentTask.findMany({
+      where: { workspaceId: workspace.id },
       orderBy: { createdAt: "desc" },
       take: 20,
       select: {
@@ -52,8 +65,12 @@ export default async function CronSchedulesPage() {
     });
     agentTasks = taskRows.map((task) => ({
       ...task,
-      nextRunAt: task.nextRunAt ? task.nextRunAt.toISOString() : null,
-      lastRunAt: task.lastRunAt ? task.lastRunAt.toISOString() : null,
+      nextRunAt: task.nextRunAt
+        ? formatDateTime(task.nextRunAt, { timeZone: pageDisplayTimeZone })
+        : null,
+      lastRunAt: task.lastRunAt
+        ? formatDateTime(task.lastRunAt, { timeZone: pageDisplayTimeZone })
+        : null,
     }));
   } catch {
     dbReady = false;
@@ -101,6 +118,13 @@ export default async function CronSchedulesPage() {
           subtitle="例: 毎朝、日次レポートを取得して問題があれば改善提案も作る。"
         >
           <AgentTaskForm tasks={agentTasks} />
+        </Panel>
+
+        <Panel
+          title="自動承認モード"
+          subtitle="workspace全体の実行モードを制御します。ONでも自動運用は承認済みYAMLと安全ゲートに一致した操作だけ実行します。"
+        >
+          <AutomationModeControl initialMode={executionMode} />
         </Panel>
 
         <Panel
@@ -157,7 +181,10 @@ export default async function CronSchedulesPage() {
               },
               {
                 header: "次回",
-                cell: (row) => (row.nextRunAt ? row.nextRunAt.toISOString() : "—"),
+                cell: (row) =>
+                  row.nextRunAt
+                    ? formatDateTime(row.nextRunAt, { timeZone: pageDisplayTimeZone })
+                    : "—",
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
@@ -185,6 +212,7 @@ function presetLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
     budget_guard: "予算チェック",
+    automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",

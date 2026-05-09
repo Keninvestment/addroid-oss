@@ -17,6 +17,9 @@ import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
 import { CodeBlock, InlineCode } from "../../components/ui/CodeBlock";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { getActiveCodexProviderSelection } from "../../lib/codex-runtime";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { AiProviderForm } from "./AiProviderForm";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +47,6 @@ interface AiRunRow {
   confidence: number | null;
   inputTokens: number;
   outputTokens: number;
-  costUsd: number;
   createdAt: Date;
 }
 
@@ -87,15 +89,12 @@ function confidenceState(value: number): StatusState {
   return "idle";
 }
 
-function formatTimestamp(d: Date): string {
-  return d.toISOString().replace("T", " ").replace(/\..+$/, "Z");
-}
-
 export default async function AiPage() {
   let providers: ProviderRow[] = [];
   let runs: AiRunRow[] = [];
   let dbReady = true;
   try {
+    const workspace = await ensureWebWorkspace();
     const [tokenRows, runRows] = await Promise.all([
       prisma.oAuthToken.findMany({
         where: { provider: { in: [...LLM_PROVIDER_KEYS] } },
@@ -110,6 +109,7 @@ export default async function AiPage() {
         orderBy: { connectedAt: "desc" },
       }),
       prisma.aiRun.findMany({
+        where: { workspaceId: workspace.id },
         orderBy: { createdAt: "desc" },
         take: 50,
         select: {
@@ -123,7 +123,6 @@ export default async function AiPage() {
           confidence: true,
           inputTokens: true,
           outputTokens: true,
-          costUsd: true,
           createdAt: true,
         },
       }),
@@ -150,6 +149,7 @@ export default async function AiPage() {
     .provider.getConnection()
     .catch(() => null);
   const encryptionKeySet = Boolean((env.ENCRYPTION_KEY ?? "").trim());
+  const pageDisplayTimeZone = resolveDisplayTimeZone();
 
   const apiKeyConnected = providers.some(
     (p) => (p.provider === "openai" || p.provider === "anthropic") && p.authKind === "api_key"
@@ -232,12 +232,13 @@ export default async function AiPage() {
     },
     {
       header: "Connected",
-      cell: (row) => formatTimestamp(row.connectedAt),
+      cell: (row) => formatDateTime(row.connectedAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular-nums",
     },
     {
       header: "Expires",
-      cell: (row) => (row.expiresAt ? formatTimestamp(row.expiresAt) : <span>—</span>),
+      cell: (row) =>
+        row.expiresAt ? formatDateTime(row.expiresAt, { timeZone: pageDisplayTimeZone }) : <span>—</span>,
       className: "tabular-nums",
     },
   ];
@@ -245,7 +246,7 @@ export default async function AiPage() {
   const runColumns: DataTableColumn<AiRunRow>[] = [
     {
       header: "Created",
-      cell: (row) => formatTimestamp(row.createdAt),
+      cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular-nums",
     },
     {
@@ -297,15 +298,6 @@ export default async function AiPage() {
       ),
       className: "tabular-nums",
     },
-    {
-      header: "Cost (USD)",
-      cell: (row) => (
-        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
-          ${row.costUsd.toFixed(6)}
-        </span>
-      ),
-      className: "tabular-nums",
-    },
   ];
 
   return (
@@ -329,6 +321,7 @@ export default async function AiPage() {
           >
             <div style={{ display: "grid", gap: "1rem" }}>
               <p>{providerMessage}</p>
+              <AiProviderForm />
               <KeyValueList items={setupItems} />
               {providers.length === 0 ? (
                 <EmptyState
@@ -359,7 +352,7 @@ addroid connect ai --provider codex`}
         <div className="col-span-12">
           <Panel
             title="AI Runs"
-            subtitle="ai_runs 直近 50 件 (provider / model / status / cost を含む)"
+            subtitle="ai_runs 直近 50 件 (provider / model / status / tokens を含む)"
             status={
               <StatusDot state={!dbReady ? "warn" : runs.length === 0 ? "idle" : "ok"}>
                 {!dbReady ? "warn" : runs.length === 0 ? "idle" : `${runs.length} runs`}
@@ -379,7 +372,7 @@ addroid connect ai --provider codex`}
                 empty={
                   <EmptyState
                     title="AI run はまだ実行されていません"
-                    description="/cron から daily_report / budget_guard / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens / cost が記録されます。"
+                    description="/cron から daily_report / budget_guard / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens が記録されます。"
                   />
                 }
               />

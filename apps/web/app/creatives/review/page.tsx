@@ -30,6 +30,7 @@ import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { StatusDot } from "../../../components/ui/StatusDot";
 import { InlineCode } from "../../../components/ui/CodeBlock";
 import { KeyValueList } from "../../../components/ui/KeyValueList";
+import { ensureWebWorkspace } from "../../../lib/meta-runtime";
 import {
   creativeStatusToState,
   formatTimestamp,
@@ -88,7 +89,9 @@ export default async function CreativesReviewPage() {
   let creatives: CreativeRow[] = [];
 
   try {
+    const workspace = await ensureWebWorkspace();
     creatives = await prisma.creative.findMany({
+      where: { account: { workspaceId: workspace.id } },
       orderBy: { createdAt: "desc" },
       take: TAKE,
       select: {

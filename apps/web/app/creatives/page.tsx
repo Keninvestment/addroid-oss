@@ -21,6 +21,7 @@
 //     / creative_copy_rules)。
 
 import Link from "next/link";
+import type { Prisma } from "@addroid/db";
 import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
@@ -28,6 +29,7 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot } from "../../components/ui/StatusDot";
 import { InlineCode } from "../../components/ui/CodeBlock";
+import { RunCronButton } from "../../components/RunCronButton";
 import {
   CreativesToolbar,
   type AccountOption,
@@ -41,6 +43,7 @@ import {
   readCreativeMetadataByRef,
   type CreativeStatus,
 } from "../../lib/creative-helpers";
+import { ensureWebWorkspace } from "../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -99,10 +102,7 @@ export default async function CreativesPage({
   let providers: ProviderOption[] = [];
 
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { id: true },
-    });
+    const ws = await ensureWebWorkspace();
     if (ws) {
       const accountRows = await prisma.adAccount.findMany({
         where: { workspaceId: ws.id, active: true },
@@ -112,7 +112,7 @@ export default async function CreativesPage({
       accounts = accountRows;
     }
 
-    const where: Record<string, unknown> = {};
+    const where: Prisma.CreativeWhereInput = { account: { workspaceId: ws.id } };
     if (accountIdParam) {
       where.accountId = accountIdParam;
     }
@@ -152,7 +152,9 @@ export default async function CreativesPage({
 
     // Toolbar の Provider dropdown 用 (現 account scope の distinct)。
     const providerRows = await prisma.creative.findMany({
-      where: accountIdParam ? { accountId: accountIdParam } : {},
+      where: accountIdParam
+        ? { accountId: accountIdParam, account: { workspaceId: ws.id } }
+        : { account: { workspaceId: ws.id } },
       distinct: ["provider"],
       select: { provider: true },
     });
@@ -210,6 +212,7 @@ export default async function CreativesPage({
             画像が未設定の環境でもテキスト案として記録され、Meta へ直接反映されることはありません。
           </>
         }
+        actions={<RunCronButton presetName="improvement_pr" label="生成を開始" />}
       />
 
       <div className="page-body page-body--single">

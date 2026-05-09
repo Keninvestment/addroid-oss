@@ -44,7 +44,7 @@ import {
   type CreativeMetadataQaAsset,
   type CreativeMetadataQaCheck,
 } from "../../../lib/creative-helpers";
-import { sanitizeForDisplay } from "../../../lib/meta-runtime";
+import { ensureWebWorkspace, sanitizeForDisplay } from "../../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -61,9 +61,12 @@ export default async function CreativeDetailPage({
   }
 
   let row;
+  let workspaceId: string | null = null;
   try {
-    row = await prisma.creative.findUnique({
-      where: { id },
+    const workspace = await ensureWebWorkspace();
+    workspaceId = workspace.id;
+    row = await prisma.creative.findFirst({
+      where: { id, account: { workspaceId: workspace.id } },
       select: {
         id: true,
         accountId: true,
@@ -108,7 +111,6 @@ export default async function CreativeDetailPage({
             confidence: true,
             inputTokens: true,
             outputTokens: true,
-            costUsd: true,
             createdAt: true,
           },
         },
@@ -124,7 +126,6 @@ export default async function CreativeDetailPage({
             confidence: true,
             inputTokens: true,
             outputTokens: true,
-            costUsd: true,
             createdAt: true,
           },
         },
@@ -175,7 +176,10 @@ export default async function CreativeDetailPage({
   }> = [];
   try {
     auditRows = await prisma.auditLog.findMany({
-      where: { target: `creative:${row.id}` },
+      where: {
+        ...(workspaceId ? { workspaceId } : {}),
+        target: `creative:${row.id}`,
+      },
       orderBy: { createdAt: "desc" },
       take: 25,
       select: {
@@ -563,17 +567,6 @@ export default async function CreativeDetailPage({
                 ...(metadata
                   ? [
                       {
-                        label: "Cost (USD)",
-                        value: (
-                          <span
-                            className="tabular-nums"
-                            style={{ fontFamily: "var(--font-mono)" }}
-                          >
-                            ${metadata.costUsd.toFixed(6)}
-                          </span>
-                        ),
-                      },
-                      {
                         label: "Generated at",
                         value: (
                           <span
@@ -754,7 +747,8 @@ export default async function CreativeDetailPage({
                       className="tabular-nums"
                       style={{ fontFamily: "var(--font-mono)" }}
                     >
-                      ${row.aiRun.costUsd.toFixed(6)}
+                      tokens {row.aiRun.inputTokens.toLocaleString()} /{" "}
+                      {row.aiRun.outputTokens.toLocaleString()}
                     </span>
                   </span>
                 ) : (
@@ -788,7 +782,8 @@ export default async function CreativeDetailPage({
                       className="tabular-nums"
                       style={{ fontFamily: "var(--font-mono)" }}
                     >
-                      ${row.creativeQa.costUsd.toFixed(6)}
+                      tokens {row.creativeQa.inputTokens.toLocaleString()} /{" "}
+                      {row.creativeQa.outputTokens.toLocaleString()}
                     </span>
                   </span>
                 ) : (

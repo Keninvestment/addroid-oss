@@ -11,7 +11,7 @@ import type { PlanRunPayloadJson } from "../../../worker/src/lib/plan-runtime";
 
 export interface PlanHistoryRowData {
   id: string;
-  createdAt: string; // ISO string (server から渡す)
+  createdAt: string;
   message: string;
   payload: PlanRunPayloadJson;
 }

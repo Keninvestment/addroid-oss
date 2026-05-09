@@ -5,12 +5,11 @@
 // 仕様 (UI plan §6.5):
 //   - PAUSED ノード行のみに表示。表示判定は SSR で行われ、ここは PAUSED 前提。
 //   - クリックで ConfirmDialog を開く。
-//   - confirmVariant = "caution" (Activate は実費発生する副作用)。
+//   - confirmVariant = "caution" (配信開始 PR は merge 後に実費発生する副作用)。
 //   - description には対象オブジェクトの name / external_id / account / daily_budget を列挙。
-//   - 確定後 POST /api/campaigns/[id]/activate → Toast (success/error) → router.refresh()。
+//   - 確定後 POST /api/campaigns/[id]/activate → GitOps PR 作成 → Toast → router.refresh()。
 //
-// このコンポーネント自体は「結線担当」だが、本タスク (UI scaffold) では fetch 失敗時の
-// エラー表示まで含めて UI を完結させる。実 Meta CLI 呼び出しはサーバー側で実装エージェントが結線する。
+// Web UI は Meta を直接変更しない。PR merge 後の apply 経路だけが本番反映を行う。
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -63,11 +62,13 @@ export function ActivateButton({
         ok?: boolean;
         error?: string;
         externalId?: string;
+        prNumber?: number;
+        htmlUrl?: string;
       };
       if (!res.ok || !body.ok) {
         toast.push({
           variant: "error",
-          title: `${nodeLabel}を配信開始できませんでした`,
+          title: `${nodeLabel}の配信開始PRを作成できませんでした`,
           description: body.error ?? `HTTP ${res.status}`,
         });
         setBusy(false);
@@ -75,10 +76,10 @@ export function ActivateButton({
       }
       toast.push({
         variant: "success",
-        title: `${nodeLabel}を配信開始しました`,
-        description: `${accountLabel} / ${displayName}${
-          body.externalId ? ` (${body.externalId})` : externalId ? ` (${externalId})` : ""
-        }`,
+        title: `${nodeLabel}の配信開始PRを作成しました`,
+        description: body.prNumber
+          ? `PR #${body.prNumber} を確認・merge すると反映されます。`
+          : `${accountLabel} / ${displayName}`,
       });
       setBusy(false);
       setOpen(false);
@@ -86,7 +87,7 @@ export function ActivateButton({
     } catch (err) {
       toast.push({
         variant: "error",
-        title: `${nodeLabel}を配信開始できませんでした`,
+        title: `${nodeLabel}の配信開始PRを作成できませんでした`,
         description: (err as Error).message,
       });
       setBusy(false);
@@ -101,15 +102,16 @@ export function ActivateButton({
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
       >
-        配信開始
+        配信開始PR
       </button>
       <ConfirmDialog
         open={open}
-        title={`${nodeLabel}を配信開始する`}
+        title={`${nodeLabel}の配信開始PRを作成する`}
         description={
           <div className="confirm-body">
             <p className="confirm-body__lead">
-              この操作は <strong>{nodeLabel}</strong> を Meta 上で配信開始します。実費が発生する可能性があります。
+              この操作は <strong>{nodeLabel}</strong> を配信開始するための GitOps PR を作成します。
+              merge 後に反映されると実費が発生する可能性があります。
             </p>
             <dl className="kv">
               <dt>名前</dt>
@@ -130,12 +132,12 @@ export function ActivateButton({
               ) : null}
               <dt>操作履歴</dt>
               <dd>
-                確定すると配信開始の操作として記録されます。
+                確定すると PR 作成の操作として記録されます。Meta はこの時点では変更されません。
               </dd>
             </dl>
           </div>
         }
-        confirmLabel="配信開始"
+        confirmLabel="PRを作成"
         cancelLabel="キャンセル"
         confirmVariant="caution"
         busy={busy}

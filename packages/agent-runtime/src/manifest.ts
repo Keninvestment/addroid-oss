@@ -114,21 +114,54 @@ export const AGENT_TOOL_MANIFEST = [
     description: "ローカル AdDroid プロセスを停止する。",
     args: "{}",
     effects: ["local-write"],
-    allowedSurfaces: ["cli-chat"],
+    allowedSurfaces: ["cli-chat", "web-chat"],
   },
   {
     name: "start_delivery",
-    description: "既存 PAUSED Meta オブジェクトを audited activate path で有効化する。",
+    description:
+      "Deprecated for agent chat. 本番配信に影響するため propose_ops_change で GitOps PR にする。",
     args: "{hierarchyId:string,note?:string,json?:boolean}",
     effects: ["audited-meta-activate"],
-    allowedSurfaces: ["cli-chat"],
+    allowedSurfaces: [],
+  },
+  {
+    name: "propose_ops_change",
+    description:
+      "停止、配信開始、予算変更など本番広告に影響する変更案を ops repo の GitHub PR として作成する。Meta には直接反映しない。",
+    args: "{intent:'pause'|'activate'|'status_change'|'budget_change'|'other', accountKey?:string, targets?:Array<{level:'campaign'|'adset'|'ad', id:string}>, targetIds?:string[], desiredChanges?:object, rationale?:string, urgency?:'low'|'normal'|'high'}",
+    effects: ["gitops-pr"],
+    allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
+    guidance:
+      "Use this for any production mutation intent. For 'CV0 campaign を停止', first inspect read-only data, then create a PR with intent:'pause' and campaign targets. Human merge is required.",
+  },
+  {
+    name: "propose_automation_rule",
+    description:
+      "自然言語の継続監視・自動運用依頼を workflows/automation-rules.yaml の事前承認ルール変更 PR として作成する。直接Metaには反映しない。",
+    args:
+      "{sourceText:string, rule:{id?:string, enabled?:boolean, schedule?:string, intent?:string, scope:{level:'account'|'campaign'|'adset'|'ad', accounts?:string[]}, window?:object, metrics?:object, computed?:object, when:{all?:Array<object>, any?:Array<object>}, action:{type:string, status?:'ACTIVE'|'PAUSED', [key:string]:unknown}, limits?:object, approval?:{mode:'proposal'|'auto_apply_if_policy_matched'|'auto_merge_if_policy_matched'|'report_only'}, safety?:object}, rationale?:string, title?:string}",
+    effects: ["gitops-pr"],
+    allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
+    guidance:
+      "Use this when the user asks for recurring or conditional ad operations in natural language, such as hourly pause rules, duplicating ads for tests, or scheduled campaign changes. Translate intent into a structured rule, but keep unsafe operations proposal-only unless a pre-approved policy explicitly allows them.",
+  },
+  {
+    name: "propose_automation_rule_update",
+    description:
+      "drift検知などで停止した既存 automation rule の安全レール校正を、現在の実績に基づいて更新するGitHub PRを作成する。ユーザーがPR作成を承認した場合だけ使う。",
+    args:
+      "{ruleId:string, rationale?:string, title?:string}",
+    effects: ["gitops-pr"],
+    allowedSurfaces: ["cli-chat", "web-chat"],
+    guidance:
+      "Use this only after the user approves creating a recalibration PR for an existing automation rule. Do not use it from scheduled-agent runs; cron should only block and suggest.",
   },
   {
     name: "backup_data",
     description: "AdDroid データベースのバックアップを作成する。",
     args: "{}",
     effects: ["local-write"],
-    allowedSurfaces: ["cli-chat"],
+    allowedSurfaces: ["cli-chat", "web-chat"],
   },
   {
     name: "open_web_ui",
@@ -142,7 +175,7 @@ export const AGENT_TOOL_MANIFEST = [
     description: "Meta Ads CLI の read-only query を実行する。",
     args: "{resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
     effects: ["read"],
-    allowedSurfaces: ["cli-chat", "web-chat"],
+    allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
   },
 ] as const satisfies readonly AgentToolDefinition[];
 

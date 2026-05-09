@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { BusyLabel } from "../../components/ui/AsyncFeedback";
 import { useToast } from "../../components/ui/Toast";
 
 export interface AgentTaskRow {
@@ -118,8 +119,9 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
           type="submit"
           className="btn btn--primary"
           disabled={busy !== null || !prompt.trim() || !cron.trim()}
+          aria-busy={busy === "create"}
         >
-          {busy === "create" ? "作成中…" : "追加"}
+          {busy === "create" ? <BusyLabel>作成中</BusyLabel> : "追加"}
         </button>
       </form>
 
@@ -150,8 +152,9 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
                   className="btn btn--ghost btn--sm"
                   onClick={() => postAction(task.id, "run")}
                   disabled={busy !== null}
+                  aria-busy={busy === `run:${task.id}`}
                 >
-                  今すぐ実行
+                  {busy === `run:${task.id}` ? <BusyLabel>実行中</BusyLabel> : "今すぐ実行"}
                 </button>
                 <button
                   type="button"

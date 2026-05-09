@@ -4,6 +4,10 @@ import { validateCronExpression } from "@addroid/queue";
 import { prisma } from "./prisma";
 import { ensureWebWorkspace } from "./github-runtime";
 import { runWebAgentChat } from "./agent-chat";
+import {
+  createOrReuseAgentTask,
+  normalizeAgentTaskPrompt,
+} from "../../worker/src/lib/agent-task-store";
 
 export interface CreateAgentTaskInput {
   title?: string;
@@ -27,35 +31,25 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
     throw new Error(`cron 式が不正です: ${validation.reason}`);
   }
   const workspace = await ensureWebWorkspace();
-  const title = input.title?.trim() || deriveTaskTitle(prompt);
+  const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
+  const title = input.title?.trim() || deriveTaskTitle(normalizedPrompt);
   const nextRunAt = input.nextRunAt ?? computeNextRunAt(cron);
-  const task = await prisma.agentTask.create({
-    data: {
-      workspaceId: workspace.id,
-      title,
-      prompt,
-      cron,
-      enabled: true,
-      nextRunAt,
-      createdBy: input.createdBy ?? "user:web-ui",
-    },
-    select: {
-      id: true,
-      title: true,
-      prompt: true,
-      cron: true,
-      enabled: true,
-      nextRunAt: true,
-    },
+  const { task, created } = await createOrReuseAgentTask(prisma as never, {
+    workspaceId: workspace.id,
+    title,
+    prompt: normalizedPrompt,
+    cron,
+    nextRunAt,
+    createdBy: input.createdBy ?? "user:web-ui",
   });
   await prisma.auditLog
     .create({
       data: {
         workspaceId: workspace.id,
         actor: input.createdBy ?? "user:web-ui",
-        action: "agent_task.created",
+        action: created ? "agent_task.created" : "agent_task.reused",
         target: `agent_task:${task.id}`,
-        metadata: { title, cron, prompt } as Prisma.InputJsonValue,
+        metadata: { title, cron, prompt: normalizedPrompt, created } as Prisma.InputJsonValue,
       },
     })
     .catch(() => undefined);

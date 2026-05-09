@@ -15,16 +15,20 @@
 //      本ファイルはその UI scaffold を提供する。
 
 import { prisma } from "../../lib/prisma";
+import Link from "next/link";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
-import { DataTable } from "../../components/ui/DataTable";
+import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { InlineCode } from "../../components/ui/CodeBlock";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { CampaignsToolbar } from "./CampaignsToolbar";
 import { ActivateButton } from "./ActivateButton";
+import { SyncCampaignsButton } from "./SyncCampaignsButton";
 import type { StatusState } from "../../components/ui/StatusDot";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/meta-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +37,9 @@ interface SearchParamsInput {
   status?: string | string[];
   q?: string | string[];
   fromApply?: string | string[];
+  tab?: string | string[];
+  campaignId?: string | string[];
+  adsetId?: string | string[];
 }
 
 function single(v: string | string[] | undefined): string | undefined {
@@ -41,24 +48,45 @@ function single(v: string | string[] | undefined): string | undefined {
 }
 
 const ALLOWED_STATUS = new Set(["PAUSED", "ACTIVE", "ARCHIVED"]);
+const ALLOWED_TABS = new Set(["campaign", "adset", "ad"]);
+type CampaignsTab = "campaign" | "adset" | "ad";
 
 type AccountRow = {
   id: string;
   key: string;
   displayName: string;
   metaAccountId: string | null;
+  timezoneName: string | null;
 };
 
 type HierarchyRow = {
   id: string;
   nodeType: string;
+  nodeKey: string;
+  parentId: string | null;
   displayName: string;
   status: string;
   externalId: string | null;
   lastCommitSha: string | null;
   updatedAt: Date;
   spec: unknown;
-  account: { key: string; metaAccountId: string | null } | null;
+  account: { key: string; metaAccountId: string | null; timezoneName: string | null } | null;
+  parent: HierarchyParentRow | null;
+};
+
+type HierarchyParentRow = {
+  id: string;
+  nodeType: string;
+  parentId: string | null;
+  displayName: string;
+  externalId: string | null;
+  parent: {
+    id: string;
+    nodeType: string;
+    parentId: string | null;
+    displayName: string;
+    externalId: string | null;
+  } | null;
 };
 
 type ApplyJobRow = {
@@ -80,27 +108,35 @@ export default async function CampaignsPage({
   const statusParam = (single(resolvedSearchParams?.status) ?? "all").toUpperCase();
   const queryParam = (single(resolvedSearchParams?.q) ?? "").trim();
   const fromApply = single(resolvedSearchParams?.fromApply);
+  const tabParam = single(resolvedSearchParams?.tab) ?? "campaign";
+  const campaignIdParam = single(resolvedSearchParams?.campaignId);
+  const adsetIdParam = single(resolvedSearchParams?.adsetId);
+  const activeTab = (ALLOWED_TABS.has(tabParam) ? tabParam : "campaign") as CampaignsTab;
 
   let dbReady = true;
   let accounts: AccountRow[] = [];
   let defaultAdAccountId: string | null = null;
-  let hierarchy: HierarchyRow[] = [];
+  let allHierarchy: HierarchyRow[] = [];
   let applyJobs: ApplyJobRow[] = [];
 
   try {
-    const ws = await prisma.workspace.findFirst({
-      orderBy: { createdAt: "asc" },
-      select: { id: true, defaultAdAccountId: true },
+    const currentWorkspace = await ensureWebWorkspace();
+    const ws = await prisma.workspace.findUnique({
+      where: { id: currentWorkspace.id },
+      select: { defaultAdAccountId: true },
     });
     if (ws) {
       defaultAdAccountId = ws.defaultAdAccountId ?? null;
       accounts = await prisma.adAccount.findMany({
-        where: { workspaceId: ws.id, active: true },
+        where: { workspaceId: currentWorkspace.id, active: true },
         orderBy: [{ createdAt: "asc" }],
-        select: { id: true, key: true, displayName: true, metaAccountId: true },
+        select: { id: true, key: true, displayName: true, metaAccountId: true, timezoneName: true },
       });
     }
     applyJobs = await prisma.applyJob.findMany({
+      where: {
+        pullRequest: { repo: { workspace: { is: { id: currentWorkspace.id } } } },
+      },
       orderBy: { enqueuedAt: "desc" },
       take: 5,
       select: {
@@ -128,28 +164,42 @@ export default async function CampaignsPage({
 
   if (dbReady && selectedAccountId) {
     try {
-      hierarchy = await prisma.adsHierarchyNode.findMany({
+      allHierarchy = await prisma.adsHierarchyNode.findMany({
         where: {
           accountId: selectedAccountId,
-          ...(statusFilter
-            ? { status: { equals: statusFilter, mode: "insensitive" } }
-            : {}),
-          ...(queryParam
-            ? { displayName: { contains: queryParam, mode: "insensitive" } }
-            : {}),
         },
         orderBy: [{ updatedAt: "desc" }],
-        take: 200,
+        take: 1000,
         select: {
           id: true,
           nodeType: true,
+          nodeKey: true,
+          parentId: true,
           displayName: true,
           status: true,
           externalId: true,
           lastCommitSha: true,
           updatedAt: true,
           spec: true,
-          account: { select: { key: true, metaAccountId: true } },
+          account: { select: { key: true, metaAccountId: true, timezoneName: true } },
+          parent: {
+            select: {
+              id: true,
+              nodeType: true,
+              parentId: true,
+              displayName: true,
+              externalId: true,
+              parent: {
+                select: {
+                  id: true,
+                  nodeType: true,
+                  parentId: true,
+                  displayName: true,
+                  externalId: true,
+                },
+              },
+            },
+          },
         },
       });
     } catch {
@@ -157,9 +207,72 @@ export default async function CampaignsPage({
     }
   }
 
+  const campaignRows = allHierarchy.filter((row) => row.nodeType === "campaign");
+  const adsetRows = allHierarchy.filter((row) => row.nodeType === "adset");
+  const adRows = allHierarchy.filter((row) => row.nodeType === "ad");
+  const campaignMap = new Map(campaignRows.map((row) => [row.id, row]));
+  const adsetMap = new Map(adsetRows.map((row) => [row.id, row]));
+  const selectedAdset = adsetIdParam ? adsetMap.get(adsetIdParam) ?? null : null;
+  const selectedCampaignFromParam = campaignIdParam
+    ? campaignMap.get(campaignIdParam) ?? null
+    : null;
+  const selectedCampaign =
+    selectedAdset?.parentId
+      ? campaignMap.get(selectedAdset.parentId) ?? selectedCampaignFromParam
+      : selectedCampaignFromParam;
+  const visibleBaseRows =
+    activeTab === "campaign"
+      ? campaignRows
+      : activeTab === "adset"
+        ? adsetRows.filter((row) => !selectedCampaign || row.parentId === selectedCampaign.id)
+        : adRows.filter((row) => {
+            if (selectedAdset) return row.parentId === selectedAdset.id;
+            if (selectedCampaign) return row.parent?.parentId === selectedCampaign.id;
+            return true;
+          });
+  const hierarchy = visibleBaseRows.filter((row) =>
+    matchesCampaignFilters(row, { statusFilter, query: queryParam })
+  );
+  const tabCounts = {
+    campaign: campaignRows.filter((row) =>
+      matchesCampaignFilters(row, { statusFilter, query: queryParam })
+    ).length,
+    adset: adsetRows.filter(
+      (row) =>
+        (!selectedCampaign || row.parentId === selectedCampaign.id) &&
+        matchesCampaignFilters(row, { statusFilter, query: queryParam })
+    ).length,
+    ad: adRows.filter(
+      (row) =>
+        (selectedAdset
+          ? row.parentId === selectedAdset.id
+          : selectedCampaign
+            ? row.parent?.parentId === selectedCampaign.id
+            : true) &&
+        matchesCampaignFilters(row, { statusFilter, query: queryParam })
+    ).length,
+  };
   const totalCount = hierarchy.length;
   const pausedCount = hierarchy.filter((row) => isPaused(row.status)).length;
   const activeCount = hierarchy.filter((row) => isActive(row.status)).length;
+  const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone(selectedAccount?.timezoneName);
+  const makeHref = (updates: Partial<CampaignsHrefInput>) =>
+    buildCampaignsHref({
+      accountId: selectedAccountId,
+      status: statusFilter,
+      q: queryParam,
+      tab: activeTab,
+      campaignId: selectedCampaign?.id ?? null,
+      adsetId: selectedAdset?.id ?? null,
+      ...updates,
+    });
+  const columns = buildCampaignColumns({
+    activeTab,
+    makeHref,
+    pageDisplayTimeZone,
+  });
+  const activeTabLabel = tabLabel(activeTab);
 
   const fromApplyBanner = fromApply ? renderFromApplyBanner(fromApply) : null;
 
@@ -167,7 +280,8 @@ export default async function CampaignsPage({
     <>
       <PageHeader
         title="配信中の広告"
-        subtitle="Meta 上のキャンペーン、広告セット、広告の状態を確認します。停止中のものを有効化する時は確認ダイアログを必ず通します。"
+        subtitle="Meta 上のキャンペーン、広告セット、広告の状態を確認します。配信開始は GitOps PR を作成し、承認後に反映します。"
+        actions={<SyncCampaignsButton accountId={selectedAccountId} />}
       />
 
       <div className="page-body page-body--single">
@@ -175,7 +289,7 @@ export default async function CampaignsPage({
 
         <Panel
           title="反映と有効化の安全ルール"
-          subtitle="変更はまず停止状態で反映され、配信開始は別操作で確認します"
+          subtitle="変更はまず停止状態で反映され、配信開始は PR 承認後に反映します"
         >
           <KeyValueList
             items={[
@@ -192,8 +306,8 @@ export default async function CampaignsPage({
                 label: "有効化",
                 value: (
                   <>
-                    停止中から配信中へ切り替える時は、行ごとの確認ダイアログで実行します。
-                    操作履歴にも記録されます。
+                    停止中から配信中へ切り替える時は、行ごとの確認ダイアログから
+                    GitOps PR を作成します。merge 後に反映されます。
                   </>
                 ),
               },
@@ -225,7 +339,7 @@ export default async function CampaignsPage({
               empty={
                 <EmptyState
                   title="反映処理はまだありません。"
-                  description="承認された変更があると、停止状態でMetaへ反映されます。有効化は下の一覧から別途実行します。"
+                  description="承認された変更があると、停止状態でMetaへ反映されます。配信開始は下の一覧からPRを作成します。"
                 />
               }
               columns={[
@@ -250,14 +364,17 @@ export default async function CampaignsPage({
                 },
                 {
                   header: "受付日時",
-                  cell: (row) => row.enqueuedAt.toISOString(),
+                  cell: (row) =>
+                    formatDateTime(row.enqueuedAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
                 {
                   header: "完了日時",
                   cell: (row) =>
-                    row.finishedAt ? row.finishedAt.toISOString() : "—",
+                    row.finishedAt
+                      ? formatDateTime(row.finishedAt, { timeZone: pageDisplayTimeZone })
+                      : "—",
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
@@ -282,7 +399,7 @@ export default async function CampaignsPage({
           </Panel>
         ) : (
           <Panel
-            title="広告一覧"
+            title={activeTabLabel}
             subtitle={
               <>
                 {totalCount} 件 /{" "}
@@ -305,6 +422,53 @@ export default async function CampaignsPage({
                 selectedQuery={queryParam}
               />
 
+              <div className="campaigns__tabs" role="tablist" aria-label="広告階層">
+                {(["campaign", "adset", "ad"] as CampaignsTab[]).map((tab) => (
+                  <Link
+                    key={tab}
+                    role="tab"
+                    aria-selected={activeTab === tab}
+                    className="campaigns__tab"
+                    data-active={activeTab === tab}
+                    href={makeHref({
+                      tab,
+                      ...(tab === "campaign" ? { campaignId: null, adsetId: null } : {}),
+                      ...(tab === "adset" ? { adsetId: null } : {}),
+                    })}
+                  >
+                    <span>{tabLabel(tab)}</span>
+                    <span className="campaigns__tab-count">{tabCounts[tab]}</span>
+                  </Link>
+                ))}
+              </div>
+
+              {(selectedCampaign || selectedAdset) && (
+                <div className="campaigns__selection-bar" aria-label="選択中の階層">
+                  {selectedCampaign && (
+                    <span className="campaigns__selection-chip">
+                      <span className="campaigns__selection-label">キャンペーン</span>
+                      <span className="campaigns__selection-name">
+                        {selectedCampaign.displayName}
+                      </span>
+                    </span>
+                  )}
+                  {selectedAdset && (
+                    <span className="campaigns__selection-chip">
+                      <span className="campaigns__selection-label">広告セット</span>
+                      <span className="campaigns__selection-name">
+                        {selectedAdset.displayName}
+                      </span>
+                    </span>
+                  )}
+                  <Link
+                    className="campaigns__clear-link"
+                    href={makeHref({ tab: "campaign", campaignId: null, adsetId: null })}
+                  >
+                    選択解除
+                  </Link>
+                </div>
+              )}
+
               <DataTable
                 rows={hierarchy}
                 rowKey={(row) => row.id}
@@ -312,85 +476,17 @@ export default async function CampaignsPage({
                   <EmptyState
                     title={
                       queryParam || statusFilter
-                        ? "条件に合うノードはありません。"
-                        : "表示できる広告はありません。"
+                        ? "条件に合う項目はありません。"
+                        : `${activeTabLabel}はありません。`
                     }
                     description={
                       queryParam || statusFilter
                         ? "フィルタを変更するか、検索条件をリセットしてください。"
-                        : "承認済み変更が反映されると、停止中として作成されたものが表示されます。"
+                        : "Metaから更新すると、現在のキャンペーン、広告セット、広告が表示されます。承認済み変更が反映されたものもここに表示されます。"
                     }
                   />
                 }
-                columns={[
-                  {
-                    header: "Type",
-                    cell: (row) => (
-                      <span className="mono" style={{ fontSize: "var(--size-2xs)" }}>
-                        {row.nodeType}
-                      </span>
-                    ),
-                  },
-                  {
-                    header: "Name",
-                    cell: (row) => (
-                      <div className="campaigns__name-cell">
-                        <span>{row.displayName}</span>
-                        {row.externalId ? (
-                          <InlineCode>{row.externalId}</InlineCode>
-                        ) : (
-                          <span className="campaigns__name-cell-pending">
-                            未同期 (external_id 未確定)
-                          </span>
-                        )}
-                      </div>
-                    ),
-                  },
-                  {
-                    header: "Status",
-                    cell: (row) => (
-                      <StatusBadge state={statusToBadge(row.status)}>
-                        {normalizeStatus(row.status)}
-                      </StatusBadge>
-                    ),
-                  },
-                  {
-                    header: "Last commit",
-                    cell: (row) =>
-                      row.lastCommitSha ? (
-                        <InlineCode>{row.lastCommitSha.slice(0, 7)}</InlineCode>
-                      ) : (
-                        <span style={{ color: "var(--color-text-tertiary)" }}>—</span>
-                      ),
-                    className: "mono",
-                  },
-                  {
-                    header: "Updated",
-                    cell: (row) => row.updatedAt.toISOString(),
-                    className: "tabular mono",
-                    headerClassName: "tabular",
-                  },
-                  {
-                    header: "Actions",
-                    cell: (row) =>
-                      isPaused(row.status) ? (
-                        <ActivateButton
-                          nodeId={row.id}
-                          nodeType={
-                            (row.nodeType as "campaign" | "adset" | "ad") ?? "campaign"
-                          }
-                          displayName={row.displayName}
-                          externalId={row.externalId}
-                          accountLabel={
-                            row.account?.metaAccountId ?? row.account?.key ?? "—"
-                          }
-                          budgetLabel={extractBudgetLabel(row.spec)}
-                        />
-                      ) : (
-                        <span style={{ color: "var(--color-text-tertiary)" }}>—</span>
-                      ),
-                  },
-                ]}
+                columns={columns}
               />
             </div>
           </Panel>
@@ -400,6 +496,238 @@ export default async function CampaignsPage({
   );
 }
 
+type CampaignsHrefInput = {
+  accountId: string | null;
+  status: string | null;
+  q: string | null;
+  tab: CampaignsTab | null;
+  campaignId: string | null;
+  adsetId: string | null;
+};
+
+function buildCampaignsHref(input: CampaignsHrefInput): string {
+  const params = new URLSearchParams();
+  if (input.accountId) params.set("accountId", input.accountId);
+  if (input.status) params.set("status", input.status);
+  if (input.q) params.set("q", input.q);
+  if (input.tab && input.tab !== "campaign") params.set("tab", input.tab);
+  if (input.campaignId) params.set("campaignId", input.campaignId);
+  if (input.adsetId) params.set("adsetId", input.adsetId);
+  const search = params.toString();
+  return search ? `/campaigns?${search}` : "/campaigns";
+}
+
+function tabLabel(tab: CampaignsTab): string {
+  switch (tab) {
+    case "adset":
+      return "広告セット";
+    case "ad":
+      return "広告";
+    case "campaign":
+    default:
+      return "キャンペーン";
+  }
+}
+
+function matchesCampaignFilters(
+  row: HierarchyRow,
+  filters: { statusFilter: string | null; query: string }
+): boolean {
+  if (
+    filters.statusFilter &&
+    row.status.toUpperCase() !== filters.statusFilter.toUpperCase()
+  ) {
+    return false;
+  }
+  const query = filters.query.trim().toLowerCase();
+  if (!query) return true;
+  return (
+    row.displayName.toLowerCase().includes(query) ||
+    (row.externalId?.toLowerCase().includes(query) ?? false)
+  );
+}
+
+function buildCampaignColumns(input: {
+  activeTab: CampaignsTab;
+  makeHref: (updates: Partial<CampaignsHrefInput>) => string;
+  pageDisplayTimeZone: string;
+}): DataTableColumn<HierarchyRow>[] {
+  const deliveryColumn: DataTableColumn<HierarchyRow> = {
+    header: "配信",
+    cell: (row) => (
+      <StatusBadge state={statusToBadge(row.status)}>
+        {normalizeStatus(row.status)}
+      </StatusBadge>
+    ),
+  };
+  const idColumn: DataTableColumn<HierarchyRow> = {
+    header: "ID",
+    cell: (row) =>
+      row.externalId ? (
+        <InlineCode>{row.externalId}</InlineCode>
+      ) : (
+        <span className="campaigns__name-cell-pending">未同期</span>
+      ),
+    className: "mono",
+  };
+  const updatedColumn: DataTableColumn<HierarchyRow> = {
+    header: "更新日時",
+    cell: (row) =>
+      formatDateTime(row.updatedAt, {
+        timeZone: resolveDisplayTimeZone(
+          row.account?.timezoneName,
+          input.pageDisplayTimeZone
+        ),
+      }),
+    className: "tabular mono",
+    headerClassName: "tabular",
+  };
+  const actionsColumn: DataTableColumn<HierarchyRow> = {
+    header: "操作",
+    cell: (row) => renderActions(row),
+  };
+
+  if (input.activeTab === "campaign") {
+    return [
+      deliveryColumn,
+      {
+        header: "キャンペーン名",
+        cell: (row) =>
+          renderNodeName(
+            row,
+            input.makeHref({ tab: "adset", campaignId: row.id, adsetId: null })
+          ),
+      },
+      idColumn,
+      updatedColumn,
+      actionsColumn,
+    ];
+  }
+
+  if (input.activeTab === "adset") {
+    return [
+      deliveryColumn,
+      {
+        header: "広告セット名",
+        cell: (row) =>
+          renderNodeName(
+            row,
+            input.makeHref({
+              tab: "ad",
+              campaignId: row.parentId,
+              adsetId: row.id,
+            })
+          ),
+      },
+      {
+        header: "キャンペーン",
+        cell: (row) => renderParentLink(row.parent, input.makeHref),
+      },
+      idColumn,
+      updatedColumn,
+      actionsColumn,
+    ];
+  }
+
+  return [
+    deliveryColumn,
+    {
+      header: "広告名",
+      cell: (row) => renderNodeName(row, null),
+    },
+    {
+      header: "広告セット",
+      cell: (row) =>
+        renderParentLink(row.parent, input.makeHref, {
+          tab: "ad",
+          adsetId: row.parent?.id ?? null,
+          campaignId: row.parent?.parentId ?? null,
+        }),
+    },
+    {
+      header: "キャンペーン",
+      cell: (row) => renderParentLink(row.parent?.parent ?? null, input.makeHref),
+    },
+    idColumn,
+    updatedColumn,
+    actionsColumn,
+  ];
+}
+
+function renderNodeName(row: HierarchyRow, href: string | null) {
+  const name = href ? (
+    <Link className="campaigns__entity-link" href={href}>
+      {row.displayName}
+    </Link>
+  ) : (
+    <span>{row.displayName}</span>
+  );
+  return (
+    <div className="campaigns__name-cell">
+      {name}
+      {row.lastCommitSha ? (
+        <span className="campaigns__subtext">
+          commit <InlineCode>{row.lastCommitSha.slice(0, 7)}</InlineCode>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function renderParentLink(
+  parent: HierarchyParentRow["parent"] | HierarchyParentRow | null,
+  makeHref: (updates: Partial<CampaignsHrefInput>) => string,
+  overrides?: Partial<CampaignsHrefInput>
+) {
+  if (!parent) return renderMutedDash();
+  const tab = parent.nodeType === "campaign" ? "adset" : "ad";
+  return (
+    <Link
+      className="campaigns__entity-link campaigns__entity-link--muted"
+      href={makeHref({
+        tab,
+        campaignId: parent.nodeType === "campaign" ? parent.id : parent.parentId,
+        adsetId: parent.nodeType === "adset" ? parent.id : null,
+        ...overrides,
+      })}
+    >
+      {parent.displayName}
+    </Link>
+  );
+}
+
+function renderActions(row: HierarchyRow) {
+  if (!isPaused(row.status)) return renderMutedDash();
+  if (isMetaGraphOnlyRow(row)) {
+    return <span className="campaigns__name-cell-pending">GitOps未管理</span>;
+  }
+  return (
+    <ActivateButton
+      nodeId={row.id}
+      nodeType={(row.nodeType as "campaign" | "adset" | "ad") ?? "campaign"}
+      displayName={row.displayName}
+      externalId={row.externalId}
+      accountLabel={row.account?.metaAccountId ?? row.account?.key ?? "—"}
+      budgetLabel={extractBudgetLabel(row.spec)}
+    />
+  );
+}
+
+function renderMutedDash() {
+  return <span style={{ color: "var(--color-text-tertiary)" }}>—</span>;
+}
+
+function isMetaGraphOnlyRow(row: HierarchyRow): boolean {
+  if (row.lastCommitSha) return false;
+  const spec = isRecord(row.spec) ? row.spec : null;
+  if (spec?.source === "meta_graph_sync") return true;
+  return Boolean(row.externalId && row.externalId === row.nodeKey);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function renderFromApplyBanner(applyId: string) {
   return (
     <div className="banner" data-state="info">
@@ -407,7 +735,7 @@ function renderFromApplyBanner(applyId: string) {
       <span>
         反映処理 <InlineCode>{applyId}</InlineCode>{" "}
         が作成・更新した広告はこのリストに表示されます。停止中で作成されているため、
-        配信開始は行ごとに「配信開始」ボタンから実行してください。
+        配信開始は行ごとに「配信開始PR」から提案してください。
       </span>
     </div>
   );

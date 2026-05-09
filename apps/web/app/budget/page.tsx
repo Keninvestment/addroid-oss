@@ -37,6 +37,11 @@ import {
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../components/ui/StatusDot";
 import { InlineCode } from "../../components/ui/CodeBlock";
+import { RunCronButton } from "../../components/RunCronButton";
+import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { CRON_PRESETS } from "@addroid/queue";
+import { BudgetScheduleToggle } from "./BudgetScheduleToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -103,7 +108,6 @@ interface AiRunRow {
   confidence: number | null;
   inputTokens: number;
   outputTokens: number;
-  costUsd: number;
   errorMessage: string | null;
   createdAt: Date;
 }
@@ -114,6 +118,12 @@ interface ScheduleRow {
   enabled: boolean;
   lastRunState: string | null;
   nextRunAt: Date | null;
+}
+
+interface AdAccountTimeZoneRow {
+  workspaceId: string;
+  key: string;
+  timezoneName: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -376,15 +386,6 @@ function aiRunStatusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function formatTimestamp(d: Date): string {
-  return new Intl.DateTimeFormat("ja-JP", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(d);
-}
-
 function formatRatio(n: number): string {
   if (!Number.isFinite(n)) return "—";
   return `${(n * 100).toFixed(1)}%`;
@@ -409,11 +410,16 @@ export default async function BudgetGuardPage() {
   let runs: CronRunRow[] = [];
   let aiRuns: AiRunRow[] = [];
   let schedules: ScheduleRow[] = [];
+  let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
   let dbReady = true;
   try {
-    [runs, aiRuns, schedules] = await Promise.all([
+    const workspace = await ensureWebWorkspace();
+    [runs, aiRuns, schedules, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: { name: "budget_guard" },
+        where: {
+          name: "budget_guard",
+          schedule: { is: { workspaceId: workspace.id } },
+        },
         orderBy: { startedAt: "desc" },
         take: 25,
         select: {
@@ -428,7 +434,7 @@ export default async function BudgetGuardPage() {
         },
       }),
       prisma.aiRun.findMany({
-        where: { workflow: "budget_guard" },
+        where: { workspaceId: workspace.id, workflow: "budget_guard" },
         orderBy: { createdAt: "desc" },
         take: 25,
         select: {
@@ -441,13 +447,12 @@ export default async function BudgetGuardPage() {
           confidence: true,
           inputTokens: true,
           outputTokens: true,
-          costUsd: true,
           errorMessage: true,
           createdAt: true,
         },
       }),
       prisma.cronSchedule.findMany({
-        where: { name: "budget_guard" },
+        where: { workspaceId: workspace.id, name: "budget_guard" },
         select: {
           name: true,
           cron: true,
@@ -455,6 +460,10 @@ export default async function BudgetGuardPage() {
           lastRunState: true,
           nextRunAt: true,
         },
+      }),
+      prisma.adAccount.findMany({
+        where: { workspaceId: workspace.id, active: true },
+        select: { workspaceId: true, key: true, timezoneName: true },
       }),
     ]);
   } catch {
@@ -479,12 +488,34 @@ export default async function BudgetGuardPage() {
 
   const runsCount = runs.length;
   const aiRunsCount = aiRuns.length;
+  const budgetPreset = CRON_PRESETS.find((preset) => preset.name === "budget_guard");
   const scheduleRow = schedules[0] ?? null;
+  const scheduleView: ScheduleRow | null =
+    scheduleRow ??
+    (budgetPreset
+      ? {
+          name: budgetPreset.name,
+          cron: budgetPreset.cron,
+          enabled: false,
+          lastRunState: null,
+          nextRunAt: null,
+        }
+      : null);
+  const timeZoneByAccount = new Map(
+    adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
+  );
+  const accountTimeZone = (summary: BudgetGuardSummary | null): string | null =>
+    summary ? timeZoneByAccount.get(`${summary.workspaceId}:${summary.accountKey}`) ?? null : null;
+  const pageDisplayTimeZone = resolveDisplayTimeZone(accountTimeZone(latestSummary?.summary ?? null));
+  const runTimeZone = (row: CronRunRow): string => {
+    const summary = parseBudgetGuardSummary(row.output);
+    return resolveDisplayTimeZone(accountTimeZone(summary), pageDisplayTimeZone);
+  };
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
       header: "開始日時",
-      cell: (row) => formatTimestamp(row.startedAt),
+      cell: (row) => formatDateTime(row.startedAt, { timeZone: runTimeZone(row) }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -623,7 +654,7 @@ export default async function BudgetGuardPage() {
   const aiRunColumns: DataTableColumn<AiRunRow>[] = [
     {
       header: "作成日時",
-      cell: (row) => formatTimestamp(row.createdAt),
+      cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
@@ -684,16 +715,6 @@ export default async function BudgetGuardPage() {
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {row.inputTokens.toLocaleString()} / {row.outputTokens.toLocaleString()}
-        </span>
-      ),
-      className: "tabular",
-      headerClassName: "tabular",
-    },
-    {
-      header: "費用",
-      cell: (row) => (
-        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
-          ${row.costUsd.toFixed(6)}
         </span>
       ),
       className: "tabular",
@@ -790,35 +811,35 @@ export default async function BudgetGuardPage() {
       ]
     : [];
 
-  const scheduleItems: KeyValueEntry[] = scheduleRow
+  const scheduleItems: KeyValueEntry[] = scheduleView
     ? [
         {
           label: "実行タイミング",
-          value: <InlineCode>{scheduleRow.cron || "(unscheduled)"}</InlineCode>,
+          value: <InlineCode>{scheduleView.cron || "(unscheduled)"}</InlineCode>,
         },
         {
           label: "状態",
           value: (
-            <StatusBadge state={scheduleRow.enabled ? "ok" : "idle"}>
-              {scheduleRow.enabled ? "有効" : "停止中"}
+            <StatusBadge state={scheduleView.enabled ? "ok" : "idle"}>
+              {scheduleView.enabled ? "有効" : "停止中"}
             </StatusBadge>
           ),
         },
         {
           label: "前回",
-          value: scheduleRow.lastRunState ? (
+          value: scheduleView.lastRunState ? (
             <StatusBadge
               state={
-                scheduleRow.lastRunState === "ok"
+                scheduleView.lastRunState === "ok"
                   ? "ok"
-                  : scheduleRow.lastRunState === "warn"
+                  : scheduleView.lastRunState === "warn"
                     ? "warn"
-                    : scheduleRow.lastRunState === "error"
+                    : scheduleView.lastRunState === "error"
                       ? "error"
                       : "idle"
               }
             >
-              {cronStateLabel(scheduleRow.lastRunState)}
+              {cronStateLabel(scheduleView.lastRunState)}
             </StatusBadge>
           ) : (
             <span>未実行</span>
@@ -826,13 +847,17 @@ export default async function BudgetGuardPage() {
         },
         {
           label: "次回",
-          value: scheduleRow.nextRunAt ? (
+          value: scheduleView.nextRunAt ? (
             <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
-              {formatTimestamp(scheduleRow.nextRunAt)}
+              {formatDateTime(scheduleView.nextRunAt, { timeZone: pageDisplayTimeZone })}
             </span>
           ) : (
             <span>—</span>
           ),
+        },
+        {
+          label: "操作",
+          value: <BudgetScheduleToggle initialEnabled={scheduleView.enabled} />,
         },
       ]
     : [];
@@ -847,6 +872,7 @@ export default async function BudgetGuardPage() {
             ルールが未設定のときや危険な変更は、Meta を直接変更せず人の承認を待ちます。
           </>
         }
+        actions={<RunCronButton presetName="budget_guard" label="今すぐチェック" />}
       />
 
       <div className="page-body page-body--single">
@@ -935,7 +961,7 @@ export default async function BudgetGuardPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : scheduleRow
+              : scheduleView
                 ? "予算チェックの定期実行"
                 : "予算チェックの自動実行は未登録"
           }
@@ -944,18 +970,18 @@ export default async function BudgetGuardPage() {
               state={
                 !dbReady
                   ? "warn"
-                  : !scheduleRow
+                  : !scheduleView
                     ? "idle"
-                    : scheduleRow.enabled
+                    : scheduleView.enabled
                       ? "ok"
                       : "idle"
               }
             >
               {!dbReady
                 ? "warn"
-                : !scheduleRow
+                : !scheduleView
                   ? "未登録"
-                  : scheduleRow.enabled
+                  : scheduleView.enabled
                     ? "on"
                     : "off"}
             </StatusDot>
@@ -966,7 +992,7 @@ export default async function BudgetGuardPage() {
               title="自動実行の状態を読み出せません"
               description="接続と健康状態を確認してください。"
             />
-          ) : !scheduleRow ? (
+          ) : !scheduleView ? (
             <EmptyState
               title="予算チェックの自動実行はまだ登録されていません"
               description="AdDroid を開始すると標準の自動実行が登録されます。"

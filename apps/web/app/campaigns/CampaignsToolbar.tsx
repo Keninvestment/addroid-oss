@@ -71,7 +71,13 @@ export function CampaignsToolbar({
           id="campaigns-account"
           className="form-select"
           value={selectedAccountId ?? ""}
-          onChange={(ev) => navigate({ accountId: ev.target.value || null })}
+          onChange={(ev) =>
+            navigate({
+              accountId: ev.target.value || null,
+              campaignId: null,
+              adsetId: null,
+            })
+          }
           disabled={accounts.length === 0}
         >
           {accounts.length === 0 ? (

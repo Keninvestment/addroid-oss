@@ -3,10 +3,13 @@
 # 自然言語リクエストはこの構造化 DSL に変換してから保存・実行する。
 # LLM は DSL 生成まで、実行時の判定は deterministic rule engine が行う。
 
+version: 1
+
 rules:
   - id: pause_zero_cv_campaigns
     enabled: false
     schedule: "0 * * * *"
+    intent: pause
     scope:
       level: campaign
     window:
@@ -30,12 +33,18 @@ rules:
       type: set_status
       status: PAUSED
       targetLevel: campaign
+    limits:
+      maxActionsPerRun: 3
+      maxDailyBudgetAffected: 30000
+    approval:
+      mode: proposal
     safety:
       mode: proposal
 
   - id: raise_budget_low_cpa_campaigns
     enabled: false
     schedule: "0 9 * * *"
+    intent: adjust_budget
     scope:
       level: campaign
     window:
@@ -68,3 +77,5 @@ rules:
       maxIncreasePercentPerDay: 20
       maxDailyBudget: 50000
       cooldownHours: 24
+    approval:
+      mode: proposal

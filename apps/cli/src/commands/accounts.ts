@@ -206,9 +206,10 @@ async function chooseAndSetDefault(
   opts: { yes: boolean }
 ): Promise<RegisteredAccount | null> {
   if (accounts.length === 0) return null;
-  if (accounts.length === 1 || opts.yes) {
+  if (accounts.length === 1) {
     return setDefaultAccount(prisma, workspaceId, accounts[0]!.id, "user:cli");
   }
+  if (opts.yes || !process.stdin.isTTY || !process.stdout.isTTY) return null;
   const selected = await chooseOneAccount(accounts, { yes: false });
   return setDefaultAccount(prisma, workspaceId, selected.id, "user:cli");
 }

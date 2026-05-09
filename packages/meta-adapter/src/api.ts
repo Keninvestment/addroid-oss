@@ -34,6 +34,8 @@ const ME_FIELDS = "id,name";
 const BUSINESS_FIELDS = "id,name";
 const ADACCOUNT_FIELDS =
   "id,account_id,name,account_status,currency,timezone_name,business{id,name}";
+const GRAPH_FETCH_MAX_ATTEMPTS = 3;
+const GRAPH_FETCH_RETRY_BASE_MS = 350;
 
 export interface MetaMeProfile {
   id: string;
@@ -61,20 +63,15 @@ async function fetchGraph<T>(
   // access_token は Authorization ヘッダで送る。URL に含めない (アクセスログ漏洩防止)。
   const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${path}`);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-  let res: Response;
-  try {
-    res = await fetchImpl(url.toString(), {
+  const request = () =>
+    fetchImpl(url.toString(), {
       method: "GET",
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
     });
-  } catch (err) {
-    throw new MetaApiError(
-      `${origin}: Meta Graph fetch failed: ${(err as Error).message}`
-    );
-  }
+  const res = await fetchGraphWithRetry(request, origin);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new MetaApiError(`${origin}: Meta Graph HTTP ${res.status}`, {
@@ -99,20 +96,15 @@ async function fetchGraphUrl<T>(
   accessToken: string,
   origin: string
 ): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetchImpl(url, {
+  const request = () =>
+    fetchImpl(url, {
       method: "GET",
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
     });
-  } catch (err) {
-    throw new MetaApiError(
-      `${origin}: Meta Graph fetch failed: ${(err as Error).message}`
-    );
-  }
+  const res = await fetchGraphWithRetry(request, origin);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new MetaApiError(`${origin}: Meta Graph HTTP ${res.status}`, {
@@ -129,6 +121,39 @@ async function fetchGraphUrl<T>(
     throw new MetaApiError(`${origin}: Meta Graph error: ${msg}`, { payload: json });
   }
   return json as T;
+}
+
+async function fetchGraphWithRetry(
+  request: () => Promise<Response>,
+  origin: string
+): Promise<Response> {
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= GRAPH_FETCH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await request();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= GRAPH_FETCH_MAX_ATTEMPTS) break;
+      await delay(GRAPH_FETCH_RETRY_BASE_MS * attempt);
+    }
+  }
+  throw new MetaApiError(
+    `${origin}: Meta Graph fetch failed after ${GRAPH_FETCH_MAX_ATTEMPTS} attempts: ${formatFetchError(lastErr)}`
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatFetchError(err: unknown): string {
+  const error = err as Error & { cause?: unknown };
+  const cause = error?.cause as { code?: string; errors?: Array<{ code?: string; address?: string }> } | undefined;
+  const causeCode = cause?.code ? ` (${cause.code})` : "";
+  const nested = Array.isArray(cause?.errors) && cause.errors.length > 0
+    ? ` [${cause.errors.flatMap((item) => item.code ? [`${item.code}${item.address ? ` ${item.address}` : ""}`] : []).join(", ")}]`
+    : "";
+  return `${error?.message || String(err)}${causeCode}${nested}`;
 }
 
 export async function fetchMeProfile(opts: {

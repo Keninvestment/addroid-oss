@@ -223,12 +223,7 @@ export class OctokitGithubAdapter implements GithubAdapter {
       isPrivate: visibility === "private",
       defaultBranch,
     });
-    const files = buildOpsTemplate({
-      workspaceSlug: input.workspaceSlug,
-      workspaceDisplayName: input.workspaceDisplayName,
-      initialAccountKey: input.initialAccountKey,
-      initialAccountDisplayName: input.initialAccountDisplayName,
-    });
+    const files = buildBootstrapTemplateFiles(input);
     const commit = await api.commitTemplateFiles({
       owner: repo.owner,
       repo: repo.name,
@@ -323,6 +318,31 @@ export class OctokitGithubAdapter implements GithubAdapter {
     const accessToken = this.crypto.decrypt(token.accessTokenCiphertext);
     return this.apiClientFactory(accessToken);
   }
+}
+
+function buildBootstrapTemplateFiles(input: BootstrapOpsRepoInput): OpsTemplateFile[] {
+  const primary = buildOpsTemplate({
+    workspaceSlug: input.workspaceSlug,
+    workspaceDisplayName: input.workspaceDisplayName,
+    initialAccountKey: input.initialAccountKey,
+    initialAccountDisplayName: input.initialAccountDisplayName,
+  });
+  const files = new Map(primary.map((file) => [file.path, file]));
+  for (const account of input.initialAccounts ?? []) {
+    if (account.key === input.initialAccountKey) continue;
+    const accountTemplate = buildOpsTemplate({
+      workspaceSlug: input.workspaceSlug,
+      workspaceDisplayName: input.workspaceDisplayName,
+      initialAccountKey: account.key,
+      initialAccountDisplayName: account.displayName,
+    });
+    for (const file of accountTemplate) {
+      if (file.path === `ads/accounts/${account.key}/brand.yaml`) {
+        files.set(file.path, file);
+      }
+    }
+  }
+  return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 // ---------------------------------------------------------------------
