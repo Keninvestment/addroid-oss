@@ -942,7 +942,7 @@ async function browserFlowApprovals(page, recordResult) {
     const text = document.body.innerText || "";
     return {
       hasTitle: text.includes("[regression fix] browser-test fixture PR"),
-      hasBodyPanel: text.includes("PR 本文 (Body)"),
+      hasBodyPanel: text.includes("変更内容の説明"),
       hasBodyExcerpt: text.includes("regression fix fixture body"),
       hasFilesPanel: text.includes("変更ファイル一覧"),
       hasFixturePathA: text.includes("config/fixture-target.yaml"),
