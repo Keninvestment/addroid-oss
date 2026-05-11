@@ -138,7 +138,7 @@ function printHelp() {
       "  version   CLI バージョン",
       "  help      このヘルプ",
       "",
-      "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, restore, service, up.",
+      "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, activate, cron, auth, accounts, restore, service, up, down.",
       "All operations are localhost-bound and outbound-only.",
       "",
     ].join("\n")
