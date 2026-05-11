@@ -42,7 +42,7 @@
     "prepack": "node build.mjs",
     "postinstall": "node scripts/postinstall.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test --experimental-test-isolation=none \"src/__tests__/**/*.test.ts\"",
+    "test": "node --import tsx --test --test-reporter=spec --experimental-test-isolation=none \"src/__tests__/**/*.test.ts\"",
     "package:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
