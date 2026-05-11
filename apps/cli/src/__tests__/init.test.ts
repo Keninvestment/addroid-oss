@@ -48,7 +48,16 @@ async function withTempHome<T>(
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-init-"));
   const prev = process.env.ADDROID_HOME;
   const prevMetaCliBin = process.env.ADDROID_META_CLI_BIN;
+  const prevPath = process.env.PATH;
+  const binDir = path.join(dir, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const codexBin = path.join(binDir, "codex");
+  fs.writeFileSync(codexBin, "#!/bin/sh\necho 'codex 0.0.0'\n", {
+    encoding: "utf8",
+    mode: 0o755,
+  });
   process.env.ADDROID_HOME = dir;
+  process.env.PATH = [binDir, prevPath].filter(Boolean).join(path.delimiter);
   try {
     return await fn(dir);
   } finally {
@@ -56,6 +65,8 @@ async function withTempHome<T>(
     else process.env.ADDROID_HOME = prev;
     if (prevMetaCliBin === undefined) delete process.env.ADDROID_META_CLI_BIN;
     else process.env.ADDROID_META_CLI_BIN = prevMetaCliBin;
+    if (prevPath === undefined) delete process.env.PATH;
+    else process.env.PATH = prevPath;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
