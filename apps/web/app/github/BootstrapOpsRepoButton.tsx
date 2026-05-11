@@ -21,7 +21,10 @@ export function BootstrapOpsRepoButton({ label = "変更管理リポジトリを
     try {
       const res = await fetch("/api/github/bootstrap-ops-repo", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-AdDroid-Web-Action": "1",
+        },
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;

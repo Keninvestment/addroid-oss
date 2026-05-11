@@ -7,11 +7,14 @@
 //
 // the current implementation の制約:
 //   - GitHub Webhook を使わず、merged PR は github_poll cron で検知する。
-//   - daily_report / budget_guard / improvement_pr は登録のみで未起動。
+//   - daily_report / today_report / improvement_pr は登録のみで未起動。
+//   - 自然言語カスタム cron は preset cron ではなく scheduled_task_run job で動く。
 
 export {
   CRON_PRESETS,
   APPLY_JOB_NAME,
+  SCHEDULED_TASK_JOB_NAME,
+  AUTOMATION_RULE_JOB_NAME,
   type CronPreset,
   type CronPresetName,
 } from "./presets.js";
@@ -21,7 +24,9 @@ export {
   ensureQueue,
   ensureRuntimeQueues,
   registerCronPresets,
+  resolveCronScheduleTimeZone,
   RUNTIME_QUEUE_NAMES,
+  scheduleCron,
   type BootOptions,
   type CronScheduler,
   type QueueManager,

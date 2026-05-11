@@ -58,6 +58,10 @@ import {
   createOrReuseAgentTask,
   normalizeAgentTaskPrompt,
 } from "../../../worker/src/lib/agent-task-store.js";
+import {
+  enqueueAgentTaskNow,
+  scheduleAgentTaskNextRun,
+} from "../../../worker/src/lib/agent-task-runtime.js";
 
 type ChatCommandName =
   | "doctor"
@@ -588,8 +592,11 @@ async function runDailyReportForChat(
   let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
   try {
     ctx = await prepareChatCronContext(opts.env);
+    const preset = normalizePresetName(
+      typeof tool.toolArgs.kind === "string" ? tool.toolArgs.kind : "daily"
+    );
     const metricDate = resolveMetricDateArg(tool.toolArgs);
-    const jobId = await ctx.boss.send("daily_report", metricDate ? { metricDate } : {});
+    const jobId = await ctx.boss.send(preset, metricDate ? { metricDate } : {});
     if (!jobId) {
       opts.out.write(
         [
@@ -603,7 +610,7 @@ async function runDailyReportForChat(
     }
 
     const progress = createWorkingIndicator(opts.out, opts.input, "日次レポートを作成中");
-    const run = await progress.run(waitForCronRun(ctx.prisma, jobId, "daily_report", 180_000));
+    const run = await progress.run(waitForCronRun(ctx.prisma, jobId, preset, 180_000));
     if (!run) {
       opts.out.write(
         [
@@ -670,21 +677,34 @@ async function createScheduledAgentTaskForChat(
       nextRunAt,
       createdBy: "agent:cli-chat",
     });
+    const scheduled = await scheduleAgentTaskNextRun({
+      prisma: ctx.prisma,
+      boss: ctx.boss,
+      workspaceId: ctx.workspaceId,
+      taskId: task.id,
+    });
     await ctx.prisma.auditLog.create({
       data: {
         workspaceId: ctx.workspaceId,
         actor: "agent:cli-chat",
         action: created ? "agent_task.created_via_chat" : "agent_task.reused_via_chat",
         target: `agent_task:${task.id}`,
-        metadata: { title, cron, prompt: normalizedPrompt, runNow, created },
+        metadata: {
+          title,
+          cron,
+          prompt: normalizedPrompt,
+          runNow,
+          created,
+          scheduledJobId: scheduled?.jobId ?? null,
+        },
       },
     }).catch(() => undefined);
     let jobId: string | null = null;
     if (runNow) {
-      jobId = await ctx.boss.send("agent_tasks", {
-        manual: true,
+      jobId = await enqueueAgentTaskNow({
+        boss: ctx.boss,
+        taskId: task.id,
         requestedBy: "agent:cli-chat",
-        requestedAt: new Date().toISOString(),
       });
     }
     opts.out.write(
@@ -717,7 +737,7 @@ async function setScheduleEnabledForChat(
   }
   let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
   try {
-    const { CRON_PRESETS, validateCronExpression } = await import("@addroid/queue");
+    const { CRON_PRESETS, scheduleCron, validateCronExpression } = await import("@addroid/queue");
     const preset = normalizePresetName(readRequiredToolString(tool.toolArgs, "preset"));
     const presetDef = CRON_PRESETS.find((p) => p.name === preset);
     if (!presetDef) throw new Error(`未知の preset です: ${preset}`);
@@ -736,7 +756,7 @@ async function setScheduleEnabledForChat(
       select: { cron: true, enabled: true },
     });
     const cron = requestedCron ?? existing?.cron ?? presetDef.cron;
-    if (enabled) await ctx.boss.schedule(preset, cron);
+    if (enabled) await scheduleCron(ctx.boss, preset, cron);
     else await ctx.boss.unschedule(preset);
     await ctx.prisma.cronSchedule.update({
       where: { workspaceId_name: { workspaceId: ctx.workspaceId, name: preset } },
@@ -775,6 +795,7 @@ async function proposeOpsChangeForChat(
   opts: {
     out: NodeJS.WritableStream;
     env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
   }
 ): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
   if (!opts.env.DATABASE_URL) {
@@ -815,6 +836,7 @@ async function proposeAutomationRuleForChat(
   opts: {
     out: NodeJS.WritableStream;
     env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
   }
 ): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
   if (!opts.env.DATABASE_URL) {
@@ -838,8 +860,15 @@ async function proposeAutomationRuleForChat(
       source: "cli-chat",
       env: opts.env,
     });
-    const message = `自動化ルール PR #${result.prNumber} を作成しました。承認・merge 後に automation_rules cron で評価されます。`;
-    opts.out.write([message, result.htmlUrl, ""].join("\n"));
+    const message =
+      `自動化ポリシー PR #${result.prNumber} を作成しました。` +
+      "承認・merge 後に自動実行ページへ表示され、ルール内の schedule で予約されます。";
+    opts.out.write([
+      message,
+      `承認: ${opts.agentContext.webUrl}/approvals/${result.prNumber}`,
+      result.htmlUrl,
+      "",
+    ].join("\n"));
     return { handled: true, code: 0, message, data: result };
   } catch (err) {
     const message = `自動化ルール PR を作成できませんでした: ${(err as Error).message}`;
@@ -1802,8 +1831,14 @@ function resolveMetricDateArg(args: Record<string, unknown>): string | null {
 }
 
 async function computeNextRunAt(cron: string): Promise<Date> {
-  const { default: cronParser } = await import("cron-parser");
-  return cronParser.parseExpression(cron).next().toDate();
+  const [{ default: cronParser }, { resolveCronScheduleTimeZone }] = await Promise.all([
+    import("cron-parser"),
+    import("@addroid/queue"),
+  ]);
+  return cronParser
+    .parseExpression(cron, { tz: resolveCronScheduleTimeZone() })
+    .next()
+    .toDate();
 }
 
 function deriveAgentTaskTitle(prompt: string): string {
@@ -1814,12 +1849,10 @@ function deriveAgentTaskTitle(prompt: string): string {
 function normalizePresetName(value: string): string {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
-  if (v === "budget" || v === "budget_guard") return "budget_guard";
-  if (v === "automation" || v === "automation_rules" || v === "autopilot") return "automation_rules";
+  if (v === "today" || v === "current" || v === "today_report") return "today_report";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";
-  if (v === "agent" || v === "agent_task" || v === "agent_tasks") return "agent_tasks";
   return v;
 }
 

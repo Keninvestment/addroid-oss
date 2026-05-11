@@ -80,7 +80,7 @@ test("buildOpsTemplate emits the cron preset list as-is", () => {
   const files = buildOpsTemplate(SAMPLE_INPUT);
   const cron = files.find((f) => f.path === "workflows/cron.yaml");
   assert.ok(cron);
-  for (const name of ["github_poll", "daily_report", "budget_guard", "improvement_pr"]) {
+  for (const name of ["github_poll", "daily_report", "today_report", "improvement_pr"]) {
     assert.ok(
       cron!.content.includes(`name: ${name}`),
       `cron.yaml should contain preset '${name}'`

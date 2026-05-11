@@ -56,6 +56,7 @@ type AccountRow = {
   key: string;
   displayName: string;
   metaAccountId: string | null;
+  currency: string | null;
   timezoneName: string | null;
 };
 
@@ -98,6 +99,30 @@ type ApplyJobRow = {
   pullRequest: { number: number; title: string; mergedAt: Date | null } | null;
 };
 
+type PerformanceMetricRow = {
+  hierarchyId: string | null;
+  nodeType: string;
+  nodeKey: string;
+  metricDate: Date;
+  impressions: number;
+  clicks: number;
+  spendMicros: bigint;
+  conversions: number;
+  source: string;
+};
+
+type CampaignMetrics = {
+  metricDate: Date;
+  source: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  ctr: number;
+  cpc: number | null;
+  cpa: number | null;
+};
+
 export default async function CampaignsPage({
   searchParams,
 }: {
@@ -118,6 +143,8 @@ export default async function CampaignsPage({
   let defaultAdAccountId: string | null = null;
   let allHierarchy: HierarchyRow[] = [];
   let applyJobs: ApplyJobRow[] = [];
+  let latestMetricDate: Date | null = null;
+  let metricRows: PerformanceMetricRow[] = [];
 
   try {
     const currentWorkspace = await ensureWebWorkspace();
@@ -130,7 +157,14 @@ export default async function CampaignsPage({
       accounts = await prisma.adAccount.findMany({
         where: { workspaceId: currentWorkspace.id, active: true },
         orderBy: [{ createdAt: "asc" }],
-        select: { id: true, key: true, displayName: true, metaAccountId: true, timezoneName: true },
+        select: {
+          id: true,
+          key: true,
+          displayName: true,
+          metaAccountId: true,
+          currency: true,
+          timezoneName: true,
+        },
       });
     }
     applyJobs = await prisma.applyJob.findMany({
@@ -164,44 +198,76 @@ export default async function CampaignsPage({
 
   if (dbReady && selectedAccountId) {
     try {
-      allHierarchy = await prisma.adsHierarchyNode.findMany({
-        where: {
-          accountId: selectedAccountId,
-        },
-        orderBy: [{ updatedAt: "desc" }],
-        take: 1000,
-        select: {
-          id: true,
-          nodeType: true,
-          nodeKey: true,
-          parentId: true,
-          displayName: true,
-          status: true,
-          externalId: true,
-          lastCommitSha: true,
-          updatedAt: true,
-          spec: true,
-          account: { select: { key: true, metaAccountId: true, timezoneName: true } },
-          parent: {
-            select: {
-              id: true,
-              nodeType: true,
-              parentId: true,
-              displayName: true,
-              externalId: true,
-              parent: {
-                select: {
-                  id: true,
-                  nodeType: true,
-                  parentId: true,
-                  displayName: true,
-                  externalId: true,
+      const [hierarchyRows, latestMetric] = await Promise.all([
+        prisma.adsHierarchyNode.findMany({
+          where: {
+            accountId: selectedAccountId,
+          },
+          orderBy: [{ updatedAt: "desc" }],
+          take: 1000,
+          select: {
+            id: true,
+            nodeType: true,
+            nodeKey: true,
+            parentId: true,
+            displayName: true,
+            status: true,
+            externalId: true,
+            lastCommitSha: true,
+            updatedAt: true,
+            spec: true,
+            account: { select: { key: true, metaAccountId: true, timezoneName: true } },
+            parent: {
+              select: {
+                id: true,
+                nodeType: true,
+                parentId: true,
+                displayName: true,
+                externalId: true,
+                parent: {
+                  select: {
+                    id: true,
+                    nodeType: true,
+                    parentId: true,
+                    displayName: true,
+                    externalId: true,
+                  },
                 },
               },
             },
           },
-        },
-      });
+        }),
+        prisma.performanceSnapshot.findFirst({
+          where: {
+            accountId: selectedAccountId,
+            nodeType: { in: ["campaign", "adset", "ad"] },
+          },
+          orderBy: [{ metricDate: "desc" }, { createdAt: "desc" }],
+          select: { metricDate: true },
+        }),
+      ]);
+      allHierarchy = hierarchyRows;
+      latestMetricDate = latestMetric?.metricDate ?? null;
+      if (latestMetricDate) {
+        metricRows = await prisma.performanceSnapshot.findMany({
+          where: {
+            accountId: selectedAccountId,
+            metricDate: latestMetricDate,
+            nodeType: { in: ["campaign", "adset", "ad"] },
+          },
+          select: {
+            hierarchyId: true,
+            nodeType: true,
+            nodeKey: true,
+            metricDate: true,
+            impressions: true,
+            clicks: true,
+            spendMicros: true,
+            conversions: true,
+            source: true,
+          },
+        });
+      }
     } catch {
       dbReady = false;
     }
@@ -257,6 +323,23 @@ export default async function CampaignsPage({
   const activeCount = hierarchy.filter((row) => isActive(row.status)).length;
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
   const pageDisplayTimeZone = resolveDisplayTimeZone(selectedAccount?.timezoneName);
+  const currency = selectedAccount?.currency ?? "JPY";
+  const metricsByHierarchyId = new Map<string, CampaignMetrics>();
+  const metricsByNodeKey = new Map<string, CampaignMetrics>();
+  for (const row of metricRows) {
+    const metrics = normalizeMetricRow(row);
+    if (row.hierarchyId) metricsByHierarchyId.set(row.hierarchyId, metrics);
+    metricsByNodeKey.set(metricKey(row.nodeType, row.nodeKey), metrics);
+  }
+  const metricsForRow = (row: HierarchyRow): CampaignMetrics | null =>
+    metricsByHierarchyId.get(row.id) ??
+    metricsByNodeKey.get(metricKey(row.nodeType, row.nodeKey)) ??
+    (row.externalId
+      ? metricsByNodeKey.get(metricKey(row.nodeType, row.externalId)) ?? null
+      : null);
+  const metricDateLabel = latestMetricDate
+    ? formatMetricDate(latestMetricDate)
+    : null;
   const makeHref = (updates: Partial<CampaignsHrefInput>) =>
     buildCampaignsHref({
       accountId: selectedAccountId,
@@ -271,6 +354,8 @@ export default async function CampaignsPage({
     activeTab,
     makeHref,
     pageDisplayTimeZone,
+    currency,
+    metricsForRow,
   });
   const activeTabLabel = tabLabel(activeTab);
 
@@ -409,6 +494,14 @@ export default async function CampaignsPage({
                 <span data-state="ok" className="status-badge inline-status">
                   配信中 {activeCount}
                 </span>
+                {" "}
+                {metricDateLabel ? (
+                  <span className="campaigns__metric-date">
+                    指標日 {metricDateLabel}
+                  </span>
+                ) : (
+                  <span className="campaigns__metric-date">指標未取得</span>
+                )}
               </>
             }
           >
@@ -551,6 +644,8 @@ function buildCampaignColumns(input: {
   activeTab: CampaignsTab;
   makeHref: (updates: Partial<CampaignsHrefInput>) => string;
   pageDisplayTimeZone: string;
+  currency: string;
+  metricsForRow: (row: HierarchyRow) => CampaignMetrics | null;
 }): DataTableColumn<HierarchyRow>[] {
   const deliveryColumn: DataTableColumn<HierarchyRow> = {
     header: "配信",
@@ -586,6 +681,7 @@ function buildCampaignColumns(input: {
     header: "操作",
     cell: (row) => renderActions(row),
   };
+  const metricColumns = buildMetricColumns(input);
 
   if (input.activeTab === "campaign") {
     return [
@@ -598,6 +694,7 @@ function buildCampaignColumns(input: {
             input.makeHref({ tab: "adset", campaignId: row.id, adsetId: null })
           ),
       },
+      ...metricColumns,
       idColumn,
       updatedColumn,
       actionsColumn,
@@ -623,6 +720,7 @@ function buildCampaignColumns(input: {
         header: "キャンペーン",
         cell: (row) => renderParentLink(row.parent, input.makeHref),
       },
+      ...metricColumns,
       idColumn,
       updatedColumn,
       actionsColumn,
@@ -648,10 +746,79 @@ function buildCampaignColumns(input: {
       header: "キャンペーン",
       cell: (row) => renderParentLink(row.parent?.parent ?? null, input.makeHref),
     },
+    ...metricColumns,
     idColumn,
     updatedColumn,
     actionsColumn,
   ];
+}
+
+function buildMetricColumns(input: {
+  currency: string;
+  metricsForRow: (row: HierarchyRow) => CampaignMetrics | null;
+}): DataTableColumn<HierarchyRow>[] {
+  return [
+    {
+      header: "消化",
+      cell: (row) => {
+        const metrics = input.metricsForRow(row);
+        return metrics ? formatCurrency(metrics.spend, input.currency) : renderMutedDash();
+      },
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "表示 / クリック",
+      cell: (row) => {
+        const metrics = input.metricsForRow(row);
+        return metrics
+          ? renderMetricStack(
+              formatInteger(metrics.impressions),
+              `${formatInteger(metrics.clicks)} クリック`
+            )
+          : renderMutedDash();
+      },
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "CTR / CPC",
+      cell: (row) => {
+        const metrics = input.metricsForRow(row);
+        return metrics
+          ? renderMetricStack(
+              formatPercent(metrics.ctr),
+              metrics.cpc === null ? "CPC —" : `CPC ${formatCurrency(metrics.cpc, input.currency)}`
+            )
+          : renderMutedDash();
+      },
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "CV / CPA",
+      cell: (row) => {
+        const metrics = input.metricsForRow(row);
+        return metrics
+          ? renderMetricStack(
+              `${formatInteger(metrics.conversions)} CV`,
+              metrics.cpa === null ? "CPA —" : `CPA ${formatCurrency(metrics.cpa, input.currency)}`
+            )
+          : renderMutedDash();
+      },
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+  ];
+}
+
+function renderMetricStack(primary: string, secondary: string) {
+  return (
+    <span className="campaigns__metric-cell">
+      <span>{primary}</span>
+      <span className="campaigns__metric-subtext">{secondary}</span>
+    </span>
+  );
 }
 
 function renderNodeName(row: HierarchyRow, href: string | null) {
@@ -715,6 +882,56 @@ function renderActions(row: HierarchyRow) {
 
 function renderMutedDash() {
   return <span style={{ color: "var(--color-text-tertiary)" }}>—</span>;
+}
+
+function normalizeMetricRow(row: PerformanceMetricRow): CampaignMetrics {
+  const spend = Number(row.spendMicros) / 1_000_000;
+  const impressions = Math.max(0, row.impressions);
+  const clicks = Math.max(0, row.clicks);
+  const conversions = Math.max(0, row.conversions);
+  return {
+    metricDate: row.metricDate,
+    source: row.source,
+    spend,
+    impressions,
+    clicks,
+    conversions,
+    ctr: impressions > 0 ? (clicks / impressions) * 100 : 0,
+    cpc: clicks > 0 ? spend / clicks : null,
+    cpa: conversions > 0 ? spend / conversions : null,
+  };
+}
+
+function metricKey(nodeType: string, nodeKey: string): string {
+  return `${nodeType}:${nodeKey}`;
+}
+
+function formatMetricDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function formatInteger(value: number): string {
+  return new Intl.NumberFormat("ja-JP", { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatPercent(value: number): string {
+  return `${new Intl.NumberFormat("ja-JP", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)}%`;
+}
+
+function formatCurrency(value: number, rawCurrency: string): string {
+  const currency = rawCurrency.trim().toUpperCase() || "JPY";
+  try {
+    return new Intl.NumberFormat("ja-JP", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: currency === "JPY" ? 0 : 2,
+    }).format(value);
+  } catch {
+    return `${formatInteger(value)} ${currency}`;
+  }
 }
 
 function isMetaGraphOnlyRow(row: HierarchyRow): boolean {

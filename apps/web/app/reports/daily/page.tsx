@@ -4,7 +4,7 @@
 // アクセスし、(1) KPI フィールド spend/impressions/clicks/CTR/CPC/CV/CPA/
 // frequency が表示される、(2) report run の状態または空状態が見える、
 // (3) snapshot に裏付けられた analytics 状態または空状態が見える、ことを期待
-// する。本ページは `cron_runs` (name="daily_report") と
+// する。本ページは `cron_runs` (name="daily_report" / "today_report") と
 // `performance_snapshots` を Prisma で直接読み出して描画する read-only な
 // SSR ページ。実データが無い場合は ガードレール「No Placeholder Data」に従い
 // 明示的な空状態 UI を出す。
@@ -236,6 +236,14 @@ function cronStateLabel(state: string): string {
     skipped: "スキップ",
   };
   return labels[state] ?? state;
+}
+
+function reportRunLabel(name: string): string {
+  const labels: Record<string, string> = {
+    daily_report: "前日分",
+    today_report: "当日分",
+  };
+  return labels[name] ?? name;
 }
 
 function reportSummaryStatusToState(status: string): StatusState {
@@ -593,7 +601,7 @@ export default async function ReportsDailyPage({
     [runs, snapshots, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
         where: {
-          name: "daily_report",
+          name: { in: ["daily_report", "today_report"] },
           OR: [
             { schedule: { is: { workspaceId: workspace.id } } },
             { executionLogs: { some: { workspaceId: workspace.id } } },
@@ -676,6 +684,10 @@ export default async function ReportsDailyPage({
       cell: (row) => formatDateTime(row.startedAt, { timeZone: runTimeZone(row) }),
       className: "tabular mono",
       headerClassName: "tabular",
+    },
+    {
+      header: "種別",
+      cell: (row) => reportRunLabel(row.name),
     },
     {
       header: "実行状態",
@@ -859,7 +871,12 @@ export default async function ReportsDailyPage({
             広告成果のKPIとAIコメントを確認します。この画面からMetaの広告設定は変更しません。
           </>
         }
-        actions={<RunCronButton presetName="daily_report" label="今すぐ取得" />}
+        actions={
+          <div style={{ display: "flex", gap: "var(--space-2)", flexWrap: "wrap" }}>
+            <RunCronButton presetName="daily_report" label="前日分を取得" />
+            <RunCronButton presetName="today_report" label="当日分を取得" />
+          </div>
+        }
       />
 
       <div className="page-body page-body--single">

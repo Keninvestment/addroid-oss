@@ -330,6 +330,7 @@ test("auth llm は provider 未指定時に選択結果を使って API key を�
     },
     async $disconnect() {},
   };
+  const anthropicApiKey = "sk-" + "ant-test-anthropic-key-123456";
   const { code, out } = await withEnv(
     {
       DATABASE_URL: "postgresql://addroid:pw@localhost:5432/addroid",
@@ -337,7 +338,7 @@ test("auth llm は provider 未指定時に選択結果を使って API key を�
     },
     () =>
       capture(() =>
-        runAuthCommand(["llm", "--api-key", "sk-ant-test-anthropic-key-123456"], {
+        runAuthCommand(["llm", "--api-key", anthropicApiKey], {
           prismaOverride,
           llmSelectProvider: async () => ({
             provider: "anthropic",

@@ -33,11 +33,15 @@ test("mirrorPresetsToCronSchedules with enableNonEssential=true marks every pres
   }
 });
 
-test("mirrorPresetsToCronSchedules: github_poll is enabled by default but daily_report is not", async () => {
+test("mirrorPresetsToCronSchedules: github_poll is enabled by default but report presets are not", async () => {
   const store = new FakeCronOpsStore();
   await mirrorPresetsToCronSchedules({ store, workspaceId: "ws-1" });
   const githubPoll = store.upserts.find((u) => u.name === "github_poll");
   const dailyReport = store.upserts.find((u) => u.name === "daily_report");
+  const todayReport = store.upserts.find((u) => u.name === "today_report");
   assert.equal(githubPoll?.enabled, true);
   assert.equal(dailyReport?.enabled, false);
+  assert.equal(todayReport?.enabled, false);
+  assert.equal(dailyReport?.cron, "0 9 * * *");
+  assert.equal(todayReport?.cron, "0 * * * *");
 });

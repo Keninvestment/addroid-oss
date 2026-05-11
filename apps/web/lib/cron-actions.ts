@@ -24,6 +24,8 @@ import type PgBoss from "pg-boss";
 import {
   CRON_PRESETS,
   mirrorPresetsToCronSchedules,
+  resolveCronScheduleTimeZone,
+  scheduleCron,
   validateCronExpression,
   type CronPresetName,
 } from "@addroid/queue";
@@ -112,6 +114,7 @@ export async function toggleCron(
   }
 
   const { boss, workspaceId } = ctx;
+  const scheduleTimeZone = resolveCronScheduleTimeZone();
   const preset = CRON_PRESETS.find((p) => p.name === presetName)!;
   const row = await prisma.cronSchedule.findUnique({
     where: { workspaceId_name: { workspaceId, name: presetName } },
@@ -121,7 +124,7 @@ export async function toggleCron(
 
   if (desiredEnabled) {
     try {
-      await boss.schedule(presetName, cron);
+      await scheduleCron(boss, presetName, cron, scheduleTimeZone);
     } catch (err) {
       return {
         ok: false,
@@ -204,6 +207,7 @@ export async function setCronSchedule(
     };
   }
   const { boss, workspaceId } = ctx;
+  const scheduleTimeZone = resolveCronScheduleTimeZone();
 
   const existing = await prisma.cronSchedule.findUnique({
     where: { workspaceId_name: { workspaceId, name: presetName } },
@@ -214,7 +218,7 @@ export async function setCronSchedule(
 
   if (enabled) {
     try {
-      await boss.schedule(presetName, trimmed);
+      await scheduleCron(boss, presetName, trimmed, scheduleTimeZone);
     } catch (err) {
       return {
         ok: false,
@@ -284,6 +288,7 @@ export async function setCronScheduleEnabled(
     };
   }
   const { boss, workspaceId } = ctx;
+  const scheduleTimeZone = resolveCronScheduleTimeZone();
   const preset = CRON_PRESETS.find((p) => p.name === presetName)!;
   const existing = await prisma.cronSchedule.findUnique({
     where: { workspaceId_name: { workspaceId, name: presetName } },
@@ -292,7 +297,7 @@ export async function setCronScheduleEnabled(
   const cron = requestedCron ?? existing?.cron ?? preset.cron;
 
   try {
-    if (input.enabled) await boss.schedule(presetName, cron);
+    if (input.enabled) await scheduleCron(boss, presetName, cron, scheduleTimeZone);
     else await boss.unschedule(presetName);
   } catch (err) {
     return {

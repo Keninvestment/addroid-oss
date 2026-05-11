@@ -146,7 +146,7 @@ export してから起動してください。
 | `ADDROID_HOME` | 任意。`~/.addroid` の代わりに使う作業ディレクトリ |
 | `ADDROID_WEB_HOSTNAME` | 任意。Web UI バインドアドレス。既定: `127.0.0.1` |
 | `ADDROID_WEB_PORT` | 任意。Web UI ポート。既定: `3000` |
-| `ADDROID_USER_TIMEZONE` | 任意。Meta ad account の `timezone_name` が無い場合に daily_report の取得日を決める IANA timezone。未設定時は実行環境 timezone、最後に UTC |
+| `ADDROID_USER_TIMEZONE` | 任意。標準 cron の実行時刻と、Meta ad account の `timezone_name` が無い場合の report 取得日を決める IANA timezone。未設定時は `TZ` / 実行環境 timezone / UTC の順にフォールバック |
 
 `ENCRYPTION_KEY` の生成例:
 
@@ -315,7 +315,7 @@ GitHub token と ops repo 連携を必ず登録してください。CLI は GitH
 |---|---|---|
 | GitHub | ops repo bootstrap、PR ポーリング、merge 検知 | [`docs/GITOPS.md`](./GITOPS.md) |
 | Meta | 実際の広告アカウント接続、Apply / Activate、ad_accounts 同期、レポート取得。実利用では必須 | [`docs/META.md`](./META.md) |
-| LLM Provider (Codex / OpenAI) | daily_report / budget_guard / improvement_pr workflow | [`docs/LLM_PROVIDER.md`](./LLM_PROVIDER.md) |
+| LLM Provider (Codex / OpenAI) | daily_report / today_report / improvement_pr / custom scheduled task workflow | [`docs/LLM_PROVIDER.md`](./LLM_PROVIDER.md) |
 | Image Provider | クリエイティブ画像生成 (任意) | [`docs/LLM_PROVIDER.md`](./LLM_PROVIDER.md) §Image Provider |
 | Slack | 通知 + `/adops` slash command (任意、Socket Mode のみ) | [`docs/SLACK.md`](./SLACK.md) |
 

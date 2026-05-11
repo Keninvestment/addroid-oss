@@ -305,6 +305,10 @@ addroid init --install-deps
 `ADDROID_META_GRAPH_INSIGHTS_FALLBACK=1` を設定すると Graph API の read-only fallback を使えます。
 取得日の timezone は Meta ad account の `timezone_name` を優先し、取得できない場合は
 `ADDROID_USER_TIMEZONE` / 実行環境 timezone / UTC の順にフォールバックします。
+標準 cron の実行時刻は `ADDROID_USER_TIMEZONE` / `TZ` / 実行環境 timezone / UTC の順で解決し、
+`daily_report` が前日分を毎朝9時に取得し、`today_report` が当日分を1時間ごとに取得します。
+自然言語で保存したカスタム cron は、毎分の巡回ではなく次回実行分の `scheduled_task_run`
+job として予約され、実行後に次回分を再予約します。
 
 自然言語の自動運用リクエストは、直接 Meta を変更せず、まず
 `workflows/automation-rules.yaml` と同形の DSL に変換してから評価します。例:

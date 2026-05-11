@@ -5,7 +5,12 @@
 // 名と cron 式の登録までで責務を切る。
 
 import PgBoss from "pg-boss";
-import { CRON_PRESETS, APPLY_JOB_NAME } from "./presets.js";
+import {
+  AUTOMATION_RULE_JOB_NAME,
+  CRON_PRESETS,
+  APPLY_JOB_NAME,
+  SCHEDULED_TASK_JOB_NAME,
+} from "./presets.js";
 import { SLACK_COMMAND_JOB_NAME } from "./slack-command.js";
 
 export interface BootOptions {
@@ -17,12 +22,19 @@ export interface QueueManager {
 }
 
 export interface CronScheduler extends QueueManager {
-  schedule(name: string, cron: string): Promise<void>;
+  schedule(
+    name: string,
+    cron: string,
+    data?: unknown,
+    options?: { tz?: string }
+  ): Promise<void>;
 }
 
 export const RUNTIME_QUEUE_NAMES = [
   ...CRON_PRESETS.map((preset) => preset.name),
   APPLY_JOB_NAME,
+  SCHEDULED_TASK_JOB_NAME,
+  AUTOMATION_RULE_JOB_NAME,
   SLACK_COMMAND_JOB_NAME,
 ] as const;
 
@@ -64,6 +76,39 @@ export interface RegisterPresetsOptions {
    * 見せるために schedule の存在は宣言しておく。テストでは true にして全件動かす。
    */
   enableNonEssential?: boolean;
+  timeZone?: string;
+}
+
+export function resolveCronScheduleTimeZone(
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  const candidates = [
+    env.ADDROID_USER_TIMEZONE,
+    env.TZ,
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    "UTC",
+  ];
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim();
+    if (!trimmed) continue;
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: trimmed });
+      return trimmed;
+    } catch {
+      // Try the next fallback.
+    }
+  }
+  return "UTC";
+}
+
+export async function scheduleCron(
+  boss: CronScheduler,
+  name: string,
+  cron: string,
+  timeZone = resolveCronScheduleTimeZone()
+): Promise<void> {
+  await ensureQueue(boss, name);
+  await boss.schedule(name, cron, undefined, { tz: timeZone });
 }
 
 /**
@@ -74,9 +119,9 @@ export async function registerCronPresets(
   boss: CronScheduler,
   opts: RegisterPresetsOptions = {}
 ): Promise<void> {
+  const timeZone = opts.timeZone ?? resolveCronScheduleTimeZone();
   for (const preset of CRON_PRESETS) {
     if (!preset.enabledByDefault && !opts.enableNonEssential) continue;
-    await ensureQueue(boss, preset.name);
-    await boss.schedule(preset.name, preset.cron);
+    await scheduleCron(boss, preset.name, preset.cron, timeZone);
   }
 }

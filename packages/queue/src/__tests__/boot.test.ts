@@ -7,18 +7,24 @@ import {
   SLACK_COMMAND_JOB_NAME,
   ensureRuntimeQueues,
   registerCronPresets,
+  resolveCronScheduleTimeZone,
 } from "../index.js";
 
 class FakeQueueBoss {
   created: string[] = [];
-  scheduled: { name: string; cron: string }[] = [];
+  scheduled: { name: string; cron: string; tz: string | undefined }[] = [];
 
   async createQueue(name: string): Promise<void> {
     this.created.push(name);
   }
 
-  async schedule(name: string, cron: string): Promise<void> {
-    this.scheduled.push({ name, cron });
+  async schedule(
+    name: string,
+    cron: string,
+    _data?: unknown,
+    options?: { tz?: string }
+  ): Promise<void> {
+    this.scheduled.push({ name, cron, tz: options?.tz });
   }
 }
 
@@ -44,7 +50,10 @@ test("ensureRuntimeQueues creates every runtime queue in stable order", async ()
 test("registerCronPresets creates queues before scheduling enabled presets", async () => {
   const boss = new FakeQueueBoss();
 
-  await registerCronPresets(boss, { enableNonEssential: false });
+  await registerCronPresets(boss, {
+    enableNonEssential: false,
+    timeZone: "Asia/Tokyo",
+  });
 
   const expected = CRON_PRESETS.filter((preset) => preset.enabledByDefault);
   assert.deepEqual(
@@ -53,6 +62,30 @@ test("registerCronPresets creates queues before scheduling enabled presets", asy
   );
   assert.deepEqual(
     boss.scheduled,
-    expected.map((preset) => ({ name: preset.name, cron: preset.cron }))
+    expected.map((preset) => ({
+      name: preset.name,
+      cron: preset.cron,
+      tz: "Asia/Tokyo",
+    }))
+  );
+});
+
+test("resolveCronScheduleTimeZone prefers user timezone over TZ", () => {
+  assert.equal(
+    resolveCronScheduleTimeZone({
+      ADDROID_USER_TIMEZONE: "Asia/Tokyo",
+      TZ: "America/Los_Angeles",
+    }),
+    "Asia/Tokyo"
+  );
+});
+
+test("resolveCronScheduleTimeZone ignores invalid timezone and falls back", () => {
+  assert.equal(
+    resolveCronScheduleTimeZone({
+      ADDROID_USER_TIMEZONE: "not-a-zone",
+      TZ: "Europe/Berlin",
+    }),
+    "Europe/Berlin"
   );
 });

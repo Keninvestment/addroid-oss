@@ -207,14 +207,14 @@ export function buildAgentSystemPrompt(
     "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD for explicit calendar dates and metricDateRelative for relative dates. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
     "You are allowed to inspect read-only data freely. When the user wants a one-time production mutation such as pause, activate, budget change, targeting change, create, update, or delete, never mutate Meta directly; use propose_ops_change to create a GitOps PR for human review.",
     surface === "scheduled-agent"
-      ? "When the saved task asks for conditional or recurring ad operations that may mutate Meta, prefer propose_automation_rule so the policy is reviewed in workflows/automation-rules.yaml before runtime execution. For read-only/reporting tasks, execute the appropriate read-only tools now."
-      : "When the user asks for conditional or recurring ad operations that may mutate Meta, prefer propose_automation_rule so the policy is reviewed in workflows/automation-rules.yaml before runtime execution. Use create_scheduled_agent_task for recurring read-only/reporting or flexible non-mutating tasks.",
+      ? "When the saved task asks for conditional ad operations, inspect current performance data first. If a production mutation is needed, create a GitOps PR unless the saved task carries an explicit auto-execute policy that allows a narrow safe operation."
+      : "When the user asks for recurring or conditional production ad automation, use propose_automation_rule, not create_scheduled_agent_task. Ask concise clarification questions if schedule, lookback window, decision timing, target scope, action, approval mode, or limits are ambiguous. The automation rule PR is the approval request; after merge, the rule schedule is registered internally.",
     "Meta Ads CLI capability note: supported read path is `meta --output json ads ...`. `insights get` supports --date-preset/--since/--until/--time-increment/--breakdown/--fields/--campaign-id/--adset-id/--ad-id/--sort/--limit. For hierarchy detail, list campaign/adset/ad IDs first, then query insights by the ID filter. Product feed/item/set list requires catalogId. Catalog and dataset list can use businessId.",
     "For performance analysis, request the fields needed for the user's question. For frequency ask for frequency. For CPA/CV/conversion checks request spend plus actions and, when useful, cost_per_action_type/action_values. Do not rely on display text for automation decisions; tool executors keep raw structured rows.",
     "Meta Ads CLI also has mutation commands such as campaign/adset/ad/creative/catalog/product create/update/delete and dataset connect/disconnect/assign-user, but chat must not run those directly. Use check_submission for dry-run review and propose_ops_change for production changes.",
     "Never request arbitrary shell, restore, destructive git, direct DB writes, direct Meta mutation outside audited paths, or secret display.",
     "Actual ad submission must go through ops repo validation, dry-run plan, GitHub PR review/merge, and worker apply.",
-    "For recurring scheduled tasks, keep flexibility: interpret the saved natural-language task at runtime and choose tools based on current state.",
+    "For recurring read-only scheduled tasks, keep flexibility: interpret the saved natural-language task at runtime and choose tools based on current state. For production automation rules, rely on the structured rule DSL and do not invent cadence, lookback windows, target scope, approval mode, or limits when the user left them ambiguous.",
     "Agent context:",
     agentContext.content,
   ].join("\n");
@@ -498,7 +498,7 @@ function buildScheduleArgs(args: Record<string, unknown>): string[] {
   const action = requireEnum(args, "action", ["list", "run", "logs"]);
   const out: string[] = [action];
   if (action !== "list") {
-    out.push(requireEnum(args, "preset", ["daily", "budget", "improvement", "github", "retention", "agent_tasks"]));
+    out.push(requireEnum(args, "preset", ["daily", "today", "improvement", "github", "retention"]));
   }
   const limit = optionalPositiveInt(args, "limit");
   if (limit !== null) out.push("--limit", String(limit));

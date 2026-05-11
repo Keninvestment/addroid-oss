@@ -114,7 +114,7 @@ export default async function DashboardPage() {
     if (workspaceId) {
       const latestDailyReport = await prisma.cronRun.findFirst({
         where: {
-          name: "daily_report",
+          name: { in: ["daily_report", "today_report"] },
           state: "success",
           OR: [
             { schedule: { is: { workspaceId } } },
@@ -435,6 +435,7 @@ export default async function DashboardPage() {
 function workflowLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
+    today_report: "当日レポート",
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",

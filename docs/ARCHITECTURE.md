@@ -26,9 +26,10 @@ AdDroid OSS の既定モデルは、OS の常駐サービス内で **1 プロセ
 |  Next.js App  |   shared DB  |  pg-boss        |
 |  Router       |─────────────│  - github_poll   |
 |  127.0.0.1:3000|             |  - daily_report  |
-+---------------+              |  - budget_guard  |
++---------------+              |  - today_report  |
                                |  - improvement_pr|
                                |  - retention_sweep|
+                               |  - scheduled_task_run|
                                |  - execute_apply  |
                                +-----------------+
                                         │
@@ -109,15 +110,19 @@ packages/*             →  packages/* (極小限)
 | preset | schedule | 既定 | 役割 |
 |---|---|---|---|
 | `github_poll` | `*/2 * * * *` | enabled | ops repo の PR を ETag-aware でポーリングし merged PR を検知 |
-| `daily_report` | `0 9 * * *` | disabled | 日次レポート取得 + ai_runs (`daily_report`) |
-| `budget_guard` | `*/15 * * * *` | disabled | 予算超過監視 + ai_runs (`budget_guard`) |
+| `daily_report` | `0 9 * * *` | disabled | 前日の日次レポートを毎朝取得 + ai_runs (`daily_report`) |
+| `today_report` | `0 * * * *` | disabled | 当日レポートを毎時取得 + ai_runs (`daily_report`) |
 | `improvement_pr` | `0 10 * * 1` | disabled | 週次改善提案 PR 作成 + ai_runs (`improvement_pr`) |
 | `retention_sweep` | `15 3 * * *` | enabled | housekeeping (raw 90d / aggregate 1y) |
+
+cron の実行時刻は `ADDROID_USER_TIMEZONE` / `TZ` / 実行環境 timezone / UTC の順で解決する。
+自然言語のカスタム cron は preset schedule ではなく、`scheduled_task_run` の delayed job として次回 1 回分だけ予約し、実行後に次回分を再予約する。
 
 cron 経由で発火する非同期ジョブ:
 
 - `execute_apply` — merged PR から enqueue され、Meta adapter 越しに PAUSED で
   campaign / adset / ad / creative を作成
+- `scheduled_task_run` — 自然言語カスタム cron の次回 1 回分を delayed job として実行
 
 ---
 

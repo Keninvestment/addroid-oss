@@ -305,6 +305,33 @@ test("runDailyReportOnce derives metricDate from the Meta account timezone", asy
   assert.equal(insights.calls[0]!.metricDate, "2026-05-03");
 });
 
+test("runDailyReportOnce can derive the previous local day for scheduled daily_report", async () => {
+  const insights = new FakeInsightsProvider({
+    current: [makeRow("account", "act_111")],
+    prior: [],
+    source: "mock",
+  });
+  const store = new FakeSnapshotStore({
+    ...ACCOUNT,
+    timezoneName: "Asia/Tokyo",
+  });
+  const analyst = new FakeAnalystRunner(makeAnalystResult());
+  const summary = await runDailyReportOnce({
+    workspaceId: "ws-1",
+    mode: "report_only",
+    accountKey: "primary",
+    now: () => new Date("2026-05-02T23:30:00Z"),
+    metricDateOffsetDays: -1,
+    fallbackTimeZone: "UTC",
+    insightsProvider: insights,
+    store,
+    analyst,
+  });
+  assert.equal(summary.metricDate, "2026-05-02");
+  assert.equal(summary.priorMetricDate, "2026-05-01");
+  assert.equal(insights.calls[0]!.metricDate, "2026-05-02");
+});
+
 test("runDailyReportOnce falls back to the user timezone when account timezone is missing", async () => {
   const insights = new FakeInsightsProvider({
     current: [makeRow("account", "act_111")],

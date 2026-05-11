@@ -93,7 +93,7 @@ test("cron enable は未知のプリセット名を exit 2 で拒否する", asy
   assert.equal(code, 2);
   assert.match(out.stderr, /未知のプリセット名/);
   assert.match(out.stderr, /daily_report/);
-  assert.match(out.stderr, /budget_guard/);
+  assert.match(out.stderr, /today_report/);
   assert.match(out.stderr, /improvement_pr/);
 });
 

@@ -21,6 +21,11 @@ import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot } from "../../components/ui/StatusDot";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
+import {
+  approvalRequiresAction,
+  approvalStateBadge,
+  approvalStateLabel,
+} from "../../lib/approvals";
 
 export const dynamic = "force-dynamic";
 
@@ -44,20 +49,6 @@ interface MergedPrRow {
   htmlUrl: string | null;
   decisionSource: string | null;
   decision: string | null;
-}
-
-function approvalStateLabel(decision: string | null): string {
-  if (decision === "approved") return "承認済み";
-  if (decision === "auto_approved") return "自動承認済み";
-  if (decision === "auto_blocked") return "自動ブロック";
-  if (decision === "rejected") return "却下";
-  return "確認待ち";
-}
-
-function approvalStateBadge(decision: string | null): "ok" | "warn" | "error" | "idle" {
-  if (decision === "approved" || decision === "auto_approved") return "ok";
-  if (decision === "auto_blocked" || decision === "rejected") return "error";
-  return "warn";
 }
 
 function readDecisionSource(metadata: unknown): string | null {
@@ -142,17 +133,20 @@ export default async function ApprovalsPage() {
     dbReady = false;
   }
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const approvalRequiredCount = openPrs.filter((pr) =>
+    approvalRequiresAction(pr.latestDecision)
+  ).length;
 
   const headerStatus = !dbReady
     ? "warn"
-    : openPrs.length === 0
+    : approvalRequiredCount === 0
       ? "idle"
-      : "info";
+      : "warn";
   const headerStatusLabel = !dbReady
     ? "warn"
-    : openPrs.length === 0
-      ? "no pending"
-      : `${openPrs.length} pending`;
+    : approvalRequiredCount === 0
+      ? "承認待ちなし"
+      : `${approvalRequiredCount} 件の承認が必要`;
 
   return (
     <>

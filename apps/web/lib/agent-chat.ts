@@ -21,6 +21,7 @@ import type { LLMProvider } from "@addroid/llm-provider";
 import { Prisma } from "@addroid/db";
 import {
   CRON_PRESETS,
+  resolveCronScheduleTimeZone,
   validateCronExpression,
   type CronPresetName,
 } from "@addroid/queue";
@@ -35,6 +36,7 @@ import {
   runCronNow,
   setCronScheduleEnabled,
 } from "./cron-actions";
+import { getQueueBoss } from "./queue-runtime";
 import { formatDateTime } from "./datetime";
 import { selectLLMProviderForWorker } from "../../worker/src/lib/llm-runtime";
 import {
@@ -60,6 +62,10 @@ import {
   createOrReuseAgentTask,
   normalizeAgentTaskPrompt,
 } from "../../worker/src/lib/agent-task-store";
+import {
+  enqueueAgentTaskNow,
+  scheduleAgentTaskNextRun,
+} from "../../worker/src/lib/agent-task-runtime";
 
 export interface WebAgentExecution {
   display: string;
@@ -287,7 +293,7 @@ export async function executeWebAgentTool(
       case "propose_ops_change":
         return await proposeOpsChangeTool(workspaceId, tool.toolArgs, tool.display);
       case "propose_automation_rule":
-        return await proposeAutomationRuleTool(workspaceId, tool.toolArgs, tool.display);
+        return await proposeAutomationRuleTool(workspaceId, tool.toolArgs, tool.display, webUrl);
       case "propose_automation_rule_update":
         return await proposeAutomationRuleUpdateTool(workspaceId, tool.toolArgs, tool.display);
       case "backup_data":
@@ -344,7 +350,8 @@ async function proposeOpsChangeTool(
 async function proposeAutomationRuleTool(
   workspaceId: string,
   args: Record<string, unknown>,
-  display: string
+  display: string,
+  webUrl: string
 ): Promise<WebAgentExecution> {
   const selection = await getActiveGithubAdapter();
   const result = await createAutomationRuleProposal({
@@ -358,7 +365,10 @@ async function proposeAutomationRuleTool(
   return {
     display,
     status: "ok",
-    message: `自動化ルール PR #${result.prNumber} を作成しました。承認・merge 後に automation_rules cron で評価されます。\n${result.htmlUrl}`,
+    message:
+      `自動化ポリシー PR #${result.prNumber} を作成しました。` +
+      `承認はこちらで確認できます: ${webUrl}/approvals/${result.prNumber}\n` +
+      `merge 後は自動実行ページに表示され、ルール内の schedule で予約されます。\n${result.htmlUrl}`,
     data: result,
   };
 }
@@ -813,7 +823,7 @@ async function runReportTool(
       message: result.error,
     };
   }
-  if (preset === "daily_report" && result.jobId) {
+  if ((preset === "daily_report" || preset === "today_report") && result.jobId) {
     const run = await waitForCronRun(result.jobId, preset, 120_000);
     if (!run) {
       return {
@@ -856,6 +866,7 @@ async function createScheduledAgentTaskTool(
   const validation = validateCronExpression(cron);
   if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
   const workspace = await ensureWebWorkspace();
+  const boss = await getQueueBoss();
   const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
   const taskTitle = title ?? deriveAgentTaskTitle(normalizedPrompt);
   const nextRunAt = runNow ? new Date() : computeNextRunAt(cron);
@@ -867,27 +878,53 @@ async function createScheduledAgentTaskTool(
     nextRunAt,
     createdBy: "agent:web-chat",
   });
+  const scheduled = await scheduleAgentTaskNextRun({
+    prisma,
+    boss,
+    workspaceId: workspace.id,
+    taskId: task.id,
+  });
   await recordAgentAudit(
     workspace.id,
     created ? "agent_task.created_via_chat" : "agent_task.reused_via_chat",
-    { title: taskTitle, cron, prompt: normalizedPrompt, runNow, created },
+    {
+      title: taskTitle,
+      cron,
+      prompt: normalizedPrompt,
+      runNow,
+      created,
+      scheduledJobId: scheduled?.jobId ?? null,
+    },
     "agent:web-chat"
   );
-  const queued = runNow ? await runCronNow("agent_tasks") : null;
+  const queued = runNow
+    ? {
+        ok: true as const,
+        jobId: await enqueueAgentTaskNow({
+          boss,
+          taskId: task.id,
+          requestedBy: "agent:web-chat",
+        }),
+      }
+    : null;
   return {
     display,
-    status: queued && !queued.ok ? "error" : "ok",
-    message: queued && !queued.ok
-      ? queued.error
-      : created
-        ? `Agent task を設定しました。次回実行: ${formatDateTime(task.nextRunAt)}`
-        : `同じ Agent task が既にあるため再利用しました。次回実行: ${formatDateTime(task.nextRunAt)}`,
+    status: "ok",
+    message: created
+      ? `Agent task を設定しました。次回実行: ${formatDateTime(scheduled?.nextRunAt ?? task.nextRunAt)}`
+      : `同じ Agent task が既にあるため再利用しました。次回実行: ${formatDateTime(scheduled?.nextRunAt ?? task.nextRunAt)}`,
     data: { task, queued, created },
   };
 }
 
 function computeNextRunAt(cron: string, currentDate = new Date()): Date {
-  return cronParser.parseExpression(cron, { currentDate }).next().toDate();
+  return cronParser
+    .parseExpression(cron, {
+      currentDate,
+      tz: resolveCronScheduleTimeZone(),
+    })
+    .next()
+    .toDate();
 }
 
 function deriveAgentTaskTitle(prompt: string): string {
@@ -2018,19 +2055,15 @@ function reportPreset(value: string): CronPresetName {
   const name =
     v === "daily" || v === "report" || v === "daily_report"
       ? "daily_report"
-      : v === "budget" || v === "budget_guard"
-        ? "budget_guard"
+      : v === "today" || v === "current" || v === "today_report"
+        ? "today_report"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "github" || v === "github_poll"
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
-              : v === "automation" || v === "automation_rules" || v === "autopilot"
-                ? "automation_rules"
-                : v === "agent" || v === "agent_task" || v === "agent_tasks"
-                  ? "agent_tasks"
-                  : "";
+              : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";
 }

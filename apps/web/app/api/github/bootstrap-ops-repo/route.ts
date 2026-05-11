@@ -17,10 +17,14 @@ import {
   resolveDesiredOpsRepo,
   resolveDefaultOpsTemplateAccount,
 } from "../../../../lib/github-runtime";
+import { requireTrustedJsonWebAction } from "../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
-export async function POST() {
+export async function POST(request: Request) {
+  const untrustedResponse = requireTrustedJsonWebAction(request);
+  if (untrustedResponse) return untrustedResponse;
+
   try {
     const ws = await ensureWebWorkspace();
     const existing = await prisma.workspace.findUnique({

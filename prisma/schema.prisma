@@ -565,7 +565,7 @@ model GithubPollingState {
 model CronSchedule {
   id           String    @id @default(uuid())
   workspaceId  String
-  name         String // "github_poll" | "daily_report" | "budget_guard" | "improvement_pr"
+  name         String // "github_poll" | "daily_report" | "today_report" | "improvement_pr" | "retention_sweep"
   cron         String
   enabled      Boolean   @default(false)
   lastRunState String? // ok / warn / error / idle
@@ -595,6 +595,10 @@ model AutomationRule {
   sourceText  String?
   dsl         Json
   safetyMode  String   @default("proposal") // report_only | proposal | auto_apply
+  nextRunAt   DateTime?
+  scheduledJobId String?
+  lastRunAt   DateTime?
+  lastState   String?
   createdBy   String   @default("user")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -662,6 +666,7 @@ model AgentTask {
   cron        String
   enabled     Boolean   @default(true)
   nextRunAt   DateTime?
+  scheduledJobId String?
   lastRunAt   DateTime?
   lastState   String? // success | failed | skipped
   createdBy   String    @default("user:web-ui")

@@ -7,7 +7,7 @@
 //
 // ポリシー:
 //   - GitHub Webhook は使わない。merged PR は github_poll で検知する。
-//   - daily_report / budget_guard / improvement_pr は登録のみで未起動 (the current implementation)。
+//   - report / improvement / retention presets are registered by pg-boss cron.
 //   - SIGINT/SIGTERM で graceful shutdown。
 
 import { startWorker } from "./runtime.js";

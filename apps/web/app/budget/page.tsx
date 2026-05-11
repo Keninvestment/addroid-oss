@@ -37,11 +37,8 @@ import {
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../components/ui/StatusDot";
 import { InlineCode } from "../../components/ui/CodeBlock";
-import { RunCronButton } from "../../components/RunCronButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
-import { CRON_PRESETS } from "@addroid/queue";
-import { BudgetScheduleToggle } from "./BudgetScheduleToggle";
 
 export const dynamic = "force-dynamic";
 
@@ -488,19 +485,8 @@ export default async function BudgetGuardPage() {
 
   const runsCount = runs.length;
   const aiRunsCount = aiRuns.length;
-  const budgetPreset = CRON_PRESETS.find((preset) => preset.name === "budget_guard");
   const scheduleRow = schedules[0] ?? null;
-  const scheduleView: ScheduleRow | null =
-    scheduleRow ??
-    (budgetPreset
-      ? {
-          name: budgetPreset.name,
-          cron: budgetPreset.cron,
-          enabled: false,
-          lastRunState: null,
-          nextRunAt: null,
-        }
-      : null);
+  const scheduleView: ScheduleRow | null = scheduleRow;
   const timeZoneByAccount = new Map(
     adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
   );
@@ -855,10 +841,6 @@ export default async function BudgetGuardPage() {
             <span>—</span>
           ),
         },
-        {
-          label: "操作",
-          value: <BudgetScheduleToggle initialEnabled={scheduleView.enabled} />,
-        },
       ]
     : [];
 
@@ -872,7 +854,6 @@ export default async function BudgetGuardPage() {
             ルールが未設定のときや危険な変更は、Meta を直接変更せず人の承認を待ちます。
           </>
         }
-        actions={<RunCronButton presetName="budget_guard" label="今すぐチェック" />}
       />
 
       <div className="page-body page-body--single">
@@ -916,7 +897,7 @@ export default async function BudgetGuardPage() {
           ) : !latestSummary ? (
             <EmptyState
               title="予算チェックはまだ実行されていません"
-              description="自動実行画面から予算チェックを有効化すると、ここにアラートと判断結果が表示されます。"
+              description="予算条件を含むカスタム自動実行を作成すると、ここにアラートと判断結果が表示されます。"
             />
           ) : (
             <div style={{ display: "grid", gap: "1rem" }}>

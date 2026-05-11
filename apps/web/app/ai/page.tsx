@@ -372,7 +372,7 @@ addroid connect ai --provider codex`}
                 empty={
                   <EmptyState
                     title="AI run はまだ実行されていません"
-                    description="/cron から daily_report / budget_guard / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens が記録されます。"
+                    description="/cron から daily_report / today_report / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens が記録されます。"
                   />
                 }
               />

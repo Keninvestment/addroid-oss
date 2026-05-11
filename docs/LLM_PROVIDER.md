@@ -1,6 +1,6 @@
 # AdDroid OSS — LLM / Image Provider Setup
 
-AdDroid は AI workflow (`daily_report`, `budget_guard`, `improvement_pr`, `adhoc`) を
+AdDroid は AI workflow (`daily_report`, `today_report`, `improvement_pr`, `adhoc`) を
 LLM Provider 経由で実行します。LLM Provider 未設定の状態でも core 動作は続き、
 AI workflow のみ `StubLLMProvider` で fail-closed します。
 
@@ -105,7 +105,7 @@ ADDROID_LLM_PROVIDER=codex
 ```bash
 ADDROID_CODEX_APP_SERVER_URL=ws://127.0.0.1:4455
 CODEX_BIN=/opt/homebrew/bin/codex
-ADDROID_CODEX_CWD=/Users/example/addroid
+ADDROID_CODEX_CWD=$HOME/addroid
 ```
 
 `ADDROID_CODEX_APP_SERVER_URL` は既存の app-server を使う場合だけ指定します。
@@ -154,8 +154,8 @@ ADDROID_LLM_MOCK=1 npm run addroid -- up
 
 | workflow | 役割 | 実行経路 |
 |---|---|---|
-| `daily_report` | 日次レポート生成 | cron preset (`0 9 * * *`) |
-| `budget_guard` | 予算超過監視 + 警告 | cron preset (`*/15 * * * *`) |
+| `daily_report` | 前日の日次レポート生成 | cron preset (`0 9 * * *`) |
+| `today_report` | 当日レポート生成 | cron preset (`0 * * * *`) |
 | `improvement_pr` | 改善提案 PR (週次) | cron preset (`0 10 * * 1`) + Slack `/adops improve` |
 | `adhoc` | UI / CLI からの単発実行 | `/improvements` の "Adhoc 実行" |
 

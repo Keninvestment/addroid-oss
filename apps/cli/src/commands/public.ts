@@ -19,11 +19,9 @@ import {
 type CronPreset =
   | "github_poll"
   | "daily_report"
-  | "budget_guard"
-  | "automation_rules"
+  | "today_report"
   | "improvement_pr"
-  | "retention_sweep"
-  | "agent_tasks";
+  | "retention_sweep";
 
 export async function runOpenCommand(args: string[]): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
@@ -240,12 +238,10 @@ function normalizeSchedulePresetArg(value: string): string {
 function reportPreset(value: string): CronPreset | null {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
-  if (v === "budget" || v === "budget_guard") return "budget_guard";
-  if (v === "automation" || v === "automation_rules" || v === "autopilot") return "automation_rules";
+  if (v === "today" || v === "current" || v === "today_report") return "today_report";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";
-  if (v === "agent" || v === "agent_task" || v === "agent_tasks") return "agent_tasks";
   return null;
 }
 

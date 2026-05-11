@@ -6,7 +6,9 @@
 
 import {
   APPLY_JOB_NAME,
+  AUTOMATION_RULE_JOB_NAME,
   CRON_PRESETS,
+  SCHEDULED_TASK_JOB_NAME,
   SLACK_COMMAND_JOB_NAME,
   bootPgBoss,
   buildAdAccountLockKey,
@@ -14,15 +16,15 @@ import {
   finishCronRun,
   mirrorPresetsToCronSchedules,
   registerCronPresets,
-  runBudgetGuardOnce,
+  resolveCronScheduleTimeZone,
   runDailyReportOnce,
   runExecuteApply,
   runGithubPollOnce,
   runImprovementPrOnce,
   runPerformanceSnapshotRetentionOnce,
+  scheduleCron,
   runSlackCommandJob,
   startCronRun,
-  type BudgetGuardSummary,
   type DailyReportSummary,
   type ImprovementPrSummary,
   type JsonValue,
@@ -64,7 +66,6 @@ import {
 } from "./lib/ops-repo-local.js";
 import { resolveApplyExecutor } from "./lib/apply-meta-executor.js";
 import { resolveAutomationMutationExecutor } from "./lib/automation-action-executor.js";
-import { runAutomationRulesOnce } from "./lib/automation-rules-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./lib/meta-runtime.js";
 import { createPostgresAdAccountLockProvider } from "./lib/account-lock.js";
 import {
@@ -74,7 +75,6 @@ import {
 } from "./lib/daily-report-runtime.js";
 import { resolveMetaCliInsightsProvider } from "./lib/meta-cli-insights-runtime.js";
 import {
-  buildBudgetGuardSpendContext,
   createBudgetGuardAuditRunner,
   createPrismaBudgetGuardStore,
   loadBudgetGuardPolicy,
@@ -91,7 +91,16 @@ import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
 import { selectImageProviderForWorker } from "./lib/image-runtime.js";
 import { startSlackSocketRuntime } from "./lib/slack-socket-runtime.js";
 import type { SlackSocketReceiverHandle } from "@addroid/queue";
-import { runDueAgentTasks } from "./lib/agent-task-runtime.js";
+import {
+  rescheduleEnabledAgentTasks,
+  runScheduledAgentTaskJob,
+  type ScheduledAgentTaskPayload,
+} from "./lib/agent-task-runtime.js";
+import {
+  runScheduledAutomationRuleJob,
+  syncAndScheduleAutomationRules,
+  type ScheduledAutomationRulePayload,
+} from "./lib/automation-rules-runtime.js";
 
 export interface StartWorkerOptions {
   /**
@@ -179,15 +188,33 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     `[worker] github adapter: ${adapterSelection.choice} (${adapterSelection.reason})`
   );
 
-  await registerCronPresets(boss);
+  const cronScheduleTimeZone = resolveCronScheduleTimeZone(process.env);
+  log.info(`[worker] cron schedule timezone: ${cronScheduleTimeZone}`);
+  await registerCronPresets(boss, { timeZone: cronScheduleTimeZone });
   const mirror = await mirrorPresetsToCronSchedules({
     store: cronStore,
     workspaceId: workspace.id,
   });
+  await syncEnabledCronSchedules({
+    prisma,
+    boss,
+    workspaceId: workspace.id,
+    timeZone: cronScheduleTimeZone,
+    log,
+  });
+  const agentTaskSchedule = await rescheduleEnabledAgentTasks({
+    prisma,
+    boss,
+    workspaceId: workspace.id,
+  }).catch((err) => {
+    log.warn(`[worker] failed to schedule agent tasks: ${(err as Error).message}`);
+    return { scheduled: 0 };
+  });
+  log.info(`[worker] scheduled ${agentTaskSchedule.scheduled} agent task(s)`);
 
   // Regression fix: Slack 通知ディスパッチャを worker 起動時に
-  // 1 度だけ構築する。本 notifier は producer (daily_report / budget_guard /
-  // improvement_pr / execute_apply) の終端で `dispatch(payload)` を呼び、
+  // 1 度だけ構築する。本 notifier は producer (daily_report /
+  // improvement_pr / execute_apply / Slack budget command) の終端で `dispatch(payload)` を呼び、
   // Slack 連携が未設定なら `skipped_no_slack`、設定済みなら Slack Web API へ
   // chat.postMessage を投げる。`createNotificationAuditStore` を audit writer
   // として注入することで、各 dispatch が `audit_logs` に
@@ -294,10 +321,9 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   });
   const userTimeZone = resolveRuntimeUserTimeZone(process.env);
 
-  // Regression fix: budget_guard / improvement_pr cron も同じ
+  // Regression fix: manual budget checks / improvement_pr cron も同じ
   // LLM Provider 経由で AI を呼び出す。runtime 側は store + agent runner を
-  // factor out して、各 cron handler から runBudgetGuardOnce /
-  // runImprovementPrOnce を 1 ティック単位で呼び出す。
+  // factor out して、Slack command と各 cron handler から共有する。
   const budgetGuardStore = createPrismaBudgetGuardStore(prisma);
   const improvementPrStore = createPrismaImprovementPrStore(prisma);
 
@@ -309,8 +335,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
 
   // Regression fix: ad_account 単位の cross-process 直列化境界。
   // Apply/Activate (Regression fix) と同じ Postgres advisory lock
-  // を背に持つ provider を共有することで、daily_report / budget_guard /
-  // improvement_pr の per-account inner block も Apply/Activate と同じ canonical
+  // を背に持つ provider を共有することで、daily_report / improvement_pr /
+  // manual budget checks の per-account inner block も Apply/Activate と同じ canonical
   // 識別子 (`buildAdAccountLockKey`) で 1 並行に直列化される。
   // 受入要件 "Cron workflows must use pg-boss and respect ad_account-level
   // execution limits" を満たす。
@@ -328,6 +354,19 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     },
   });
 
+  const automationRuleSchedule = await syncAndScheduleAutomationRules({
+    prisma,
+    boss,
+    workspaceId: workspace.id,
+    env: process.env,
+  }).catch((err) => {
+    log.warn(`[worker] failed to schedule automation rules: ${(err as Error).message}`);
+    return { loaded: 0, scheduled: 0 };
+  });
+  log.info(
+    `[worker] automation rules loaded=${automationRuleSchedule.loaded} scheduled=${automationRuleSchedule.scheduled}`
+  );
+
   for (const preset of CRON_PRESETS) {
     await boss.work(preset.name, async (jobs) => {
       for (const job of jobs) {
@@ -337,7 +376,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
           jobId: job.id,
         });
         try {
-          if (preset.name === "github_poll") {
+          const presetName = preset.name as string;
+          if (presetName === "github_poll") {
             const summary = await runGithubPollOnce({
               boss,
               store: githubStore,
@@ -366,8 +406,18 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               newlyMerged: summary.newlyMerged ?? null,
               detail: summary.detail ?? null,
             });
-          } else if (preset.name === "daily_report") {
+            await syncAndScheduleAutomationRules({
+              prisma,
+              boss,
+              workspaceId: workspace.id,
+              env: process.env,
+            }).catch((err) => {
+              log.warn(`[worker] failed to refresh automation rule schedules after github_poll: ${(err as Error).message}`);
+            });
+          } else if (presetName === "daily_report" || presetName === "today_report") {
             const requestedMetricDate = readMetricDateFromCronJobData(job.data);
+            const metricDateOffsetDays =
+              presetName === "daily_report" ? -1 : 0;
             // Workspace 配下の active な ad_account 全件に対して順次実行する。
             // regression fix: 各 account の inner block は Apply/Activate と
             // 共通の `buildAdAccountLockKey` を経由して `withLock` で直列化する。
@@ -402,7 +452,9 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     // される `mode` が正しい運用値を反映する必要がある。
                     mode: effectiveMode,
                     accountKey: acc.key,
-                    ...(requestedMetricDate ? { metricDate: requestedMetricDate } : {}),
+                    ...(requestedMetricDate
+                      ? { metricDate: requestedMetricDate }
+                      : { metricDateOffsetDays }),
                     fallbackTimeZone: userTimeZone,
                     insightsProvider: dailyReportInsights,
                     store: dailyReportStore,
@@ -426,7 +478,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                 refId: handle.cronRunId,
                 level,
                 message:
-                  `daily_report ${acc.key}: ${summary.status}` +
+                  `${preset.name} ${acc.key}: ${summary.status}` +
                   (summary.aiCommentary
                     ? ` — ${summary.aiCommentary.slice(0, 120)}`
                     : summary.errorMessage
@@ -488,6 +540,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             }
             const aggregate = {
               kind: "daily_report",
+              preset: preset.name,
               status: errors.length > 0 ? "failed" : "succeeded",
               accountsProcessed: summaries.length,
               succeeded: summaries.filter((s) => s.status === "succeeded").length,
@@ -502,7 +555,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               const message =
                 summaries.length === 0
                   ? "daily_report skipped: no active ad_accounts"
-                  : `daily_report had AI failures: ${errors.join("; ")}`;
+                  : `${preset.name} had AI failures: ${errors.join("; ")}`;
               if (summaries.length === 0) {
                 // 何もしなかった場合は finish (ok) — ユーザに「未設定」を伝える
                 // ためには /accounts の空状態 UI で十分。
@@ -516,239 +569,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             } else {
               await finishCronRun(cronStore, handle, aggregate);
             }
-          } else if (preset.name === "budget_guard") {
-            // regression fix: workspace mode + per-account modeOverride を
-            // 取得し、orchestrator 呼び出しごとに解決した実効 mode を渡す。
-            const accounts = await prisma.adAccount.findMany({
-              where: { workspaceId: workspace.id, active: true },
-              select: {
-                id: true,
-                key: true,
-                displayName: true,
-                modeOverride: true,
-              },
-              orderBy: { key: "asc" },
-            });
-            const wsMode = await loadWorkspaceMode(prisma, workspace.id);
-            const summaries: BudgetGuardSummary[] = [];
-            const errors: string[] = [];
-            // this implementation: ops repo に workflows/budget-guard.yaml が
-            // 無ければ fail-closed。policy=null を orchestrator に渡し、
-            // status="policy_missing" を per-account で記録する。
-            const loaded = loadBudgetGuardPolicy(process.env);
-            const auditRunner = createBudgetGuardAuditRunner({
-              provider: llmSelection.provider,
-              workspaceId: workspace.id,
-              cronRunId: handle.cronRunId,
-            });
-            for (const acc of accounts) {
-              const accountBudget = loaded?.accountBudgets[acc.key];
-              // regression fix: per-account inner block を canonical
-              // ad_account lock で直列化する。policy 読み出しと
-              // `buildBudgetGuardSpendContext` (ad_account 紐付き集計) も
-              // ロック内に入れることで、Apply / Activate と spend ウィンドウ
-              // 観測のレースを防ぐ。
-              const effectiveMode = resolveExecutionMode(
-                wsMode,
-                acc.modeOverride
-              );
-              const summary = await adAccountLockProvider.withLock(
-                buildAdAccountLockKey({
-                  workspaceId: workspace.id,
-                  accountKey: acc.key,
-                }),
-                async () =>
-                  loaded
-                    ? runBudgetGuardOnce({
-                        workspaceId: workspace.id,
-                        // regression fix: workspace + ad_account の解決済み mode。
-                        // policy 適用は execution-mode.ts の fail-closed 規則で
-                        // report_only/proposal を確実に守る。
-                        mode: effectiveMode,
-                        accountKey: acc.key,
-                        policy: loaded.policy,
-                        spendContext: await buildBudgetGuardSpendContext({
-                          prisma,
-                          accountId: acc.id,
-                          dailyBudget: accountBudget?.dailyBudget ?? 0,
-                          monthlyBudget: accountBudget?.monthlyBudget ?? 0,
-                          ...(accountBudget?.currency
-                            ? { currency: accountBudget.currency }
-                            : {}),
-                        }),
-                        store: budgetGuardStore,
-                        runner: auditRunner,
-                      })
-                    : runBudgetGuardOnce({
-                        workspaceId: workspace.id,
-                        // regression fix: policy 欠落時も解決済み mode を渡す。
-                        // 評価自体は policy=null で fail-closed (=
-                        // status="policy_missing") に倒れるが、ai_runs /
-                        // cron output の mode 記録が運用値を反映する必要がある。
-                        mode: effectiveMode,
-                        accountKey: acc.key,
-                        policy: null,
-                        store: budgetGuardStore,
-                        runner: auditRunner,
-                      })
-              );
-              summaries.push(summary);
-              const level: "info" | "warn" | "error" =
-                summary.status === "succeeded"
-                  ? "info"
-                  : summary.status === "no_account" ||
-                      summary.status === "policy_missing"
-                    ? "warn"
-                    : "error";
-              await cronStore.recordExecutionLog({
-                cronRunId: handle.cronRunId,
-                workspaceId: workspace.id,
-                kind: "cron",
-                refType: "cron_run",
-                refId: handle.cronRunId,
-                level,
-                message:
-                  `budget_guard ${acc.key}: ${summary.status}` +
-                  (summary.classification
-                    ? ` — ${summary.classification}/${summary.decision ?? "n/a"}`
-                    : summary.errorMessage
-                      ? ` — ${summary.errorMessage}`
-                      : ""),
-                payload: budgetGuardSummaryToPayload(summary),
-              });
-              if (summary.status === "ai_failed") {
-                errors.push(`${acc.key}: ${summary.errorMessage ?? "ai failed"}`);
-                // regression fix: budget_guard の AI 失敗を Slack に通知する。
-                // policy_missing は fail-closed の正常経路 (= 設定漏れ)
-                // なのでここでは通知しない (UI の `/budget-guard` 赤バナーで
-                // 案内される)。dispatch 失敗は sendSlackNotification 内で
-                // 握り潰されるので cron 進行をブロックしない。
-                const guardRunsUrl = buildWebUrl(webBaseUrl, "/cron/runs");
-                await sendSlackNotification({
-                  kind: "budget_guard.failed",
-                  data: {
-                    adAccountKey: acc.key,
-                    errorMessage: summary.errorMessage ?? "ai failed",
-                    mode: summary.mode,
-                    ...(summary.aiRunId ? { aiRunId: summary.aiRunId } : {}),
-                    ...(guardRunsUrl ? { runsUrl: guardRunsUrl } : {}),
-                  },
-                });
-              }
-              // regression fix: budget_guard が succeeded を返した場合のみ
-              // 評価結果に応じて Slack に通知する:
-              //   - decision="auto_approved" かつ alerts に severity="trigger"
-              //     が含まれる → auto_pause が走った想定で
-              //     `budget_guard.auto_paused`。
-              //   - alerts が 1 件以上ある → `budget_guard.alert`。
-              //   - alerts が無い (= 平常) → 通知しない (Slack ノイズ抑制)。
-              if (summary.status === "succeeded") {
-                const triggeredAlerts = summary.alerts.filter(
-                  (a) => a.severity === "trigger"
-                );
-                const warnAlerts = summary.alerts.filter(
-                  (a) => a.severity === "warn"
-                );
-                const evaluationTime = new Date().toISOString();
-                const budgetUrl = buildWebUrl(webBaseUrl, "/budget-guard");
-                if (
-                  summary.decision === "auto_approved" &&
-                  triggeredAlerts.length > 0
-                ) {
-                  const primary = triggeredAlerts[0]!;
-                  await sendSlackNotification({
-                    kind: "budget_guard.auto_paused",
-                    data: {
-                      adAccountKey: acc.key,
-                      rule: primary.rule,
-                      threshold: String(primary.threshold),
-                      observedValue: String(primary.observedValue),
-                      evaluationTime,
-                      pausedTargets: summary.dangerousCategories,
-                      mode: summary.mode,
-                      ...(budgetUrl ? { budgetUrl } : {}),
-                    },
-                  });
-                } else if (warnAlerts.length > 0 || triggeredAlerts.length > 0) {
-                  const primary = triggeredAlerts[0] ?? warnAlerts[0]!;
-                  await sendSlackNotification({
-                    kind: "budget_guard.alert",
-                    data: {
-                      adAccountKey: acc.key,
-                      rule: primary.rule,
-                      threshold: String(primary.threshold),
-                      observedValue: String(primary.observedValue),
-                      evaluationTime,
-                      mode: summary.mode,
-                      ...(budgetUrl ? { budgetUrl } : {}),
-                    },
-                  });
-                }
-              }
-            }
-            const aggregate = {
-              accountsProcessed: summaries.length,
-              succeeded: summaries.filter((s) => s.status === "succeeded").length,
-              ai_failed: summaries.filter((s) => s.status === "ai_failed").length,
-              policy_missing: summaries.filter(
-                (s) => s.status === "policy_missing"
-              ).length,
-              no_account: summaries.filter((s) => s.status === "no_account").length,
-              llmProvider: llmSelection.choice,
-              policySource: loaded ? "ops_repo" : "missing",
-            };
-            if (errors.length > 0) {
-              await failCronRun(
-                cronStore,
-                handle,
-                `budget_guard had AI failures: ${errors.join("; ")}`
-              );
-            } else {
-              await finishCronRun(cronStore, handle, {
-                ...aggregate,
-                ...(summaries.length === 0
-                  ? { note: "no active ad_accounts in workspace" }
-                  : {}),
-              });
-            }
-          } else if (preset.name === "automation_rules") {
-            const summary = await runAutomationRulesOnce({
-              prisma,
-              workspaceId: workspace.id,
-              insightsProvider: dailyReportInsights,
-              mutationExecutor: automationMutationSelection.executor,
-              env: process.env,
-              fallbackTimeZone: userTimeZone,
-            });
-            const level: "info" | "warn" | "error" =
-              summary.status === "succeeded"
-                ? "info"
-                : summary.status === "policy_missing"
-                  ? "warn"
-                  : "error";
-            await cronStore.recordExecutionLog({
-              cronRunId: handle.cronRunId,
-              workspaceId: workspace.id,
-              kind: "cron",
-              refType: "cron_run",
-              refId: handle.cronRunId,
-              level,
-              message:
-                `automation_rules: ${summary.status} ` +
-                `(rules=${summary.rulesLoaded}, evaluated=${summary.rulesEvaluated}, ` +
-                `planned=${summary.actionsPlanned}, executed=${summary.actionsExecuted}, blocked=${summary.actionsBlocked})`,
-              payload: summary as unknown as JsonValue,
-            });
-            if (summary.status === "failed") {
-              await failCronRun(
-                cronStore,
-                handle,
-                `automation_rules failed: ${summary.errors.join("; ")}`
-              );
-            } else {
-              await finishCronRun(cronStore, handle, summary as unknown as JsonValue);
-            }
-          } else if (preset.name === "improvement_pr") {
+          } else if (presetName === "improvement_pr") {
             // regression fix: workspace mode + per-account modeOverride を取得し、
             // 解決した実効 mode を ad_account ごとに改めて渡す。dangerous category
             // / safe-category の policy gate (execution-mode.ts) が mode に応じて
@@ -990,42 +811,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   : {}),
               });
             }
-          } else if (preset.name === "agent_tasks") {
-            const summary = await runDueAgentTasks({
-              prisma,
-              workspaceId: workspace.id,
-              provider: llmSelection.provider,
-              boss,
-              githubAdapter: getGithubAdapter(),
-            });
-            const level: "info" | "warn" | "error" =
-              summary.status === "succeeded"
-                ? "info"
-                : summary.status === "partial_failure"
-                  ? "warn"
-                  : "error";
-            await cronStore.recordExecutionLog({
-              cronRunId: handle.cronRunId,
-              workspaceId: workspace.id,
-              kind: "cron",
-              refType: "cron_run",
-              refId: handle.cronRunId,
-              level,
-              message:
-                `agent_tasks: ${summary.status} ` +
-                `(due=${summary.due}, succeeded=${summary.succeeded}, failed=${summary.failed})`,
-              payload: summary as unknown as JsonValue,
-            });
-            if (summary.status === "failed") {
-              await failCronRun(
-                cronStore,
-                handle,
-                `agent_tasks failed: ${summary.failed}/${summary.due}`
-              );
-            } else {
-              await finishCronRun(cronStore, handle, summary as unknown as JsonValue);
-            }
-          } else if (preset.name === "retention_sweep") {
+          } else if (presetName === "retention_sweep") {
             // Regression fix: performance_snapshots の保持期間
             // (raw=90d / aggregate=1y) を強制する housekeeping。AI を呼ばないため
             // workspace mode に依存しない。1 ティック = 全 workspace 共有の sweep。
@@ -1101,6 +887,94 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     });
   }
 
+  await boss.work<ScheduledAgentTaskPayload>(SCHEDULED_TASK_JOB_NAME, async (jobs) => {
+    for (const job of jobs) {
+      try {
+        if (!job.data?.taskId) throw new Error("scheduled_task_run requires taskId");
+        const result = await runScheduledAgentTaskJob({
+          prisma,
+          workspaceId: workspace.id,
+          provider: llmSelection.provider,
+          boss,
+          githubAdapter: getGithubAdapter(),
+          taskId: job.data.taskId,
+          jobId: job.id,
+          manual: job.data.manual === true,
+        });
+        await cronStore.recordExecutionLog({
+          workspaceId: workspace.id,
+          kind: "agent_task",
+          level: result.status === "succeeded" ? "info" : "warn",
+          message: `scheduled_task_run ${job.data.taskId}: ${result.status}`,
+          payload: {
+            taskId: job.data.taskId,
+            runId: result.runId,
+            status: result.status,
+            manual: job.data.manual === true,
+          },
+        });
+      } catch (err) {
+        log.warn(
+          `[worker] scheduled task failed (${job.data?.taskId ?? "unknown"}): ${(err as Error).message}`
+        );
+        await cronStore.recordExecutionLog({
+          workspaceId: workspace.id,
+          kind: "agent_task",
+          level: "error",
+          message: `scheduled_task_run failed: ${(err as Error).message}`,
+          payload: {
+            taskId: job.data?.taskId ?? null,
+            error: (err as Error).message,
+          },
+        }).catch(() => undefined);
+      }
+    }
+  });
+
+  await boss.work<ScheduledAutomationRulePayload>(AUTOMATION_RULE_JOB_NAME, async (jobs) => {
+    for (const job of jobs) {
+      try {
+        if (!job.data?.ruleId) throw new Error("automation_rule_run requires ruleId");
+        const summary = await runScheduledAutomationRuleJob({
+          prisma,
+          workspaceId: workspace.id,
+          boss,
+          ruleId: job.data.ruleId,
+          jobId: job.id,
+          insightsProvider: dailyReportInsights,
+          mutationExecutor: automationMutationSelection.executor,
+          env: process.env,
+          fallbackTimeZone: userTimeZone,
+        });
+        await cronStore.recordExecutionLog({
+          workspaceId: workspace.id,
+          kind: "automation_rule",
+          level: summary.status === "succeeded" ? "info" : "warn",
+          message:
+            `automation_rule_run ${job.data.ruleKey ?? job.data.ruleId}: ${summary.status}` +
+            ` (evaluated=${summary.rulesEvaluated}, planned=${summary.actionsPlanned}, ` +
+            `executed=${summary.actionsExecuted}, blocked=${summary.actionsBlocked})`,
+          payload: summary as unknown as JsonValue,
+        });
+      } catch (err) {
+        log.warn(
+          `[worker] automation rule failed (${job.data?.ruleKey ?? job.data?.ruleId ?? "unknown"}): ${(err as Error).message}`
+        );
+        await cronStore.recordExecutionLog({
+          workspaceId: workspace.id,
+          kind: "automation_rule",
+          level: "error",
+          message: `automation_rule_run failed: ${(err as Error).message}`,
+          payload: {
+            ruleId: job.data?.ruleId ?? null,
+            ruleKey: job.data?.ruleKey ?? null,
+            error: (err as Error).message,
+          },
+        }).catch(() => undefined);
+      }
+    }
+  });
+
   // execute_apply: merged PR の YAML を読み、buildExecutionPlan で plan を組み、
   // PAUSED-by-default で Meta CLI / mock executor に流す。
   // regression fix: meta adapter は CLI / web と同じ Prisma 永続 token store 経由で
@@ -1138,8 +1012,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
 
   // regression fix / regression fix: cross-process ad_account ロックは
   // Postgres advisory lock を背に持つ provider を共有する。Apply (worker) と
-  // Activate (web/cli)、cron workflows (daily_report/budget_guard/
-  // improvement_pr) が同じ Postgres インスタンスを介して 1 並行を強制する
+  // Activate (web/cli)、cron workflows (daily_report/improvement_pr)、
+  // manual budget checks が同じ Postgres インスタンスを介して 1 並行を強制する
   // ため、`adAccountLockProvider` は cron preset 登録より先に作成済み。
   await boss.work(APPLY_JOB_NAME, async (jobs) => {
     for (const job of jobs) {
@@ -1498,34 +1372,6 @@ function dailyReportSummaryToPayload(summary: DailyReportSummary): JsonValue {
 }
 
 /**
- * Regression fix + implementation item: budget_guard summary →
- * execution_logs.payload。
- */
-function budgetGuardSummaryToPayload(summary: BudgetGuardSummary): JsonValue {
-  const payload: Record<string, JsonValue> = {
-    status: summary.status,
-    accountKey: summary.accountKey,
-    accountId: summary.accountId,
-    mode: summary.mode,
-    aiRunId: summary.aiRunId,
-    classification: summary.classification,
-    decision: summary.decision,
-    dangerousCategories: summary.dangerousCategories,
-    policyReasons: summary.policyReasons,
-    candidateCount: summary.candidateCount,
-    alerts: summary.alerts.map((a) => ({
-      rule: a.rule,
-      severity: a.severity,
-      message: a.message,
-      observedValue: a.observedValue,
-      threshold: a.threshold,
-    })),
-  };
-  if (summary.errorMessage) payload.errorMessage = summary.errorMessage;
-  return payload;
-}
-
-/**
  * Regression fix: improvement_pr summary → execution_logs.payload。
  */
 function improvementPrSummaryToPayload(summary: ImprovementPrSummary): JsonValue {
@@ -1608,6 +1454,33 @@ async function loadWorkspaceMode(
     select: { executionMode: true },
   });
   return row?.executionMode ?? null;
+}
+
+async function syncEnabledCronSchedules(input: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  workspaceId: string;
+  timeZone: string;
+  log: WorkerLogger;
+}): Promise<void> {
+  const presetNames = new Set(CRON_PRESETS.map((preset) => preset.name));
+  const rows = await input.prisma.cronSchedule.findMany({
+    where: { workspaceId: input.workspaceId, enabled: true },
+    select: { name: true, cron: true },
+  });
+
+  for (const row of rows) {
+    if (!presetNames.has(row.name as (typeof CRON_PRESETS)[number]["name"])) {
+      continue;
+    }
+    try {
+      await scheduleCron(input.boss, row.name, row.cron, input.timeZone);
+    } catch (err) {
+      input.log.warn(
+        `[worker] failed to sync enabled cron schedule ${row.name}: ${(err as Error).message}`
+      );
+    }
+  }
 }
 
 /**

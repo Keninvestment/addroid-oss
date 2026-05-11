@@ -164,10 +164,10 @@ Slack は **Activate** のみの導線で、merge は持ちません。`/adops a
 | preset | GitOps への影響 |
 |---|---|
 | `github_poll` | merge を検知して Apply を queue (実書き込みは `execute_apply`) |
-| `daily_report` | レポートのみ。ops repo は触らない |
-| `budget_guard` | 警告のみ。ops repo は触らない (将来コントラクトで自動 PR 化) |
+| `daily_report` / `today_report` | レポートのみ。ops repo は触らない |
 | `improvement_pr` | AI が改善案を生成し ops repo に PR を作成 |
 | `retention_sweep` | DB の古い行を housekeeping。ops repo は触らない |
+| custom scheduled task | 通常は GitOps PR を作成。自動実行を明示した場合も安全 gate を通した許可操作だけを実行 |
 
 `improvement_pr` が作成した PR は通常の review プロセスを経由し、merge されない限り
 Meta には反映されません。

@@ -9,6 +9,8 @@
 //     actor は無視する (the current implementation activate と同じ regression fix 方針)。
 //   - PR が "open" でない、もしくは approval_records に既に rejected /
 //     auto_blocked が記録されている場合は 409 で拒否する。
+//   - CSRF 防止のため、信頼済み Web UI ヘッダー付きの同一オリジン JSON POST だけを
+//     受け付け、UI が表示した expectedHeadSha を必須にする。
 //   - 失敗時はエラー詳細を返し、UI が Toast + inline error で再試行可能にする。
 //
 // regression fix: Web UI マージは GitHub への副作用が走る前に fail-closed する。
@@ -32,6 +34,7 @@ import {
 import { Prisma } from "@addroid/db";
 import { prisma } from "../../../../../lib/prisma";
 import { ensureWebWorkspace, getActiveGithubAdapter } from "../../../../../lib/github-runtime";
+import { requireTrustedJsonWebAction } from "../../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +52,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ prNumber: string }> }
 ) {
+  const untrustedResponse = requireTrustedJsonWebAction(request);
+  if (untrustedResponse) return untrustedResponse;
+
   const { prNumber: prNumberRaw } = await params;
   const prNumber = Number.parseInt(prNumberRaw, 10);
   if (!Number.isFinite(prNumber) || prNumber <= 0) {
@@ -58,16 +64,29 @@ export async function POST(
     );
   }
 
-  let payload: Body = {};
+  let payload: Body;
   try {
-    payload = (await request.json()) as Body;
+    const parsed = await request.json();
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("Request body must be a JSON object.");
+    }
+    payload = parsed as Body;
   } catch {
-    /* body は任意 */
+    return NextResponse.json(
+      { ok: false, error: "Merge requests must include a valid JSON body." },
+      { status: 400 }
+    );
   }
   const expectedHeadSha =
     typeof payload.expectedHeadSha === "string" && payload.expectedHeadSha.trim().length > 0
       ? payload.expectedHeadSha.trim()
       : undefined;
+  if (expectedHeadSha === undefined) {
+    return NextResponse.json(
+      { ok: false, error: "Merge requests must include expectedHeadSha." },
+      { status: 400 }
+    );
+  }
   const mergeMethodRaw =
     typeof payload.mergeMethod === "string" ? payload.mergeMethod.trim() : "";
   const mergeMethod = VALID_MERGE_METHODS.has(mergeMethodRaw)
@@ -120,7 +139,7 @@ export async function POST(
     );
   }
 
-  if (expectedHeadSha !== undefined && expectedHeadSha !== pr.headSha) {
+  if (expectedHeadSha !== pr.headSha) {
     return NextResponse.json(
       {
         ok: false,
@@ -228,7 +247,7 @@ export async function POST(
         defaultBranch: pr.repo.defaultBranch,
       },
       number: pr.number,
-      ...(expectedHeadSha !== undefined ? { expectedHeadSha } : {}),
+      expectedHeadSha,
       mergeMethod,
     });
   } catch (err) {

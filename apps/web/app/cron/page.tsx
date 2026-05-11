@@ -9,7 +9,6 @@ import { EmptyState } from "../../components/ui/EmptyState";
 import { CronControls } from "./CronControls";
 import { CronRateLimitSummary } from "./CronRateLimitSummary";
 import { AgentTaskForm, type AgentTaskRow } from "./AgentTaskForm";
-import { AutomationModeControl } from "./AutomationModeControl";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
 
@@ -36,14 +35,20 @@ export default async function CronSchedulesPage() {
   }[] = [];
   let dbReady = true;
   let agentTasks: AgentTaskRow[] = [];
-  let executionMode = "proposal";
+  let automationRules: {
+    id: string;
+    key: string;
+    displayName: string;
+    enabled: boolean;
+    schedule: string;
+    safetyMode: string;
+    sourceText: string | null;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+    lastState: string | null;
+  }[] = [];
   try {
     const workspace = await ensureWebWorkspace();
-    const workspaceRow = await prisma.workspace.findUnique({
-      where: { id: workspace.id },
-      select: { executionMode: true },
-    });
-    executionMode = workspaceRow?.executionMode ?? executionMode;
     registered = await prisma.cronSchedule.findMany({
       where: { workspaceId: workspace.id },
       select: { name: true, cron: true, enabled: true, lastRunState: true, nextRunAt: true },
@@ -72,26 +77,54 @@ export default async function CronSchedulesPage() {
         ? formatDateTime(task.lastRunAt, { timeZone: pageDisplayTimeZone })
         : null,
     }));
+    const ruleRows = await prisma.automationRule.findMany({
+      where: { workspaceId: workspace.id },
+      orderBy: [{ enabled: "desc" }, { updatedAt: "desc" }],
+      take: 50,
+      select: {
+        id: true,
+        key: true,
+        displayName: true,
+        enabled: true,
+        schedule: true,
+        safetyMode: true,
+        sourceText: true,
+        nextRunAt: true,
+        lastRunAt: true,
+        lastState: true,
+      },
+    });
+    automationRules = ruleRows.map((rule) => ({
+      ...rule,
+      nextRunAt: rule.nextRunAt
+        ? formatDateTime(rule.nextRunAt, { timeZone: pageDisplayTimeZone })
+        : null,
+      lastRunAt: rule.lastRunAt
+        ? formatDateTime(rule.lastRunAt, { timeZone: pageDisplayTimeZone })
+        : null,
+    }));
   } catch {
     dbReady = false;
   }
 
-  const presetByName = new Map(CRON_PRESETS.map((p) => [p.name, p]));
   const dbByName = new Map(registered.map((r) => [r.name, r]));
-  const allNames = Array.from(new Set([...presetByName.keys(), ...dbByName.keys()]));
-  const rows: Row[] = allNames.map((name) => {
+  const userVisiblePresets = CRON_PRESETS.filter((preset) =>
+    ["daily_report", "today_report", "improvement_pr"].includes(preset.name)
+  );
+  const rows: Row[] = userVisiblePresets.map((preset) => {
+    const name = preset.name;
     const persisted = dbByName.get(name);
-    const preset = presetByName.get(name as (typeof CRON_PRESETS)[number]["name"]);
     return {
       name,
-      cron: persisted?.cron ?? preset?.cron ?? "",
+      cron: persisted?.cron ?? preset.cron,
       enabled: persisted?.enabled ?? false,
       lastRunState: persisted?.lastRunState ?? null,
       nextRunAt: persisted?.nextRunAt ?? null,
-      description: preset?.description ?? "(unknown preset)",
+      description: preset.description,
       persistedFromDb: Boolean(persisted),
     };
   });
+  const visibleRegisteredCount = rows.filter((row) => row.persistedFromDb).length;
 
   return (
     <>
@@ -121,17 +154,63 @@ export default async function CronSchedulesPage() {
         </Panel>
 
         <Panel
-          title="自動承認モード"
-          subtitle="workspace全体の実行モードを制御します。ONでも自動運用は承認済みYAMLと安全ゲートに一致した操作だけ実行します。"
+          title="承認済み運用ポリシー"
+          subtitle="チャットから作成した policy PR が merge されると、ここに表示され、rule ごとの schedule で予約されます。"
         >
-          <AutomationModeControl initialMode={executionMode} />
+          <DataTable
+            rows={automationRules}
+            rowKey={(row) => row.id}
+            empty={
+              <EmptyState
+                title="承認済みの運用ポリシーはまだありません。"
+                description="チャットで「過去7日CPAが低いキャンペーン予算を20%上げるPRを毎朝作って」のように依頼すると、policy PR の作成と承認依頼まで進めます。"
+              />
+            }
+            columns={[
+              {
+                header: "ルール",
+                cell: (row) => (
+                  <div>
+                    <div>{row.displayName || row.key}</div>
+                    <div className="muted">{row.sourceText ?? row.key}</div>
+                  </div>
+                ),
+              },
+              {
+                header: "実行タイミング",
+                cell: (row) => row.schedule || "—",
+                className: "mono tabular",
+              },
+              {
+                header: "承認モード",
+                cell: (row) => <StatusBadge state={ruleModeState(row.safetyMode)}>{ruleModeLabel(row.safetyMode)}</StatusBadge>,
+              },
+              {
+                header: "状態",
+                cell: (row) => (
+                  <StatusBadge state={row.enabled ? "ok" : "idle"}>
+                    {row.enabled ? "有効" : "停止中"}
+                  </StatusBadge>
+                ),
+              },
+              {
+                header: "次回",
+                cell: (row) => row.nextRunAt ?? "—",
+                className: "tabular mono",
+              },
+              {
+                header: "前回",
+                cell: (row) => row.lastState ?? "—",
+              },
+            ]}
+          />
         </Panel>
 
         <Panel
           title="標準の自動実行"
           subtitle={
             dbReady
-              ? `${registered.length} 件登録 / ${CRON_PRESETS.length} 件利用可能`
+              ? `${visibleRegisteredCount} 件登録 / ${userVisiblePresets.length} 件利用可能`
               : "保存先を確認してください。"
           }
         >
@@ -208,9 +287,22 @@ export default async function CronSchedulesPage() {
   );
 }
 
+function ruleModeLabel(mode: string): string {
+  if (mode === "auto_apply") return "policy一致で自動実行";
+  if (mode === "report_only") return "記録のみ";
+  return "PR作成";
+}
+
+function ruleModeState(mode: string): "ok" | "warn" | "idle" {
+  if (mode === "auto_apply") return "ok";
+  if (mode === "report_only") return "idle";
+  return "warn";
+}
+
 function presetLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
+    today_report: "当日レポート",
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",

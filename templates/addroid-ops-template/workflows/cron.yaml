@@ -8,8 +8,8 @@ schedules:
   - name: daily_report
     cron: "0 9 * * *"
     enabled: false
-  - name: budget_guard
-    cron: "*/15 * * * *"
+  - name: today_report
+    cron: "0 * * * *"
     enabled: false
   - name: improvement_pr
     cron: "0 10 * * 1"

@@ -10,6 +10,8 @@ import type PgBoss from "pg-boss";
 import type { GithubAdapter } from "@addroid/github-adapter";
 import {
   CRON_PRESETS,
+  SCHEDULED_TASK_JOB_NAME,
+  resolveCronScheduleTimeZone,
   validateCronExpression,
   type CronPresetName,
 } from "@addroid/queue";
@@ -48,139 +50,265 @@ export interface AgentTasksSummary {
   failed: number;
 }
 
-export async function runDueAgentTasks(
-  opts: RunDueAgentTasksOptions
-): Promise<AgentTasksSummary> {
-  const now = new Date();
-  const tasks = await opts.prisma.agentTask.findMany({
+export interface ScheduledAgentTaskPayload {
+  taskId: string;
+  manual?: boolean;
+  requestedBy?: string;
+  requestedAt?: string;
+}
+
+interface AgentTaskExecutionOptions extends RunDueAgentTasksOptions {
+  taskId: string;
+  jobId?: string;
+  manual?: boolean;
+}
+
+export async function scheduleAgentTaskNextRun(opts: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  taskId: string;
+  workspaceId?: string;
+  now?: Date;
+}): Promise<{ jobId: string | null; nextRunAt: Date } | null> {
+  const task = await opts.prisma.agentTask.findFirst({
     where: {
-      workspaceId: opts.workspaceId,
-      enabled: true,
-      OR: [{ nextRunAt: null }, { nextRunAt: { lte: now } }],
+      id: opts.taskId,
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
     },
+    select: {
+      id: true,
+      workspaceId: true,
+      cron: true,
+      enabled: true,
+      scheduledJobId: true,
+    },
+  });
+  if (!task || !task.enabled) return null;
+  const nextRunAt = computeNextRunAt(task.cron, opts.now ?? new Date());
+  if (task.scheduledJobId) {
+    await opts.boss
+      .cancel(SCHEDULED_TASK_JOB_NAME, task.scheduledJobId)
+      .catch(() => undefined);
+  }
+  const jobId = await opts.boss.send(
+    SCHEDULED_TASK_JOB_NAME,
+    {
+      taskId: task.id,
+      requestedBy: "system:scheduler",
+      requestedAt: new Date().toISOString(),
+    },
+    { startAfter: nextRunAt, singletonKey: task.id }
+  );
+  await opts.prisma.agentTask.update({
+    where: { id: task.id },
+    data: { nextRunAt, scheduledJobId: jobId },
+  });
+  return { jobId, nextRunAt };
+}
+
+export async function cancelAgentTaskNextRun(opts: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  taskId: string;
+  workspaceId?: string;
+}): Promise<void> {
+  const task = await opts.prisma.agentTask.findFirst({
+    where: {
+      id: opts.taskId,
+      ...(opts.workspaceId ? { workspaceId: opts.workspaceId } : {}),
+    },
+    select: { id: true, scheduledJobId: true },
+  });
+  if (!task) return;
+  if (task.scheduledJobId) {
+    await opts.boss
+      .cancel(SCHEDULED_TASK_JOB_NAME, task.scheduledJobId)
+      .catch(() => undefined);
+  }
+  await opts.prisma.agentTask.update({
+    where: { id: task.id },
+    data: { scheduledJobId: null, nextRunAt: null },
+  });
+}
+
+export async function enqueueAgentTaskNow(opts: {
+  boss: PgBoss;
+  taskId: string;
+  requestedBy: string;
+}): Promise<string | null> {
+  return opts.boss.send(SCHEDULED_TASK_JOB_NAME, {
+    taskId: opts.taskId,
+    manual: true,
+    requestedBy: opts.requestedBy,
+    requestedAt: new Date().toISOString(),
+  });
+}
+
+export async function rescheduleEnabledAgentTasks(opts: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  workspaceId: string;
+}): Promise<{ scheduled: number }> {
+  const tasks = await opts.prisma.agentTask.findMany({
+    where: { workspaceId: opts.workspaceId, enabled: true },
+    select: { id: true },
     orderBy: { nextRunAt: "asc" },
-    take: 10,
+  });
+  let scheduled = 0;
+  for (const task of tasks) {
+    const result = await scheduleAgentTaskNextRun({
+      prisma: opts.prisma,
+      boss: opts.boss,
+      workspaceId: opts.workspaceId,
+      taskId: task.id,
+    });
+    if (result) scheduled += 1;
+  }
+  return { scheduled };
+}
+
+export async function runScheduledAgentTaskJob(
+  opts: AgentTaskExecutionOptions
+): Promise<{ status: "succeeded" | "failed"; runId: string; message?: string }> {
+  const task = await opts.prisma.agentTask.findFirst({
+    where: { id: opts.taskId, workspaceId: opts.workspaceId },
     select: {
       id: true,
       title: true,
       prompt: true,
       cron: true,
+      enabled: true,
+      scheduledJobId: true,
     },
   });
-  let succeeded = 0;
-  let failed = 0;
-  for (const task of tasks) {
-    const run = await opts.prisma.agentTaskRun.create({
+  if (!task) throw new Error(`Agent task not found: ${opts.taskId}`);
+  if (!opts.manual && !task.enabled) {
+    throw new Error(`Agent task is disabled: ${opts.taskId}`);
+  }
+  if (!opts.manual && opts.jobId && task.scheduledJobId && task.scheduledJobId !== opts.jobId) {
+    throw new Error(`Agent task job is stale: ${opts.taskId}`);
+  }
+
+  const run = await opts.prisma.agentTaskRun.create({
+    data: {
+      workspaceId: opts.workspaceId,
+      taskId: task.id,
+      status: "running",
+    },
+    select: { id: true },
+  });
+  try {
+    const agentContext = await buildAgentContext(process.env);
+    const executions = [];
+    const seenTools = new Set<string>();
+    let message = "";
+    for (let i = 0; i < 4; i += 1) {
+      const turn = await runAgentTurn({
+        input: buildAgentLoopInput(task.prompt, executions),
+        provider: opts.provider,
+        agentContext,
+        purpose: "worker:agent-task",
+        surface: "scheduled-agent",
+      });
+      if (turn.message) message = turn.message;
+      if (turn.toolResults.length === 0) break;
+      let executedAny = false;
+      for (const tool of turn.toolResults) {
+        const signature = toolSignature(tool);
+        if (signature && seenTools.has(signature)) {
+          executions.push({
+            display: signature,
+            status: "unsupported",
+            message: "duplicate tool call skipped",
+          });
+          continue;
+        }
+        if (signature) seenTools.add(signature);
+        executions.push(await executeWorkerAgentTool({
+          tool,
+          prisma: opts.prisma,
+          workspaceId: opts.workspaceId,
+          boss: opts.boss,
+          webUrl: agentContext.webUrl,
+          githubAdapter: opts.githubAdapter,
+        }));
+        executedAny = true;
+      }
+      if (!executedAny) break;
+    }
+    const hasFailure = executions.some((e) =>
+      e.status === "error" || e.status === "denied" || e.status === "unsupported"
+    );
+    await opts.prisma.agentTaskRun.update({
+      where: { id: run.id },
       data: {
+        status: hasFailure ? "failed" : "succeeded",
+        finishedAt: new Date(),
+        message,
+        toolCalls: executions as Prisma.InputJsonValue,
+        errorMessage: hasFailure
+          ? executions.find((e) =>
+              e.status === "error" || e.status === "denied" || e.status === "unsupported"
+            )?.message ?? "agent task failed"
+          : null,
+      },
+    });
+    await opts.prisma.agentTask.update({
+      where: { id: task.id },
+      data: {
+        lastRunAt: new Date(),
+        lastState: hasFailure ? "failed" : "success",
+        ...(opts.manual ? {} : { scheduledJobId: null }),
+      },
+    });
+    if (!opts.manual && task.enabled) {
+      await scheduleAgentTaskNextRun({
+        prisma: opts.prisma,
+        boss: opts.boss,
         workspaceId: opts.workspaceId,
         taskId: task.id,
-        status: "running",
-      },
-      select: { id: true },
-    });
-    try {
-      const agentContext = await buildAgentContext(process.env);
-      const executions = [];
-      const seenTools = new Set<string>();
-      let message = "";
-      for (let i = 0; i < 4; i += 1) {
-        const turn = await runAgentTurn({
-          input: buildAgentLoopInput(task.prompt, executions),
-          provider: opts.provider,
-          agentContext,
-          purpose: "worker:agent-task",
-          surface: "scheduled-agent",
-        });
-        if (turn.message) message = turn.message;
-        if (turn.toolResults.length === 0) break;
-        let executedAny = false;
-        for (const tool of turn.toolResults) {
-          const signature = toolSignature(tool);
-          if (signature && seenTools.has(signature)) {
-            executions.push({
-              display: signature,
-              status: "unsupported",
-              message: "duplicate tool call skipped",
-            });
-            continue;
-          }
-          if (signature) seenTools.add(signature);
-          executions.push(await executeWorkerAgentTool({
-            tool,
-            prisma: opts.prisma,
-            workspaceId: opts.workspaceId,
-            boss: opts.boss,
-            webUrl: agentContext.webUrl,
-            githubAdapter: opts.githubAdapter,
-          }));
-          executedAny = true;
-        }
-        if (!executedAny) break;
-      }
-      const hasFailure = executions.some((e) =>
-        e.status === "error" || e.status === "denied" || e.status === "unsupported"
-      );
-      await opts.prisma.agentTaskRun.update({
-        where: { id: run.id },
-        data: {
-          status: hasFailure ? "failed" : "succeeded",
-          finishedAt: new Date(),
-          message,
-          toolCalls: executions as Prisma.InputJsonValue,
-          errorMessage: hasFailure
-            ? executions.find((e) =>
-                e.status === "error" || e.status === "denied" || e.status === "unsupported"
-              )?.message ?? "agent task failed"
-            : null,
-        },
-      });
-      await opts.prisma.agentTask.update({
-        where: { id: task.id },
-        data: {
-          lastRunAt: new Date(),
-          lastState: hasFailure ? "failed" : "success",
-          nextRunAt: computeNextRunAt(task.cron),
-        },
-      });
-      if (hasFailure) failed += 1;
-      else succeeded += 1;
-    } catch (err) {
-      failed += 1;
-      await opts.prisma.agentTaskRun.update({
-        where: { id: run.id },
-        data: {
-          status: "failed",
-          finishedAt: new Date(),
-          errorMessage: (err as Error).message,
-        },
-      });
-      await opts.prisma.agentTask.update({
-        where: { id: task.id },
-        data: {
-          lastRunAt: new Date(),
-          lastState: "failed",
-          nextRunAt: safeNextRunAt(task.cron),
-        },
       });
     }
+    return { status: hasFailure ? "failed" : "succeeded", runId: run.id, message };
+  } catch (err) {
+    await opts.prisma.agentTaskRun.update({
+      where: { id: run.id },
+      data: {
+        status: "failed",
+        finishedAt: new Date(),
+        errorMessage: (err as Error).message,
+      },
+    });
+    await opts.prisma.agentTask.update({
+      where: { id: task.id },
+      data: {
+        lastRunAt: new Date(),
+        lastState: "failed",
+        ...(opts.manual ? {} : { scheduledJobId: null }),
+      },
+    });
+    if (!opts.manual && task.enabled) {
+      await scheduleAgentTaskNextRun({
+        prisma: opts.prisma,
+        boss: opts.boss,
+        workspaceId: opts.workspaceId,
+        taskId: task.id,
+      }).catch(() => undefined);
+    }
+    throw err;
   }
-  const status =
-    failed === 0 ? "succeeded" : succeeded > 0 ? "partial_failure" : "failed";
-  return { status, due: tasks.length, succeeded, failed };
 }
 
 function computeNextRunAt(cron: string, currentDate = new Date()): Date {
   const validation = validateCronExpression(cron);
   if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
-  return cronParser.parseExpression(cron, { currentDate }).next().toDate();
-}
-
-function safeNextRunAt(cron: string): Date | null {
-  try {
-    return computeNextRunAt(cron);
-  } catch {
-    return null;
-  }
+  return cronParser
+    .parseExpression(cron, {
+      currentDate,
+      tz: resolveCronScheduleTimeZone(),
+    })
+    .next()
+    .toDate();
 }
 
 async function executeWorkerAgentTool(opts: {
@@ -529,19 +657,15 @@ function reportPreset(value: string): CronPresetName {
   const name =
     v === "daily" || v === "report" || v === "daily_report"
       ? "daily_report"
-      : v === "budget" || v === "budget_guard"
-        ? "budget_guard"
+      : v === "today" || v === "current" || v === "today_report"
+        ? "today_report"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "github" || v === "github_poll"
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"
               ? "retention_sweep"
-              : v === "automation" || v === "automation_rules" || v === "autopilot"
-                ? "automation_rules"
-                : v === "agent" || v === "agent_task" || v === "agent_tasks"
-                  ? "agent_tasks"
-                  : "";
+              : "";
   if (CRON_PRESETS.some((p) => p.name === name)) return name as CronPresetName;
   return "daily_report";
 }

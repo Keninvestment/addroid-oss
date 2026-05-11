@@ -210,6 +210,7 @@ export default async function CronRunsPage() {
 function workflowLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
+    today_report: "当日レポート",
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
@@ -264,6 +265,7 @@ function shortId(id: string): string {
 function friendlyMessage(message: string): string {
   return message
     .replaceAll("daily_report", "日次レポート")
+    .replaceAll("today_report", "当日レポート")
     .replaceAll("budget_guard", "予算チェック")
     .replaceAll("automation_rules", "自動運用ルール")
     .replaceAll("improvement_pr", "改善提案")

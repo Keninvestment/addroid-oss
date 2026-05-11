@@ -15,6 +15,12 @@ interface SyncResponse {
   adsets?: number;
   ads?: number;
   upserted?: number;
+  metrics?: {
+    metricDate?: string;
+    rows?: number;
+    snapshots?: number;
+    error?: string;
+  };
   error?: string;
 }
 
@@ -39,7 +45,7 @@ export function SyncCampaignsButton({ accountId }: SyncCampaignsButtonProps) {
       toast.push({
         variant: "success",
         title: "広告一覧を更新しました",
-        description: `campaign ${body.campaigns ?? 0} / adset ${body.adsets ?? 0} / ad ${body.ads ?? 0} 件`,
+        description: buildSuccessDescription(body),
       });
       router.refresh();
     } catch (err) {
@@ -64,4 +70,13 @@ export function SyncCampaignsButton({ accountId }: SyncCampaignsButtonProps) {
       {busy ? <BusyLabel>取得中</BusyLabel> : "Metaから更新"}
     </button>
   );
+}
+
+function buildSuccessDescription(body: SyncResponse): string {
+  const hierarchy = `campaign ${body.campaigns ?? 0} / adset ${body.adsets ?? 0} / ad ${body.ads ?? 0} 件`;
+  if (!body.metrics) return hierarchy;
+  if (body.metrics.error) {
+    return `${hierarchy} / 指標は未取得: ${body.metrics.error}`;
+  }
+  return `${hierarchy} / 指標 ${body.metrics.snapshots ?? 0} 件`;
 }

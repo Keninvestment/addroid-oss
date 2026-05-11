@@ -22,8 +22,8 @@
 //     "ai_failed" 状態で終了させ、UI / cron_runs に user-visible なエラーを残すが
 //     snapshot は破棄しない (= GitOps state は腐らない)。
 //   - mode は `report_only` / `proposal` / `auto_apply` のいずれでも Meta を変更
-//     しない。daily_report は常に観測のみで、auto_pause 等の副作用は budget_guard
-//     が担当する。
+  //     しない。daily_report は常に観測のみで、副作用は別の GitOps / automation
+  //     境界が担当する。
 //   - 数値計算は BigInt-safe な helper を使い、micros (Meta の通貨マイクロ単位) を
 //     最小通貨単位で割って major unit に揃える (UI は currency 単位で表示)。
 
@@ -230,6 +230,11 @@ export interface RunDailyReportOptions {
    * の順で timezone を決め、そのローカル日付を使う。
    */
   metricDate?: string;
+  /**
+   * metricDate 未指定時に、timezone 解決後のローカル日付からずらす日数。
+   * daily_report は -1 (= 前日)、today_report は 0 (= 当日) を渡す。
+   */
+  metricDateOffsetDays?: number;
   insightsProvider: DailyReportInsightsProvider;
   store: DailyReportSnapshotStore;
   analyst: DailyReportAnalystRunner;
@@ -333,7 +338,11 @@ export async function runDailyReportOnce(
     opts.fallbackTimeZone
   );
   const metricDate =
-    opts.metricDate ?? toDateStringInTimeZone(now(), metricTimeZone);
+    opts.metricDate ??
+    toDateStringInTimeZone(
+      addUtcDays(now(), opts.metricDateOffsetDays ?? 0),
+      metricTimeZone
+    );
   const priorMetricDate = subtractOneUtcDay(metricDate);
 
   if (!account) {
@@ -715,4 +724,9 @@ export function subtractOneUtcDay(date: string): string {
   const utc = Date.UTC(y, mo - 1, d) - 24 * 60 * 60 * 1000;
   const prev = new Date(utc);
   return toUtcDateString(prev);
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  if (!Number.isFinite(days) || days === 0) return date;
+  return new Date(date.getTime() + days * 24 * 60 * 60 * 1000);
 }

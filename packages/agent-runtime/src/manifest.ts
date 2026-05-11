@@ -83,13 +83,13 @@ export const AGENT_TOOL_MANIFEST = [
     effects: ["local-write", "queue"],
     allowedSurfaces: ["cli-chat", "web-chat"],
     guidance:
-      "For '毎朝9時に前日のレポート', save a prompt that still says '前日分の日次レポートを作成して要約する' and cron '0 9 * * *'.",
+      "For read-only/reporting recurring tasks such as '毎朝9時に前日のレポート', save a prompt that still says '前日分の日次レポートを作成して要約する' and cron '0 9 * * *'. Do not use this for production ad mutations; use propose_automation_rule instead.",
   },
   {
     name: "set_schedule_enabled",
     description:
       "既存の pg-boss preset schedule を cron と enabled 状態込みで更新する。preset 自体の ON/OFF が明示された場合に使う。",
-    args: "{preset:'daily'|'budget'|'improvement'|'github'|'retention'|'agent_tasks', cron?: string, enabled:boolean}",
+    args: "{preset:'daily'|'today'|'improvement'|'github'|'retention', cron?: string, enabled:boolean}",
     effects: ["local-write"],
     allowedSurfaces: ["cli-chat", "web-chat"],
     guidance:
@@ -98,7 +98,7 @@ export const AGENT_TOOL_MANIFEST = [
   {
     name: "manage_schedule",
     description: "既存 preset schedule の一覧、履歴、または単発実行を扱う。",
-    args: "{action:'list'|'run'|'logs', preset?:'daily'|'budget'|'improvement'|'github'|'retention'|'agent_tasks', limit?: number}",
+    args: "{action:'list'|'run'|'logs', preset?:'daily'|'today'|'improvement'|'github'|'retention', limit?: number}",
     effects: ["read", "queue"],
     allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
   },
@@ -137,13 +137,13 @@ export const AGENT_TOOL_MANIFEST = [
   {
     name: "propose_automation_rule",
     description:
-      "自然言語の継続監視・自動運用依頼を workflows/automation-rules.yaml の事前承認ルール変更 PR として作成する。直接Metaには反映しない。",
+      "自然言語の継続監視・自動運用依頼を安全評価可能なルール変更 PR として作成する。直接Metaには反映しない。",
     args:
       "{sourceText:string, rule:{id?:string, enabled?:boolean, schedule?:string, intent?:string, scope:{level:'account'|'campaign'|'adset'|'ad', accounts?:string[]}, window?:object, metrics?:object, computed?:object, when:{all?:Array<object>, any?:Array<object>}, action:{type:string, status?:'ACTIVE'|'PAUSED', [key:string]:unknown}, limits?:object, approval?:{mode:'proposal'|'auto_apply_if_policy_matched'|'auto_merge_if_policy_matched'|'report_only'}, safety?:object}, rationale?:string, title?:string}",
     effects: ["gitops-pr"],
     allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
     guidance:
-      "Use this when the user asks for recurring or conditional ad operations in natural language, such as hourly pause rules, duplicating ads for tests, or scheduled campaign changes. Translate intent into a structured rule, but keep unsafe operations proposal-only unless a pre-approved policy explicitly allows them.",
+      "Use this when the user asks for recurring or conditional ad operations in natural language, such as hourly pause rules, budget changes, duplicating campaigns, or scheduled campaign changes. Ask concise clarification questions if schedule, lookback window, target scope, action, approval mode, or limits are missing. The PR itself is the approval request; once merged, enabled rules are listed on the automation page and scheduled by rule.schedule.",
   },
   {
     name: "propose_automation_rule_update",

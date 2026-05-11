@@ -34,6 +34,8 @@ import {
   bootPgBoss,
   CRON_PRESETS,
   mirrorPresetsToCronSchedules,
+  resolveCronScheduleTimeZone,
+  scheduleCron,
   validateCronExpression,
   type CronPresetName,
 } from "@addroid/queue";
@@ -441,7 +443,7 @@ async function execEnable(
   const cron = row?.cron ?? preset.cron;
 
   try {
-    await ctx.boss.schedule(opts.name, cron);
+    await scheduleCron(ctx.boss, opts.name, cron, resolveCronScheduleTimeZone());
   } catch (err) {
     process.stderr.write(
       `[addroid cron enable] pg-boss schedule に失敗: ${(err as Error).message}\n`
@@ -515,7 +517,7 @@ async function execSet(
   // 起動する前にチェック)。enabled なときだけ pg-boss にも実際に反映する。
   if (enabled) {
     try {
-      await ctx.boss.schedule(opts.name, opts.cron);
+      await scheduleCron(ctx.boss, opts.name, opts.cron, resolveCronScheduleTimeZone());
     } catch (err) {
       process.stderr.write(
         `[addroid cron set] pg-boss schedule (validate) に失敗: ${(err as Error).message}\n`

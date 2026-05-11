@@ -171,10 +171,9 @@ export const CronEntrySchema = z
     name: z.enum([
       "github_poll",
       "daily_report",
-      "budget_guard",
+      "today_report",
       "improvement_pr",
       "retention_sweep",
-      "agent_tasks",
     ]),
     cron: CronExpressionSchema,
     enabled: z.boolean().default(false),

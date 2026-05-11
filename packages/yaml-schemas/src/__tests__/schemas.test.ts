@@ -47,12 +47,13 @@ test("ProjectYamlSchema rejects unknown top-level keys (strict)", () => {
 
 // ---- CronYamlSchema ------------------------------------------------------
 
-test("CronYamlSchema accepts a valid 4-preset cron.yaml", () => {
+test("CronYamlSchema accepts standard cron presets", () => {
   const r = CronYamlSchema.safeParse({
     version: 1,
     schedules: [
       { name: "github_poll", cron: "*/2 * * * *", enabled: true },
       { name: "daily_report", cron: "0 9 * * *", enabled: false },
+      { name: "today_report", cron: "0 * * * *", enabled: false },
     ],
   });
   assert.equal(r.success, true);
@@ -456,6 +457,9 @@ schedules:
     enabled: true
   - name: daily_report
     cron: "0 9 * * *"
+    enabled: false
+  - name: today_report
+    cron: "0 * * * *"
     enabled: false
 `;
 const VALID_BRAND_YAML = (key: string) => `version: 1

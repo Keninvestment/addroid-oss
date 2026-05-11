@@ -11,8 +11,8 @@
 //   - Unified feedback: 成功・失敗いずれも Toast で通知し、エラー時は inline でも
 //     残す。saving フラグはエラー時にも必ず false に戻す。
 //   - schedule 編集は free text。永続化前にサーバー側で validateCronExpression。
-//   - run-now は ConfirmDialog (caution) で確認する — daily_report / improvement_pr /
-//     budget_guard は AI コストや GitHub PR 作成といった副作用を伴うため。
+//   - run-now は ConfirmDialog (caution) で確認する — daily_report / improvement_pr
+//     は AI コストや GitHub PR 作成といった副作用を伴うため。
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -411,10 +411,8 @@ export function CronControls({
               <dd>
                 {presetName === "improvement_pr"
                   ? "改善案がある場合は GitHub に承認待ちの変更が作成される可能性があります。"
-                  : presetName === "automation_rules"
-                    ? "事前承認済みポリシーに完全一致した自動停止などは、監査記録付きで実行される可能性があります。"
                   : presetName === "daily_report" ||
-                      presetName === "budget_guard"
+                      presetName === "today_report"
                     ? "Meta の広告設定は変更されません。"
                     : presetName === "github_poll"
                       ? "承認済みの変更があれば反映待ちに進みます。"
@@ -439,8 +437,7 @@ export function CronControls({
 function presetLabel(name: string): string {
   const labels: Record<string, string> = {
     daily_report: "日次レポート",
-    budget_guard: "予算チェック",
-    automation_rules: "自動運用ルール",
+    today_report: "当日レポート",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",

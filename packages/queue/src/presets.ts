@@ -5,9 +5,14 @@
 //
 // the current implementation の重要な制約 (再掲):
 //   - github_poll は default で enabled。merged PR 検知は本契約で動作する想定。
-//   - daily_report / budget_guard / improvement_pr は「定義のみ存在し未起動」を維持する。
+//   - daily_report / today_report / improvement_pr は「定義のみ存在し未起動」を維持する。
+//   - daily_report は前日分を毎朝、today_report は当日分を毎時取得する。
+//   - 自然言語カスタム cron と承認済み automation rule は CRON_PRESETS ではなく
+//     delayed job として 1 回分ずつ予約する。
 
 export const APPLY_JOB_NAME = "execute_apply" as const;
+export const SCHEDULED_TASK_JOB_NAME = "scheduled_task_run" as const;
+export const AUTOMATION_RULE_JOB_NAME = "automation_rule_run" as const;
 
 export const CRON_PRESETS = [
   {
@@ -19,19 +24,13 @@ export const CRON_PRESETS = [
   {
     name: "daily_report",
     cron: "0 9 * * *",
-    description: "Meta Ads CLI 経由で日次レポートを取得する (後続コントラクト)",
+    description: "Meta Ads CLI 経由で前日の日次レポートを毎朝取得する",
     enabledByDefault: false,
   },
   {
-    name: "budget_guard",
-    cron: "*/15 * * * *",
-    description: "予算超過監視 (後続コントラクト)",
-    enabledByDefault: false,
-  },
-  {
-    name: "automation_rules",
-    cron: "*/15 * * * *",
-    description: "事前承認済み automation-rules.yaml を評価し、許可された自動運用だけ実行する",
+    name: "today_report",
+    cron: "0 * * * *",
+    description: "Meta Ads CLI 経由で当日の日次レポートを毎時取得する",
     enabledByDefault: false,
   },
   {
@@ -48,12 +47,6 @@ export const CRON_PRESETS = [
     cron: "15 3 * * *",
     description:
       "performance_snapshots の raw / 粒度 (adset/ad) を 90 日、集計 (account/campaign) を 1 年で掃くリテンション処理",
-    enabledByDefault: true,
-  },
-  {
-    name: "agent_tasks",
-    cron: "* * * * *",
-    description: "自然言語で保存された Agent task の due run を評価する",
     enabledByDefault: true,
   },
 ] as const;

@@ -1,13 +1,17 @@
 import type { PrismaClient } from "@addroid/db";
 import { Prisma } from "@addroid/db";
+import cronParser from "cron-parser";
+import type PgBoss from "pg-boss";
 import {
+  AUTOMATION_RULE_JOB_NAME,
   evaluateAutomationRule,
   evaluateAutomationCalibrationDrift,
   buildAutomationRuleCalibration,
   extractSpendThresholdFromConditions,
-  resolveExecutionMode,
+  resolveCronScheduleTimeZone,
   resolveDailyReportTimeZone,
   toDateStringInTimeZone,
+  validateCronExpression,
   type AutomationDriftEvaluation,
   type AutomationMetricSubject,
   type AutomationPlannedAction,
@@ -16,7 +20,6 @@ import {
   type AutomationBaselineStats,
   type DailyReportInsightsProvider,
   type DailyReportInsightsRow,
-  type ExecutionMode,
 } from "@addroid/queue";
 import {
   loadAutomationRules,
@@ -36,6 +39,14 @@ export interface RunAutomationRulesOnceOptions {
   mutationExecutor: AutomationCliMutationExecutor | null;
   env?: NodeJS.ProcessEnv;
   fallbackTimeZone?: string | null;
+  ruleKey?: string;
+}
+
+export interface ScheduledAutomationRulePayload {
+  ruleId: string;
+  ruleKey?: string;
+  requestedBy?: string;
+  requestedAt?: string;
 }
 
 export interface AutomationRulesRunSummary {
@@ -65,17 +76,12 @@ export async function runAutomationRulesOnce(
     return emptySummary("policy_missing", ["workflows/automation-rules.yaml is missing or invalid"]);
   }
 
-  const workspace = await opts.prisma.workspace.findUnique({
-    where: { id: opts.workspaceId },
-    select: { executionMode: true },
-  });
   const accounts = await opts.prisma.adAccount.findMany({
     where: { workspaceId: opts.workspaceId, active: true },
     select: {
       id: true,
       key: true,
       displayName: true,
-      modeOverride: true,
       currency: true,
       timezoneName: true,
     },
@@ -89,6 +95,7 @@ export async function runAutomationRulesOnce(
   const errors: string[] = [];
 
   for (const rule of yaml.rules) {
+    if (opts.ruleKey && rule.id !== opts.ruleKey) continue;
     await upsertRuleRow(opts.prisma, opts.workspaceId, rule);
     if (!rule.enabled) continue;
     const dsl = toExecutableDsl(rule);
@@ -99,7 +106,7 @@ export async function runAutomationRulesOnce(
     for (const account of accounts) {
       if (dsl.scope.accounts?.length && !dsl.scope.accounts.includes(account.key)) continue;
       rulesEvaluated += 1;
-      const mode = resolveExecutionMode(workspace?.executionMode ?? null, account.modeOverride);
+      const policyMode = normalizeRuleApprovalMode(rule);
       const run = await opts.prisma.automationRun.create({
         data: {
           workspaceId: opts.workspaceId,
@@ -141,7 +148,6 @@ export async function runAutomationRulesOnce(
           const gate = evaluateRuntimeGate(
             rule,
             action,
-            mode,
             Boolean(opts.mutationExecutor),
             actionOrdinal,
             {
@@ -166,7 +172,7 @@ export async function runAutomationRulesOnce(
                 observedMetrics: action.observedMetrics,
                 reasons: action.reasons,
                 gate,
-                mode,
+                policyMode,
                 estimatedDailyBudgetAffected,
               } as Prisma.InputJsonValue,
               status: gate.allowed ? "approved" : "blocked",
@@ -186,7 +192,7 @@ export async function runAutomationRulesOnce(
                   accountKey: account.key,
                   target: `${action.level}:${action.targetKey}`,
                   reason: gate.reason,
-                  mode,
+                  policyMode,
                   details: gate.details ?? null,
                 } as Prisma.InputJsonValue,
               },
@@ -214,7 +220,7 @@ export async function runAutomationRulesOnce(
                 observedMetrics: action.observedMetrics,
                 reasons: action.reasons,
                 gate,
-                mode,
+                policyMode,
                 estimatedDailyBudgetAffected,
                 execution: { status: result.status, message: result.message },
               } as Prisma.InputJsonValue,
@@ -233,7 +239,7 @@ export async function runAutomationRulesOnce(
                 actionType: action.actionType,
                 status: result.status,
                 message: result.message,
-                mode,
+                policyMode,
               } as Prisma.InputJsonValue,
             },
           }).catch(() => undefined);
@@ -278,6 +284,170 @@ export async function runAutomationRulesOnce(
     actionsBlocked,
     errors,
   };
+}
+
+export async function syncAndScheduleAutomationRules(opts: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  workspaceId: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<{ loaded: number; scheduled: number }> {
+  const env = opts.env ?? process.env;
+  const resolved = await resolveOpsRepoLocalDirForWorkspace({
+    prisma: opts.prisma as never,
+    workspaceId: opts.workspaceId,
+    env,
+  }).catch(() => ({ rootDir: null }));
+  if (!resolved.rootDir) return { loaded: 0, scheduled: 0 };
+  const yaml = loadAutomationRules(resolved.rootDir);
+  if (!yaml) return { loaded: 0, scheduled: 0 };
+
+  for (const rule of yaml.rules) {
+    await upsertRuleRow(opts.prisma, opts.workspaceId, rule);
+  }
+
+  const rows = await opts.prisma.automationRule.findMany({
+    where: { workspaceId: opts.workspaceId },
+    select: {
+      id: true,
+      key: true,
+      enabled: true,
+      schedule: true,
+      scheduledJobId: true,
+    },
+  });
+  const validRuleIds = new Set(yaml.rules.map((rule) => rule.id));
+  let scheduled = 0;
+  for (const row of rows) {
+    if (!validRuleIds.has(row.key) || !row.enabled || !row.schedule.trim()) {
+      if (row.scheduledJobId) {
+        await opts.boss
+          .cancel(AUTOMATION_RULE_JOB_NAME, row.scheduledJobId)
+          .catch(() => undefined);
+        await opts.prisma.automationRule.update({
+          where: { id: row.id },
+          data: { scheduledJobId: null, nextRunAt: null },
+        });
+      }
+      continue;
+    }
+    const result = await scheduleAutomationRuleNextRun({
+      prisma: opts.prisma,
+      boss: opts.boss,
+      workspaceId: opts.workspaceId,
+      ruleId: row.id,
+    }).catch(() => null);
+    if (result) scheduled += 1;
+  }
+  return { loaded: yaml.rules.length, scheduled };
+}
+
+export async function scheduleAutomationRuleNextRun(opts: {
+  prisma: PrismaClient;
+  boss: PgBoss;
+  workspaceId: string;
+  ruleId: string;
+  now?: Date;
+}): Promise<{ jobId: string | null; nextRunAt: Date } | null> {
+  const rule = await opts.prisma.automationRule.findFirst({
+    where: { id: opts.ruleId, workspaceId: opts.workspaceId },
+    select: {
+      id: true,
+      key: true,
+      enabled: true,
+      schedule: true,
+      scheduledJobId: true,
+    },
+  });
+  if (!rule || !rule.enabled || !rule.schedule.trim()) return null;
+  const nextRunAt = computeNextRunAt(rule.schedule, opts.now ?? new Date());
+  if (rule.scheduledJobId) {
+    await opts.boss
+      .cancel(AUTOMATION_RULE_JOB_NAME, rule.scheduledJobId)
+      .catch(() => undefined);
+  }
+  const jobId = await opts.boss.send(
+    AUTOMATION_RULE_JOB_NAME,
+    {
+      ruleId: rule.id,
+      ruleKey: rule.key,
+      requestedBy: "system:automation-rule-scheduler",
+      requestedAt: new Date().toISOString(),
+    } satisfies ScheduledAutomationRulePayload,
+    { startAfter: nextRunAt, singletonKey: rule.id }
+  );
+  await opts.prisma.automationRule.update({
+    where: { id: rule.id },
+    data: { nextRunAt, scheduledJobId: jobId },
+  });
+  return { jobId, nextRunAt };
+}
+
+export async function runScheduledAutomationRuleJob(opts: RunAutomationRulesOnceOptions & {
+  boss: PgBoss;
+  ruleId: string;
+  jobId?: string;
+}): Promise<AutomationRulesRunSummary> {
+  const rule = await opts.prisma.automationRule.findFirst({
+    where: { id: opts.ruleId, workspaceId: opts.workspaceId },
+    select: {
+      id: true,
+      key: true,
+      enabled: true,
+      scheduledJobId: true,
+    },
+  });
+  if (!rule) throw new Error(`automation rule not found: ${opts.ruleId}`);
+  if (!rule.enabled) throw new Error(`automation rule is disabled: ${rule.key}`);
+  if (opts.jobId && rule.scheduledJobId && rule.scheduledJobId !== opts.jobId) {
+    throw new Error(`automation rule job is stale: ${rule.key}`);
+  }
+  try {
+    const summary = await runAutomationRulesOnce({ ...opts, ruleKey: rule.key });
+    await opts.prisma.automationRule.update({
+      where: { id: rule.id },
+      data: {
+        lastRunAt: new Date(),
+        lastState: summary.status,
+        scheduledJobId: null,
+      },
+    });
+    await scheduleAutomationRuleNextRun({
+      prisma: opts.prisma,
+      boss: opts.boss,
+      workspaceId: opts.workspaceId,
+      ruleId: rule.id,
+    }).catch(() => undefined);
+    return summary;
+  } catch (err) {
+    await opts.prisma.automationRule.update({
+      where: { id: rule.id },
+      data: {
+        lastRunAt: new Date(),
+        lastState: "failed",
+        scheduledJobId: null,
+      },
+    }).catch(() => undefined);
+    await scheduleAutomationRuleNextRun({
+      prisma: opts.prisma,
+      boss: opts.boss,
+      workspaceId: opts.workspaceId,
+      ruleId: rule.id,
+    }).catch(() => undefined);
+    throw err;
+  }
+}
+
+function computeNextRunAt(cron: string, currentDate = new Date()): Date {
+  const validation = validateCronExpression(cron);
+  if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
+  return cronParser
+    .parseExpression(cron, {
+      currentDate,
+      tz: resolveCronScheduleTimeZone(),
+    })
+    .next()
+    .toDate();
 }
 
 function emptySummary(
@@ -452,7 +622,6 @@ function toSubject(
 function evaluateRuntimeGate(
   rule: AutomationRuleYaml,
   action: AutomationPlannedAction,
-  mode: ExecutionMode,
   executorConfigured: boolean,
   actionOrdinal: number,
   context: {
@@ -464,7 +633,6 @@ function evaluateRuntimeGate(
   }
 ): { allowed: boolean; reason: string; details?: Record<string, unknown> } {
   if (!executorConfigured) return { allowed: false, reason: "automation mutation executor is not configured" };
-  if (mode !== "auto_apply") return { allowed: false, reason: `cron/account mode is ${mode}` };
   if (normalizeRuleApprovalMode(rule) !== "auto_apply") {
     return { allowed: false, reason: "rule approval mode is not auto_apply" };
   }
@@ -484,8 +652,23 @@ function evaluateRuntimeGate(
   if (context.cooldownActive) {
     return { allowed: false, reason: "cooldown is active for this target" };
   }
-  if (action.actionType !== "set_status" || action.payload.status !== "PAUSED") {
-    return { allowed: false, reason: "only PAUSED set_status is auto-applicable" };
+  if (action.actionType !== "set_status" && action.actionType !== "adjust_budget") {
+    return {
+      allowed: false,
+      reason: `automation action is not auto-applicable: ${action.actionType}`,
+    };
+  }
+  if (action.actionType === "set_status") {
+    const status = action.payload.status;
+    if (status !== "PAUSED" && status !== "ACTIVE") {
+      return { allowed: false, reason: "set_status requires PAUSED or ACTIVE" };
+    }
+  }
+  if (action.actionType === "adjust_budget") {
+    const proposed = readNumber(action.payload.proposedDailyBudget);
+    if (proposed === null || proposed <= 0) {
+      return { allowed: false, reason: "adjust_budget requires a resolved proposedDailyBudget" };
+    }
   }
   const max = rule.limits?.maxActionsPerRun ?? rule.limits?.maxCampaignsPerRun;
   if (max !== undefined && max < 1) return { allowed: false, reason: "rule maxActionsPerRun is invalid" };
@@ -511,7 +694,7 @@ function evaluateRuntimeGate(
       },
     };
   }
-  return { allowed: true, reason: "pre-approved pause policy matched" };
+  return { allowed: true, reason: "pre-approved automation policy matched" };
 }
 
 async function evaluateCalibrationForRuntime(input: {

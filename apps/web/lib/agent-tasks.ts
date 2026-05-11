@@ -1,13 +1,18 @@
 import cronParser from "cron-parser";
 import { Prisma } from "@addroid/db";
-import { validateCronExpression } from "@addroid/queue";
+import { resolveCronScheduleTimeZone, validateCronExpression } from "@addroid/queue";
 import { prisma } from "./prisma";
 import { ensureWebWorkspace } from "./github-runtime";
-import { runWebAgentChat } from "./agent-chat";
+import { getQueueBoss } from "./queue-runtime";
 import {
   createOrReuseAgentTask,
   normalizeAgentTaskPrompt,
 } from "../../worker/src/lib/agent-task-store";
+import {
+  cancelAgentTaskNextRun as cancelScheduledAgentTaskRun,
+  enqueueAgentTaskNow as enqueueScheduledAgentTaskNow,
+  scheduleAgentTaskNextRun as scheduleScheduledAgentTaskRun,
+} from "../../worker/src/lib/agent-task-runtime";
 
 export interface CreateAgentTaskInput {
   title?: string;
@@ -18,7 +23,10 @@ export interface CreateAgentTaskInput {
 }
 
 export function computeNextRunAt(cron: string, currentDate = new Date()): Date {
-  const interval = cronParser.parseExpression(cron, { currentDate });
+  const interval = cronParser.parseExpression(cron, {
+    currentDate,
+    tz: resolveCronScheduleTimeZone(),
+  });
   return interval.next().toDate();
 }
 
@@ -31,6 +39,7 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
     throw new Error(`cron 式が不正です: ${validation.reason}`);
   }
   const workspace = await ensureWebWorkspace();
+  const boss = await getQueueBoss();
   const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
   const title = input.title?.trim() || deriveTaskTitle(normalizedPrompt);
   const nextRunAt = input.nextRunAt ?? computeNextRunAt(cron);
@@ -42,6 +51,12 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
     nextRunAt,
     createdBy: input.createdBy ?? "user:web-ui",
   });
+  const scheduled = await scheduleScheduledAgentTaskRun({
+    prisma,
+    boss,
+    workspaceId: workspace.id,
+    taskId: task.id,
+  });
   await prisma.auditLog
     .create({
       data: {
@@ -49,7 +64,13 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
         actor: input.createdBy ?? "user:web-ui",
         action: created ? "agent_task.created" : "agent_task.reused",
         target: `agent_task:${task.id}`,
-        metadata: { title, cron, prompt: normalizedPrompt, created } as Prisma.InputJsonValue,
+        metadata: {
+          title,
+          cron,
+          prompt: normalizedPrompt,
+          created,
+          scheduledJobId: scheduled?.jobId ?? null,
+        } as Prisma.InputJsonValue,
       },
     })
     .catch(() => undefined);
@@ -58,12 +79,18 @@ export async function createAgentTask(input: CreateAgentTaskInput) {
 
 export async function setAgentTaskEnabled(id: string, enabled: boolean) {
   const workspace = await ensureWebWorkspace();
-  const data = enabled
-    ? { enabled, nextRunAt: computeNextRunAt((await loadTaskCron(id, workspace.id)) ?? "* * * * *") }
-    : { enabled, nextRunAt: null };
+  const boss = await getQueueBoss();
+  if (!enabled) {
+    await cancelScheduledAgentTaskRun({
+      prisma,
+      boss,
+      workspaceId: workspace.id,
+      taskId: id,
+    });
+  }
   const task = await prisma.agentTask.update({
     where: { id },
-    data,
+    data: { enabled },
     select: {
       id: true,
       title: true,
@@ -73,6 +100,14 @@ export async function setAgentTaskEnabled(id: string, enabled: boolean) {
       nextRunAt: true,
     },
   });
+  const scheduled = enabled
+    ? await scheduleScheduledAgentTaskRun({
+        prisma,
+        boss,
+        workspaceId: workspace.id,
+        taskId: id,
+      })
+    : null;
   await prisma.auditLog
     .create({
       data: {
@@ -80,7 +115,10 @@ export async function setAgentTaskEnabled(id: string, enabled: boolean) {
         actor: "user:web-ui",
         action: enabled ? "agent_task.enabled" : "agent_task.disabled",
         target: `agent_task:${id}`,
-        metadata: { enabled } as Prisma.InputJsonValue,
+        metadata: {
+          enabled,
+          scheduledJobId: scheduled?.jobId ?? null,
+        } as Prisma.InputJsonValue,
       },
     })
     .catch(() => undefined);
@@ -94,76 +132,13 @@ export async function runAgentTaskNow(id: string) {
     select: { id: true, title: true, prompt: true, cron: true },
   });
   if (!task) throw new Error("Agent task が見つかりません。");
-  const run = await prisma.agentTaskRun.create({
-    data: {
-      workspaceId: workspace.id,
-      taskId: task.id,
-      status: "running",
-    },
-    select: { id: true },
+  const boss = await getQueueBoss();
+  const jobId = await enqueueScheduledAgentTaskNow({
+    boss,
+    taskId: task.id,
+    requestedBy: "user:web-ui",
   });
-  try {
-    const result = await runWebAgentChat(task.prompt, {
-      includeDashboardMemory: false,
-      auditAction: "agent_task.chat_run_via_web",
-      auditActor: "agent:scheduled-task",
-    });
-    const failed =
-      !result.ok ||
-      result.executions.some((e) =>
-        e.status === "error" || e.status === "denied" || e.status === "unsupported"
-      );
-    await prisma.agentTaskRun.update({
-      where: { id: run.id },
-      data: {
-        status: failed ? "failed" : "succeeded",
-        finishedAt: new Date(),
-        message: result.message,
-        toolCalls: result.executions as unknown as Prisma.InputJsonValue,
-        errorMessage: failed
-          ? result.executions.find((e) =>
-              e.status === "error" || e.status === "denied" || e.status === "unsupported"
-            )?.message ?? "agent task failed"
-          : null,
-      },
-    });
-    await prisma.agentTask.update({
-      where: { id: task.id },
-      data: {
-        lastRunAt: new Date(),
-        lastState: failed ? "failed" : "success",
-        nextRunAt: computeNextRunAt(task.cron),
-      },
-    });
-    return { runId: run.id, ...result };
-  } catch (err) {
-    const message = (err as Error).message;
-    await prisma.agentTaskRun.update({
-      where: { id: run.id },
-      data: {
-        status: "failed",
-        finishedAt: new Date(),
-        errorMessage: message,
-      },
-    });
-    await prisma.agentTask.update({
-      where: { id: task.id },
-      data: {
-        lastRunAt: new Date(),
-        lastState: "failed",
-        nextRunAt: computeNextRunAt(task.cron),
-      },
-    });
-    throw err;
-  }
-}
-
-async function loadTaskCron(id: string, workspaceId: string): Promise<string | null> {
-  const row = await prisma.agentTask.findFirst({
-    where: { id, workspaceId },
-    select: { cron: true },
-  });
-  return row?.cron ?? null;
+  return { jobId, taskId: task.id };
 }
 
 function deriveTaskTitle(prompt: string): string {
