@@ -109,7 +109,7 @@ export default async function CronSchedulesPage() {
 
   const dbByName = new Map(registered.map((r) => [r.name, r]));
   const userVisiblePresets = CRON_PRESETS.filter((preset) =>
-    ["daily_report", "today_report", "improvement_pr"].includes(preset.name)
+    ["github_poll", "daily_report", "today_report", "improvement_pr"].includes(preset.name)
   );
   const rows: Row[] = userVisiblePresets.map((preset) => {
     const name = preset.name;

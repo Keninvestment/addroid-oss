@@ -226,7 +226,11 @@ const INTERACTIONS = [
     id: "approvals-merge-invalid-pr-number",
     method: "POST",
     url: "/api/approvals/0/merge",
-    body: {},
+    headers: {
+      "X-AdDroid-Web-Action": "1",
+      Origin: BASE_URL,
+    },
+    body: { expectedHeadSha: "deadbeefcafebabefeedfaceabad1dea12345678" },
     expectStatus: 400,
     expectJsonOkFalse: true,
     note: "Web UI Merge API は PR#=0 を 400 で拒否",
@@ -308,10 +312,15 @@ async function waitForServer(baseUrl, deadlineMs) {
 }
 
 function startServer() {
-  const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+  const nextBin = path.join(
+    REPO_ROOT,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "next.cmd" : "next"
+  );
   const child = spawn(
-    npmCmd,
-    ["run", "dev", "--", "--hostname", HOSTNAME, "--port", String(PORT)],
+    nextBin,
+    ["dev", "--webpack", "--hostname", HOSTNAME, "--port", String(PORT)],
     {
       cwd: WEB_APP_DIR,
       env: { ...process.env, BROWSER: "none", NEXT_TELEMETRY_DISABLED: "1" },
@@ -403,8 +412,11 @@ async function runInteractions() {
     try {
       /** @type {RequestInit & { timeoutMs?: number }} */
       const init = { method: interaction.method };
+      if (interaction.headers !== undefined) {
+        init.headers = { ...interaction.headers };
+      }
       if (interaction.body !== undefined) {
-        init.headers = { "Content-Type": "application/json" };
+        init.headers = { ...(init.headers ?? {}), "Content-Type": "application/json" };
         init.body = JSON.stringify(interaction.body);
       }
       const res = await fetchWithTimeout(url, init);
@@ -745,6 +757,21 @@ async function loadPrisma() {
 async function seedPrFixture(prisma) {
   // 既存 fixture が残っていれば削除 (前回テストの中断対策)。
   await cleanupPrFixture(prisma);
+  const workspace =
+    (await prisma.workspace.findFirst({
+      orderBy: { createdAt: "asc" },
+      select: { id: true, opsRepoId: true },
+    })) ??
+    (await prisma.workspace.create({
+      data: {
+        slug: "browser-test",
+        displayName: "Browser Test",
+        configPath: "browser-test",
+        storageDir: "browser-test",
+        databaseUrlRef: "DATABASE_URL",
+      },
+      select: { id: true, opsRepoId: true },
+    }));
   const repo = await prisma.githubRepo.create({
     data: {
       owner: FIXTURE_REPO_OWNER,
@@ -752,6 +779,10 @@ async function seedPrFixture(prisma) {
       defaultBranch: "main",
       branchProtectionApplied: false,
     },
+  });
+  await prisma.workspace.update({
+    where: { id: workspace.id },
+    data: { opsRepoId: repo.id },
   });
   const pr = await prisma.githubPullRequest.create({
     data: {
@@ -798,10 +829,10 @@ async function seedPrFixture(prisma) {
       previewUpdatedAt: new Date(),
     },
   });
-  return { repo, pr };
+  return { repo, pr, workspaceId: workspace.id, previousOpsRepoId: workspace.opsRepoId };
 }
 
-async function cleanupPrFixture(prisma) {
+async function cleanupPrFixture(prisma, fixture = null) {
   // approval_records / apply_jobs は cascade で削除されるが、fixture 自体は明示的に消す。
   const repo = await prisma.githubRepo
     .findUnique({
@@ -810,6 +841,18 @@ async function cleanupPrFixture(prisma) {
     })
     .catch(() => null);
   if (!repo) return;
+  if (fixture?.workspaceId) {
+    await prisma.workspace
+      .update({
+        where: { id: fixture.workspaceId },
+        data: { opsRepoId: fixture.previousOpsRepoId ?? null },
+      })
+      .catch(() => undefined);
+  } else {
+    await prisma.workspace
+      .updateMany({ where: { opsRepoId: repo.id }, data: { opsRepoId: null } })
+      .catch(() => undefined);
+  }
   await prisma.githubPullRequest
     .deleteMany({ where: { repoId: repo.id } })
     .catch(() => undefined);
@@ -1260,11 +1303,10 @@ async function runBrowserFlows() {
 
   let cdp = null;
   let page = null;
-  let seeded = false;
+  let fixture = null;
   let cronSnapshot = null;
   try {
-    await seedPrFixture(prisma);
-    seeded = true;
+    fixture = await seedPrFixture(prisma);
     cronSnapshot = await snapshotGithubPollSchedule(prisma);
 
     cdp = await attachCdp(chrome.wsUrl);
@@ -1290,8 +1332,8 @@ async function runBrowserFlows() {
     console.error(`FAIL browser-flow-runtime: ${reason}`);
   } finally {
     try { if (cdp) cdp.close(); } catch { /* ignore */ }
-    if (seeded) {
-      await cleanupPrFixture(prisma).catch(() => undefined);
+    if (fixture) {
+      await cleanupPrFixture(prisma, fixture).catch(() => undefined);
     }
     if (cronSnapshot) {
       await restoreGithubPollSchedule(prisma, cronSnapshot).catch(() => undefined);
