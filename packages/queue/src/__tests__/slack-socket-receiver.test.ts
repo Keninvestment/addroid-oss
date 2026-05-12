@@ -8,8 +8,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  SLACK_AGENT_JOB_NAME,
   SLACK_COMMAND_JOB_NAME,
   startSlackSocketReceiver,
+  type SlackAgentJobPayload,
   type SlackCommandBoss,
   type SlackCommandJobPayload,
   type SlackCommandSendOptions,
@@ -517,6 +519,54 @@ test("startSlackSocketReceiver: 未対応 type (events_api 等) の envelope は
   const ack = JSON.parse(ch.sentMessages[0]!);
   assert.equal(ack.envelope_id, "env-evt");
   assert.equal(ack.payload, undefined, "未対応 type は payload 無し ack");
+
+  await handle.stop();
+});
+
+test("startSlackSocketReceiver: app_mention events_api を即時 ack して slack_agent に enqueue する", async () => {
+  const boss = new CapturingBoss();
+  const { opener, channels } = makeFakeOpener();
+  const handle = await startSlackSocketReceiver({
+    installationLoader: async () => VALID_INSTALLATION(),
+    urlOpener: makeUrlOpener(),
+    channelOpener: opener,
+    boss,
+  });
+  await flush();
+  const ch = channels[0]!;
+  ch.fire.onMessage(helloEnvelope());
+
+  ch.fire.onMessage(
+    JSON.stringify({
+      envelope_id: "env-mention",
+      type: "events_api",
+      payload: {
+        type: "event_callback",
+        team_id: "T012ABC",
+        event: {
+          type: "app_mention",
+          user: "U012ABC",
+          channel: "C012ABC",
+          text: "<@U0BOT> 昨日のレポートを出して",
+          ts: "1710000000.000100",
+        },
+      },
+    })
+  );
+  await flush();
+
+  assert.equal(ch.sentMessages.length, 1);
+  const ack = JSON.parse(ch.sentMessages[0]!);
+  assert.equal(ack.envelope_id, "env-mention");
+  assert.equal(ack.payload, undefined);
+  assert.equal(boss.sent.length, 1);
+  assert.equal(boss.sent[0]!.name, SLACK_AGENT_JOB_NAME);
+  const payload = boss.sent[0]!.data as SlackAgentJobPayload;
+  assert.equal(payload.text, "昨日のレポートを出して");
+  assert.equal(payload.eventType, "app_mention");
+  assert.equal(payload.slackUserId, "U012ABC");
+  assert.equal(payload.slackChannelId, "C012ABC");
+  assert.equal(payload.threadTs, "1710000000.000100");
 
   await handle.stop();
 });

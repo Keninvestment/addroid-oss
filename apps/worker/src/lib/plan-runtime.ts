@@ -28,7 +28,7 @@ import {
   type ValidationFinding,
 } from "@addroid/yaml-schemas";
 
-export type PlanRunSource = "web" | "web-chat" | "agent-task" | "ci" | "cli";
+export type PlanRunSource = "web" | "web-chat" | "slack-chat" | "agent-task" | "ci" | "cli";
 
 export interface PlanCounts {
   creates: number;

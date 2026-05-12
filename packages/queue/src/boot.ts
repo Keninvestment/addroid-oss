@@ -11,6 +11,7 @@ import {
   APPLY_JOB_NAME,
   SCHEDULED_TASK_JOB_NAME,
 } from "./presets.js";
+import { SLACK_AGENT_JOB_NAME } from "./slack-agent.js";
 import { SLACK_COMMAND_JOB_NAME } from "./slack-command.js";
 
 export interface BootOptions {
@@ -36,6 +37,7 @@ export const RUNTIME_QUEUE_NAMES = [
   SCHEDULED_TASK_JOB_NAME,
   AUTOMATION_RULE_JOB_NAME,
   SLACK_COMMAND_JOB_NAME,
+  SLACK_AGENT_JOB_NAME,
 ] as const;
 
 /**

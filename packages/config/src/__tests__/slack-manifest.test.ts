@@ -5,8 +5,10 @@
 //   - Socket Mode が有効化されていること (public な request URL を持たない)
 //   - /adops slash command が登録され、the current implementation の 6 サブコマンドが usage_hint に
 //     列挙されていること
-//   - 必須 bot scopes (chat:write, commands, channels:read, users:read) が宣言されて
+//   - 必須 bot scopes (chat:write, commands, app_mentions:read, im:history,
+//     channels:read, users:read) が宣言されて
 //     いること
+//   - @AdDroid メンション / DM の bot events が登録されていること
 //   - interactivity が有効化されていること (request_url を伴わない)
 //   - workspace display name のプレースホルダがレンダリング後に消えていること
 //   - YAML / JSON 双方の表現を返すこと
@@ -105,6 +107,13 @@ test("Slack manifest は the current implementation 必須の bot scopes をす�
       `bot scope ${required} should be declared`
     );
   }
+});
+
+test("Slack manifest は @AdDroid メンションと DM の bot events を登録している", () => {
+  const built = buildSlackAppManifest(SAMPLE_INPUT);
+  const events = built.manifest.settings.event_subscriptions?.bot_events ?? [];
+  assert.ok(events.includes("app_mention"));
+  assert.ok(events.includes("message.im"));
 });
 
 test("Slack manifest は interactivity を有効化している (request URL を伴わない)", () => {

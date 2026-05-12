@@ -8,10 +8,11 @@
 # AdDroid は localhost / outbound-only で稼働するため、以下を厳守します:
 #   - Socket Mode のみ。public な request URL / 公開ドメイン / SSL 証明書 /
 #     トンネリング (ngrok 等) は一切要求しません。
-#   - /adops slash command は Socket Mode 経由でルーティングされるため
+#   - @AdDroid メンション / DM / /adops slash command は Socket Mode 経由でルーティングされるため
 #     `url:` フィールドを持ちません。
 #   - Interactivity も Socket Mode 経由のため `request_url` を持ちません。
-#   - bot scopes は最小集合のみ: chat:write, commands, channels:read, users:read。
+#   - bot scopes は最小集合のみ: chat:write, commands, app_mentions:read,
+#     im:history, channels:read, users:read。
 #   - サブコマンド: report / budget / improve / status / accounts / activate <act_id>
 #     いずれも 3 秒以内 ack → pg-boss にキュー → response_url で返信の契約。
 #
@@ -24,12 +25,12 @@ display_information:
     AdDroid OSS is a self-hosted, localhost-only operator console that manages Meta ad
     operations as GitOps. This Slack app is OPTIONAL. When connected, AdDroid sends
     outbound notifications (PR opened, daily report, budget guard alerts, improvement
-    PR opened, apply completed/failed, rate limit warnings, auth revoked) and exposes
-    a short /adops slash command (report / budget / improve / status / accounts /
-    activate). Every slash command is acked within 3 seconds and processed
-    asynchronously by AdDroid's local pg-boss worker, with results delivered via
-    response_url. AdDroid uses Socket Mode exclusively and never requires a public
-    webhook, request URL, or tunneling service.
+    PR opened, apply completed/failed, rate limit warnings, auth revoked), accepts
+    natural-language requests via @AdDroid mentions and DMs, and exposes a short
+    /adops slash command (report / budget / improve / status / accounts / activate).
+    Slack events are acked within 3 seconds and processed asynchronously by
+    AdDroid's local pg-boss worker. AdDroid uses Socket Mode exclusively and never
+    requires a public webhook, request URL, or tunneling service.
   background_color: "#18181b"
 features:
   bot_user:
@@ -45,10 +46,16 @@ oauth_config:
     bot:
       - chat:write
       - commands
+      - app_mentions:read
+      - im:history
       - channels:read
       - users:read
 settings:
   socket_mode_enabled: true
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

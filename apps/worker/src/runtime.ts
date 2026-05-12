@@ -9,6 +9,7 @@ import {
   AUTOMATION_RULE_JOB_NAME,
   CRON_PRESETS,
   SCHEDULED_TASK_JOB_NAME,
+  SLACK_AGENT_JOB_NAME,
   SLACK_COMMAND_JOB_NAME,
   bootPgBoss,
   buildAdAccountLockKey,
@@ -36,6 +37,7 @@ import {
   type JsonValue,
   type RetentionSweepSummary,
   type SlackCommandJobPayload,
+  type SlackAgentJobPayload,
 } from "@addroid/queue";
 import type PgBoss from "pg-boss";
 import { prisma, type PrismaClient } from "@addroid/db";
@@ -98,7 +100,11 @@ import { refreshLatestInsightsForManualImprovementPr } from "./lib/improvement-p
 import { createPrismaPerformanceSnapshotRetentionStore } from "./lib/retention-runtime.js";
 import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
 import { selectImageProviderForWorker } from "./lib/image-runtime.js";
-import { startSlackSocketRuntime } from "./lib/slack-socket-runtime.js";
+import {
+  loadSlackInstallation,
+  startSlackSocketRuntime,
+} from "./lib/slack-socket-runtime.js";
+import { runSlackAgentJob } from "./lib/slack-agent-runtime.js";
 import type { SlackSocketReceiverHandle } from "@addroid/queue";
 import {
   rescheduleEnabledAgentTasks,
@@ -1406,6 +1412,44 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     }
   });
 
+  await boss.work(SLACK_AGENT_JOB_NAME, async (jobs) => {
+    for (const job of jobs) {
+      const payload = job.data as SlackAgentJobPayload;
+      try {
+        const installation = await loadSlackInstallation({
+          prisma,
+          logger: {
+            info: (msg) => log.info(msg),
+            warn: (msg) => log.warn(msg),
+            error: (msg) => log.error(msg),
+          },
+        });
+        if (!installation) {
+          log.warn("[worker] slack_agent skipped: Slack installation is not configured.");
+          continue;
+        }
+        const result = await runSlackAgentJob({
+          payload,
+          prisma,
+          workspaceId: workspace.id,
+          provider: llmSelection.provider,
+          boss,
+          botToken: installation.botToken,
+          githubAdapter: getGithubAdapter(),
+          ...(webBaseUrl ? { webUrl: webBaseUrl } : {}),
+        });
+        log.info(
+          `[worker] slack_agent ${payload.eventType} ${payload.slackChannelId}: ${result.status}` +
+            ` (postedProcessing=${result.postedProcessing}, postedFinal=${result.postedFinal}, durationMs=${result.durationMs})`
+        );
+      } catch (err) {
+        log.warn(
+          `[worker] slack_agent crashed: ${(err as Error).message}`
+        );
+      }
+    }
+  });
+
   // regression fix / the current implementation: Slack Socket Mode `/adops` 受信機を起動する。
   // Slack 連携は完全に任意なので、`startSlackSocketRuntime` は token 未設定 /
   // ENCRYPTION_KEY 未設定 / 復号失敗のいずれの場合も `null` を返し、worker は
@@ -1440,7 +1484,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   }
 
   log.info(
-    `[worker] ready. registered ${CRON_PRESETS.length} cron preset(s), execute_apply receiver, slack_command receiver.`
+    `[worker] ready. registered ${CRON_PRESETS.length} cron preset(s), execute_apply receiver, slack_command receiver, slack_agent receiver.`
   );
 
   let stopping = false;

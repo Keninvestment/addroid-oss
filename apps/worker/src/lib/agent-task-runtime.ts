@@ -12,6 +12,7 @@ import {
   CRON_PRESETS,
   SCHEDULED_TASK_JOB_NAME,
   resolveCronScheduleTimeZone,
+  scheduleCron,
   validateCronExpression,
   type CronPresetName,
 } from "@addroid/queue";
@@ -20,6 +21,7 @@ import {
   createPrismaPlanStore,
   persistPlanRun,
   runPlanForRoot,
+  type PlanRunSource,
 } from "./plan-runtime.js";
 import { runMetaAdsReadOnlyQuery } from "./meta-ads-readonly-runtime.js";
 import {
@@ -34,6 +36,14 @@ import {
   ensureOpsRepoLocalCheckout,
   resolveOpsRepoLocalDirForWorkspace,
 } from "./ops-repo-local.js";
+import {
+  createOrReuseAgentTask,
+  normalizeAgentTaskPrompt,
+} from "./agent-task-store.js";
+import {
+  saveBudgetGuardPolicyConfig,
+  type BudgetGuardPolicyConfigInput,
+} from "./budget-guard-policy-config.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
@@ -311,13 +321,15 @@ function computeNextRunAt(cron: string, currentDate = new Date()): Date {
     .toDate();
 }
 
-async function executeWorkerAgentTool(opts: {
+export async function executeWorkerAgentTool(opts: {
   tool: AgentToolResult;
   prisma: PrismaClient;
   workspaceId: string;
   boss: PgBoss;
   webUrl: string;
   githubAdapter?: GithubAdapter;
+  actor?: string;
+  source?: PlanRunSource;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
   const { tool } = opts;
   if (tool.status === "denied") {
@@ -347,6 +359,10 @@ async function executeWorkerAgentTool(opts: {
           data: { accounts },
         };
       }
+      case "select_ad_account":
+        return await selectDefaultAccount({ ...opts, tool: readyTool });
+      case "connect_service":
+        return connectServiceResult(readyTool.toolArgs, readyTool.display, opts.webUrl);
       case "get_report": {
         const preset = reportPreset(
           typeof readyTool.toolArgs.kind === "string" ? readyTool.toolArgs.kind : "daily"
@@ -355,7 +371,7 @@ async function executeWorkerAgentTool(opts: {
         const jobId = await opts.boss.send(preset, {
           ...(metricDate ? { metricDate } : {}),
           manual: true,
-          requestedBy: "agent:scheduled-task",
+          requestedBy: opts.actor ?? "agent:scheduled-task",
           requestedAt: new Date().toISOString(),
         });
         return {
@@ -365,10 +381,18 @@ async function executeWorkerAgentTool(opts: {
           data: { jobId },
         };
       }
+      case "create_scheduled_agent_task":
+        return await createScheduledAgentTask({ ...opts, tool: readyTool });
+      case "set_schedule_enabled":
+        return await setScheduleEnabled({ ...opts, tool: readyTool });
+      case "configure_budget_guard":
+        return await configureBudgetGuard({ ...opts, tool: readyTool });
       case "manage_schedule":
         return await manageSchedule({ ...opts, tool: readyTool });
       case "check_submission":
         return await runSubmissionCheck({ ...opts, tool: readyTool });
+      case "show_logs":
+        return await showRecentLogs({ ...opts, tool: readyTool });
       case "query_meta_ads": {
         const result = await runMetaAdsReadOnlyQuery({
           prisma: opts.prisma,
@@ -395,8 +419,8 @@ async function executeWorkerAgentTool(opts: {
           githubAdapter: opts.githubAdapter,
           workspaceId: opts.workspaceId,
           input: normalizeOpsProposalInput(readyTool.toolArgs),
-          actor: "agent:scheduled-task",
-          source: "scheduled-agent",
+          actor: opts.actor ?? "agent:scheduled-task",
+          source: opts.source ?? "scheduled-agent",
         });
         return {
           display: readyTool.display,
@@ -418,8 +442,8 @@ async function executeWorkerAgentTool(opts: {
           githubAdapter: opts.githubAdapter,
           workspaceId: opts.workspaceId,
           input: normalizeAutomationRuleProposalInput(readyTool.toolArgs),
-          actor: "agent:scheduled-task",
-          source: "scheduled-agent",
+          actor: opts.actor ?? "agent:scheduled-task",
+          source: opts.source ?? "scheduled-agent",
         });
         return {
           display: readyTool.display,
@@ -428,12 +452,6 @@ async function executeWorkerAgentTool(opts: {
           data: result,
         };
       }
-      case "connect_service":
-        return {
-          display: readyTool.display,
-          status: "unsupported",
-          message: "scheduled task から接続フローは実行しません。Web UI または CLI で接続してください。",
-        };
       default:
         return {
           display: readyTool.display,
@@ -459,11 +477,216 @@ function toolSignature(tool: AgentToolResult): string | null {
   }
 }
 
+async function selectDefaultAccount(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const key = readStringArg(opts.tool.toolArgs, "key");
+  const adAccountId = readStringArg(opts.tool.toolArgs, "adAccountId", "ad_account_id");
+  if (!key && !adAccountId) {
+    return {
+      display: opts.tool.display,
+      status: "unsupported",
+      message: "選択する広告アカウントが指定されていません。",
+    };
+  }
+  const account = await opts.prisma.adAccount.findFirst({
+    where: {
+      workspaceId: opts.workspaceId,
+      active: true,
+      ...(key ? { key } : { id: adAccountId ?? "" }),
+    },
+    select: { id: true, key: true, displayName: true, metaAccountId: true },
+  });
+  if (!account) {
+    return {
+      display: opts.tool.display,
+      status: "error",
+      message: "指定された広告アカウントが見つかりません。",
+    };
+  }
+  await opts.prisma.workspace.update({
+    where: { id: opts.workspaceId },
+    data: { defaultAdAccountId: account.id },
+  });
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: `${account.displayName} をデフォルト広告アカウントにしました。`,
+    data: { account },
+  };
+}
+
+function connectServiceResult(
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string
+): { display: string; status: string; message: string; data?: unknown } {
+  const service = typeof args.service === "string" ? args.service : "";
+  const path =
+    service === "meta"
+      ? "/accounts"
+      : service === "github"
+        ? "/github"
+        : service === "ai"
+          ? "/ai"
+          : "/setup";
+  return {
+    display,
+    status: "ok",
+    message: `${service || "service"} の接続画面を開いてください: ${webUrl}${path}`,
+    data: { url: `${webUrl}${path}` },
+  };
+}
+
+async function createScheduledAgentTask(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  boss: PgBoss;
+  actor?: string;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const prompt = readRequiredString(opts.tool.toolArgs.prompt, "prompt");
+  const cron = readRequiredString(opts.tool.toolArgs.cron, "cron");
+  const title = readStringArg(opts.tool.toolArgs, "title") ?? deriveAgentTaskTitle(prompt);
+  const validation = validateCronExpression(cron);
+  if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
+  const runNow = opts.tool.toolArgs.runNow === true;
+  const normalizedPrompt = normalizeAgentTaskPrompt(prompt);
+  const { task, created } = await createOrReuseAgentTask(opts.prisma as never, {
+    workspaceId: opts.workspaceId,
+    title,
+    prompt: normalizedPrompt,
+    cron,
+    nextRunAt: runNow ? new Date() : computeNextRunAt(cron),
+    createdBy: opts.actor ?? "agent:scheduled-task",
+  });
+  const scheduled = await scheduleAgentTaskNextRun({
+    prisma: opts.prisma,
+    boss: opts.boss,
+    workspaceId: opts.workspaceId,
+    taskId: task.id,
+  });
+  const queued = runNow
+    ? await enqueueAgentTaskNow({
+        boss: opts.boss,
+        taskId: task.id,
+        requestedBy: opts.actor ?? "agent:scheduled-task",
+      })
+    : null;
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: created
+      ? `Agent task を設定しました。次回実行: ${(scheduled?.nextRunAt ?? task.nextRunAt)?.toISOString() ?? "未定"}`
+      : `同じ Agent task が既にあるため再利用しました。次回実行: ${(scheduled?.nextRunAt ?? task.nextRunAt)?.toISOString() ?? "未定"}`,
+    data: { task, scheduled, queued, created },
+  };
+}
+
+function deriveAgentTaskTitle(prompt: string): string {
+  const first = prompt.replace(/\s+/g, " ").trim();
+  return first.length <= 40 ? first : `${first.slice(0, 39)}...`;
+}
+
+async function setScheduleEnabled(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  boss: PgBoss;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const preset = reportPreset(readRequiredString(opts.tool.toolArgs.preset, "preset"));
+  const presetDef = CRON_PRESETS.find((item) => item.name === preset);
+  const cron = readStringArg(opts.tool.toolArgs, "cron") ?? presetDef?.cron ?? "";
+  const enabled = opts.tool.toolArgs.enabled === true;
+  const validation = validateCronExpression(cron);
+  if (!validation.ok) throw new Error(`cron 式が不正です: ${validation.reason}`);
+  if (enabled) {
+    await scheduleCron(opts.boss as never, preset, cron);
+  } else {
+    await (opts.boss as unknown as { unschedule(name: string): Promise<void> })
+      .unschedule(preset)
+      .catch(() => undefined);
+  }
+  const row = await opts.prisma.cronSchedule.upsert({
+    where: { workspaceId_name: { workspaceId: opts.workspaceId, name: preset } },
+    update: { cron, enabled, nextRunAt: null },
+    create: { workspaceId: opts.workspaceId, name: preset, cron, enabled },
+    select: { name: true, cron: true, enabled: true },
+  });
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: `${preset} を ${enabled ? "ON" : "OFF"} にしました。cron=${cron}`,
+    data: row,
+  };
+}
+
+async function configureBudgetGuard(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  boss: PgBoss;
+  webUrl: string;
+  actor?: string;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const saved = await saveBudgetGuardPolicyConfig({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    input: normalizeBudgetGuardConfigInput(opts.tool.toolArgs),
+    actor: opts.actor ?? "agent:scheduled-task",
+    env: process.env,
+  });
+  const scheduleResult = await setScheduleEnabled({
+    tool: {
+      ...opts.tool,
+      toolArgs: {
+        preset: "budget",
+        cron: readStringArg(opts.tool.toolArgs, "cron") ?? undefined,
+        enabled: typeof opts.tool.toolArgs.enabled === "boolean" ? opts.tool.toolArgs.enabled : false,
+      },
+    },
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    boss: opts.boss,
+  });
+  return {
+    display: opts.tool.display,
+    status: scheduleResult.status === "ok" ? "ok" : "error",
+    message:
+      `予算チェックを保存しました。${scheduleResult.message} 確認: ${opts.webUrl}/budget`,
+    data: { saved, schedule: scheduleResult.data },
+  };
+}
+
+async function showRecentLogs(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const limit =
+    typeof opts.tool.toolArgs.lines === "number"
+      ? Math.max(1, Math.min(50, opts.tool.toolArgs.lines))
+      : 20;
+  const logs = await opts.prisma.executionLog.findMany({
+    orderBy: { createdAt: "desc" },
+    take: limit,
+    select: { createdAt: true, kind: true, level: true, message: true },
+  });
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: `${logs.length} 件の execution log を取得しました。`,
+    data: { logs },
+  };
+}
+
 async function manageSchedule(opts: {
   tool: Extract<AgentToolResult, { status: "ready" }>;
   prisma: PrismaClient;
   workspaceId: string;
   boss: PgBoss;
+  actor?: string;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
   const action =
     typeof opts.tool.toolArgs.action === "string" ? opts.tool.toolArgs.action : "list";
@@ -486,7 +709,7 @@ async function manageSchedule(opts: {
   if (action === "run") {
     const jobId = await opts.boss.send(preset, {
       manual: true,
-      requestedBy: "agent:scheduled-task",
+      requestedBy: opts.actor ?? "agent:scheduled-task",
       requestedAt: new Date().toISOString(),
     });
     return {
@@ -507,6 +730,8 @@ async function runSubmissionCheck(opts: {
   tool: Extract<AgentToolResult, { status: "ready" }>;
   prisma: PrismaClient;
   workspaceId: string;
+  actor?: string;
+  source?: PlanRunSource;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
   let rootDir =
     typeof opts.tool.toolArgs.root === "string" && opts.tool.toolArgs.root.trim()
@@ -545,8 +770,8 @@ async function runSubmissionCheck(opts: {
   const recorded = await persistPlanRun({
     store: createPrismaPlanStore(opts.prisma),
     workspaceId: opts.workspaceId,
-    source: "agent-task",
-    triggeredBy: "agent:scheduled-task",
+    source: opts.source ?? "agent-task",
+    triggeredBy: opts.actor ?? "agent:scheduled-task",
     rootDir,
     baseDir,
     accountFilter:
@@ -567,6 +792,52 @@ function readStringArg(args: Record<string, unknown>, ...keys: string[]): string
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return null;
+}
+
+function readRequiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} が指定されていません。`);
+  }
+  return value.trim();
+}
+
+function normalizeBudgetGuardConfigInput(
+  args: Record<string, unknown>
+): BudgetGuardPolicyConfigInput {
+  return {
+    accountKey: readStringArg(args, "accountKey", "account_key"),
+    dailyBudget: readNumberArg(args.dailyBudget, "dailyBudget"),
+    monthlyBudget: readNumberArg(args.monthlyBudget, "monthlyBudget"),
+    currency: readStringArg(args, "currency"),
+    dailyBudgetAlertRatio: readOptionalNumberArg(args.dailyBudgetAlertRatio),
+    monthlyPaceRatio: readOptionalNumberArg(args.monthlyPaceRatio),
+    dayOverDayRatio: readOptionalNumberArg(args.dayOverDayRatio),
+    noConversionsSpendMin: readOptionalNumberArg(args.noConversionsSpendMin),
+    autoPauseEnabled:
+      typeof args.autoPauseEnabled === "boolean" ? args.autoPauseEnabled : null,
+    autoPauseMinDailyBudgetRatio: readOptionalNumberArg(
+      args.autoPauseMinDailyBudgetRatio
+    ),
+    autoPauseMinDayOverDayRatio: readOptionalNumberArg(
+      args.autoPauseMinDayOverDayRatio
+    ),
+    safeCategories:
+      Array.isArray(args.safeCategories) || typeof args.safeCategories === "string"
+        ? (args.safeCategories as string[] | string)
+        : null,
+  };
+}
+
+function readNumberArg(value: unknown, label: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) throw new Error(`${label} は数値で指定してください。`);
+  return n;
+}
+
+function readOptionalNumberArg(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProposalInput {

@@ -334,6 +334,16 @@ export {
 } from "./slack-command.js";
 
 export {
+  SLACK_AGENT_JOB_NAME,
+  buildSlackAgentSingletonKey,
+  enqueueSlackAgentJob,
+  type EnqueueSlackAgentJobOptions,
+  type EnqueueSlackAgentJobResult,
+  type SlackAgentEventType,
+  type SlackAgentJobPayload,
+} from "./slack-agent.js";
+
+export {
   startSlackSocketReceiver,
   type SlackInstallation,
   type SlackInstallationLoader,

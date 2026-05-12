@@ -78,7 +78,7 @@ export async function startSlackSocketRuntime(
 // 1) Prisma → SlackInstallation loader (decrypt boundary)
 // ---------------------------------------------------------------------
 
-interface LoadInstallationOptions {
+export interface LoadInstallationOptions {
   prisma: PrismaClient;
   logger?: SlackSocketReceiverLogger;
 }
@@ -90,7 +90,7 @@ interface SlackInstallationMetadataShape {
   notificationChannelId?: unknown;
 }
 
-async function loadSlackInstallation(
+export async function loadSlackInstallation(
   opts: LoadInstallationOptions
 ): Promise<SlackInstallation | null> {
   const log = opts.logger;

@@ -5,6 +5,7 @@ import {
   getCryptoBoundary,
   openSocketModeConnection,
   postSlackMessage,
+  SlackApiError,
   validateSlackInputs,
   verifyBotToken,
 } from "@addroid/config";
@@ -22,6 +23,48 @@ interface Body {
 
 const TEST_MESSAGE =
   "AdDroid 接続テスト — Web UI から Slack 接続を保存しました。";
+
+type SlackConnectStage =
+  | "prepare"
+  | "workspace"
+  | "auth.test"
+  | "apps.connections.open"
+  | "chat.postMessage"
+  | "persist"
+  | "audit";
+
+function slackConnectErrorPayload(stage: SlackConnectStage, err: unknown) {
+  const message = (err as Error).message || "unknown error";
+  if (err instanceof SlackApiError) {
+    const suffix = err.slackError ? ` (${err.slackError})` : "";
+    return {
+      ok: false,
+      stage,
+      error: `${stage} に失敗しました${suffix}: ${message}`,
+      slackError: err.slackError,
+      httpStatus: err.status,
+    };
+  }
+  return { ok: false, stage, error: `${stage} に失敗しました: ${message}` };
+}
+
+function logSlackConnectFailure(stage: SlackConnectStage, err: unknown) {
+  if (err instanceof SlackApiError) {
+    console.error("[slack-connect] failed", {
+      stage,
+      endpoint: err.endpoint,
+      httpStatus: err.status,
+      slackError: err.slackError,
+      message: err.message,
+    });
+    return;
+  }
+  console.error("[slack-connect] failed", {
+    stage,
+    name: (err as Error).name,
+    message: (err as Error).message,
+  });
+}
 
 export async function POST(request: Request) {
   let payload: Body;
@@ -49,15 +92,18 @@ export async function POST(request: Request) {
     );
   }
 
+  let stage: SlackConnectStage = "prepare";
   try {
     const crypto = getCryptoBoundary(process.env);
+    stage = "workspace";
     const workspace = await ensureWebWorkspace();
-    const [authTest] = await Promise.all([
-      verifyBotToken(normalized.botToken),
-      openSocketModeConnection(normalized.appToken),
-    ]);
+    stage = "auth.test";
+    const authTest = await verifyBotToken(normalized.botToken);
+    stage = "apps.connections.open";
+    await openSocketModeConnection(normalized.appToken);
     let testMessageOkAt: Date | null = null;
     if (payload.sendTestMessage === true) {
+      stage = "chat.postMessage";
       await postSlackMessage(
         normalized.botToken,
         normalized.notificationChannelId,
@@ -72,6 +118,7 @@ export async function POST(request: Request) {
       socketModeOkAt: connectedAt,
       testMessageOkAt,
     }) as unknown as Prisma.InputJsonValue;
+    stage = "persist";
     await prisma.oAuthToken.upsert({
       where: {
         provider_accountIdentifier: {
@@ -98,6 +145,7 @@ export async function POST(request: Request) {
         metadata,
       },
     });
+    stage = "audit";
     await prisma.auditLog.create({
       data: {
         workspaceId: workspace.id,
@@ -123,8 +171,9 @@ export async function POST(request: Request) {
       testMessageSent: testMessageOkAt !== null,
     });
   } catch (err) {
+    logSlackConnectFailure(stage, err);
     return NextResponse.json(
-      { ok: false, error: (err as Error).message },
+      slackConnectErrorPayload(stage, err),
       { status: 502 }
     );
   }

@@ -766,6 +766,54 @@ button {
   font-weight: var(--weight-semibold);
 }
 
+.slack-manifest-card {
+  margin-top: var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.slack-manifest-card__head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.slack-manifest-card__title {
+  font-size: var(--size-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.slack-manifest-card .kv {
+  grid-template-columns: minmax(118px, max-content) 1fr;
+}
+
+.slack-manifest-card .mono {
+  font-family: var(--font-mono);
+  font-size: var(--size-xs);
+}
+
+.slack-manifest-card__details {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.slack-manifest-card__details summary {
+  cursor: pointer;
+  color: var(--color-accent);
+  font-size: var(--size-sm);
+  font-weight: var(--weight-medium);
+}
+
+.slack-manifest-card__details .code-block {
+  max-height: 420px;
+}
+
 .setup-guide__steps a {
   color: var(--color-accent);
   text-decoration: none;

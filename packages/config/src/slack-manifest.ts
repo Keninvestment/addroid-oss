@@ -18,12 +18,16 @@ import YAML from "yaml";
  * AdDroid Slack app に必要な bot scopes (the current implementation)。
  *  - chat:write     : 通知メッセージを送信
  *  - commands       : /adops slash command の登録
+ *  - app_mentions:read : @AdDroid メンションを Socket Mode で受信
+ *  - im:history     : AdDroid App DM を Socket Mode で受信
  *  - channels:read  : 通知先チャンネル名解決
  *  - users:read     : actor 表示用に Slack user 情報を解決
  */
 export const SLACK_BOT_SCOPES = [
   "chat:write",
   "commands",
+  "app_mentions:read",
+  "im:history",
   "channels:read",
   "users:read",
 ] as const;
@@ -89,7 +93,7 @@ export interface SlackAppManifest {
   settings: {
     socket_mode_enabled: boolean;
     interactivity?: { is_enabled: boolean; request_url?: string };
-    event_subscriptions?: { request_url?: string };
+    event_subscriptions?: { request_url?: string; bot_events?: string[] };
     org_deploy_enabled?: boolean;
     token_rotation_enabled?: boolean;
   };

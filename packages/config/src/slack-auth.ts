@@ -515,6 +515,11 @@ export interface SlackPostMessageResponse {
   ts: string;
 }
 
+export interface SlackPostMessageOptions {
+  threadTs?: string;
+  fetchImpl?: SlackFetch;
+}
+
 /**
  * `chat.postMessage` でテストメッセージを送信する。失敗 (channel_not_found 等)
  * は `SlackApiError` で throw される。
@@ -523,8 +528,14 @@ export async function postSlackMessage(
   botToken: string,
   channelId: string,
   text: string,
-  fetchImpl: SlackFetch = (globalThis as { fetch?: SlackFetch }).fetch as SlackFetch
+  optionsOrFetch: SlackFetch | SlackPostMessageOptions = {}
 ): Promise<SlackPostMessageResponse> {
+  const options =
+    typeof optionsOrFetch === "function"
+      ? { fetchImpl: optionsOrFetch }
+      : optionsOrFetch;
+  const fetchImpl =
+    options.fetchImpl ?? ((globalThis as { fetch?: SlackFetch }).fetch as SlackFetch);
   if (typeof fetchImpl !== "function") {
     throw new SlackApiError(
       "chat.postMessage",
@@ -536,7 +547,11 @@ export async function postSlackMessage(
   return await callSlackApi<SlackPostMessageResponse>(
     "chat.postMessage",
     botToken,
-    { channel: channelId, text },
+    {
+      channel: channelId,
+      text,
+      ...(options.threadTs ? { thread_ts: options.threadTs } : {}),
+    },
     fetchImpl
   );
 }

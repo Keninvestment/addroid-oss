@@ -1,9 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import {
+  buildSlackAppManifest,
   homeAnchorPath,
+  readAddroidConfig,
   resolveAddroidPaths,
   resolveWebBinding,
+  type BuiltSlackAppManifest,
   type SlackInstallationMetadata,
 } from "@addroid/config";
 import { prisma } from "../../lib/prisma";
@@ -26,9 +29,43 @@ interface DoctorCheck {
   hint?: string;
 }
 
+interface SlackManifestPreview {
+  built: BuiltSlackAppManifest | null;
+  yaml: string;
+  error: string | null;
+}
+
+function buildSlackManifestPreview(
+  repoRoot: string,
+  workspaceDisplayName: string
+): SlackManifestPreview {
+  try {
+    const built = buildSlackAppManifest({ workspaceDisplayName });
+    return { built, yaml: built.yaml, error: null };
+  } catch (err) {
+    let fallbackYaml = "";
+    try {
+      fallbackYaml = fs.readFileSync(
+        path.join(repoRoot, "templates/slack-app-manifest.yaml"),
+        "utf8"
+      );
+    } catch {
+      // Keep the original manifest error visible; the raw fallback is only a display aid.
+    }
+    return {
+      built: null,
+      yaml: fallbackYaml,
+      error: (err as Error).message,
+    };
+  }
+}
+
 export default async function SetupPage() {
   const pageDisplayTimeZone = resolveDisplayTimeZone();
   const paths = resolveAddroidPaths();
+  const repoRoot = process.cwd().includes("/apps/web")
+    ? path.resolve(process.cwd(), "../..")
+    : process.cwd();
   const binding = (() => {
     try {
       return resolveWebBinding();
@@ -36,6 +73,14 @@ export default async function SetupPage() {
       return { hostname: "127.0.0.1", port: 3000 };
     }
   })();
+  const workspaceDisplayName = await readAddroidConfig()
+    .then((config) => config?.workspace.displayName ?? "Default Workspace")
+    .catch(() => "Default Workspace");
+  const slackManifestPreview = buildSlackManifestPreview(repoRoot, workspaceDisplayName);
+  const slackManifest = slackManifestPreview.built?.manifest ?? null;
+  const slackSlashCommand = slackManifest?.features.slash_commands?.[0] ?? null;
+  const slackBotScopes = slackManifest?.oauth_config.scopes.bot ?? [];
+  const slackBotEvents = slackManifest?.settings.event_subscriptions?.bot_events ?? [];
 
   // 直近 doctor 結果を表示。`addroid doctor` は実行のたびに doctor_results に
   // 1 行追記するので、最新行を取り出して状態と詳細を提示する。未実行 (DB 行なし) の
@@ -125,9 +170,6 @@ export default async function SetupPage() {
   })();
 
   // OSS リリース衛生チェック (UI 内で読み取り可能なものだけ判定する)
-  const repoRoot = process.cwd().includes("/apps/web")
-    ? path.resolve(process.cwd(), "../..")
-    : process.cwd();
   const securityChecks: DoctorCheck[] = [
     {
       name: "この端末だけで開ける",
@@ -362,8 +404,94 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                     を開き、<InlineCode>Create New App</InlineCode> から
                     <InlineCode>From an app manifest</InlineCode> を選びます。
                     マニフェストは <InlineCode>templates/slack-app-manifest.yaml</InlineCode>
-                    の内容を貼り付けます。
+                    の内容を YAML 入力欄に貼り付けます。
                   </p>
+                  <div className="slack-manifest-card">
+                    <div className="slack-manifest-card__head">
+                      <div>
+                        <div className="slack-manifest-card__title">
+                          Slack に貼り付けるマニフェスト
+                        </div>
+                        <p>
+                          下の内容を Slack の <InlineCode>From an app manifest</InlineCode>
+                          の YAML 入力欄にそのまま貼り付けます。JSON 入力欄ではありません。
+                          ワークスペース名は
+                          <InlineCode>{workspaceDisplayName}</InlineCode> として展開済みです。
+                        </p>
+                      </div>
+                      <StatusBadge state={slackManifestPreview.error ? "warn" : "ok"}>
+                        {slackManifestPreview.error ? "TEMPLATE" : "READY"}
+                      </StatusBadge>
+                    </div>
+                    <KeyValueList
+                      items={[
+                        {
+                          label: "作られるアプリ",
+                          value: slackManifest?.display_information.name ?? "AdDroid",
+                        },
+                        {
+                          label: "接続方式",
+                          value: slackManifest?.settings.socket_mode_enabled
+                            ? "Socket Mode のみ。公開URL / ngrok / request URL は不要です。"
+                            : "テンプレートを確認してください。",
+                        },
+                        {
+                          label: "Slash command",
+                          value: slackSlashCommand ? (
+                            <span>
+                              <InlineCode>{slackSlashCommand.command}</InlineCode>{" "}
+                              {slackSlashCommand.usage_hint}
+                            </span>
+                          ) : (
+                            "—"
+                          ),
+                        },
+                        {
+                          label: "Slack からの起動",
+                          value:
+                            slackBotEvents.length > 0 ? (
+                              <span>
+                                <InlineCode>@AdDroid</InlineCode> メンション / DM を受信します
+                                <span className="mono"> ({slackBotEvents.join(", ")})</span>
+                              </span>
+                            ) : (
+                              "—"
+                            ),
+                        },
+                        {
+                          label: "Bot scopes",
+                          value:
+                            slackBotScopes.length > 0 ? (
+                              <span className="mono">{slackBotScopes.join(", ")}</span>
+                            ) : (
+                              "—"
+                            ),
+                        },
+                        {
+                          label: "Interactivity",
+                          value: slackManifest?.settings.interactivity?.is_enabled
+                            ? "有効。Socket Mode 経由なので request_url は空のままです。"
+                            : "—",
+                        },
+                      ]}
+                    />
+                    {slackManifestPreview.error ? (
+                      <div className="setup-guide__note">
+                        マニフェストの検証で警告が出ています: {slackManifestPreview.error}
+                      </div>
+                    ) : null}
+                    <details className="slack-manifest-card__details" open>
+                      <summary>YAML 入力欄に貼り付ける内容を表示</summary>
+                      {slackManifestPreview.yaml ? (
+                        <CodeBlock>{slackManifestPreview.yaml}</CodeBlock>
+                      ) : (
+                        <EmptyState
+                          title="マニフェストを読み込めません"
+                          description="templates/slack-app-manifest.yaml が存在するか確認してください。"
+                        />
+                      )}
+                    </details>
+                  </div>
                 </div>
               </li>
               <li>
@@ -396,7 +524,9 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                   <p>
                     Slack のチャンネル詳細からチャンネルIDをコピーします。
                     <InlineCode>C</InlineCode> や <InlineCode>G</InlineCode> で始まる値です。
-                    そのチャンネルに AdDroid のBotも追加してください。
+                    そのチャンネルで <InlineCode>/invite @AdDroid</InlineCode> を実行し、
+                    AdDroid のBotも追加してください。Bot が未参加だとテスト送信は
+                    <InlineCode>not_in_channel</InlineCode> で失敗します。
                   </p>
                 </div>
               </li>

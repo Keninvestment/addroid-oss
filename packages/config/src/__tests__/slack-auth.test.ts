@@ -345,6 +345,24 @@ test("postSlackMessage はチャンネル ID と本文を body に含める", as
   assert.equal(out.channel, VALID.notificationChannelId);
 });
 
+test("postSlackMessage は thread_ts を body に含められる", async () => {
+  const fetch = fakeFetch(
+    {
+      url: /\/chat\.postMessage$/,
+      tokenStartsWith: "xoxb-",
+      bodyIncludes: "123.456",
+    },
+    { payload: { ok: true, channel: VALID.notificationChannelId, ts: "1.0" } }
+  );
+  const out = await postSlackMessage(
+    VALID.botToken,
+    VALID.notificationChannelId,
+    "hello",
+    { threadTs: "123.456", fetchImpl: fetch }
+  );
+  assert.equal(out.channel, VALID.notificationChannelId);
+});
+
 test("postSlackMessage の channel_not_found は SlackApiError で返る", async () => {
   const fetch = fakeFetch(
     { url: /\/chat\.postMessage$/, tokenStartsWith: "xoxb-" },

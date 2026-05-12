@@ -50,6 +50,11 @@ import {
   type SlackCommandBoss,
   type SlackResponseFetch,
 } from "./slack-command.js";
+import {
+  enqueueSlackAgentJob,
+  type SlackAgentEventType,
+  type SlackAgentJobPayload,
+} from "./slack-agent.js";
 
 // ---------------------------------------------------------------------
 // 1) Public types
@@ -393,9 +398,53 @@ export async function startSlackSocketReceiver(
       return;
     }
 
+    if (type === "events_api") {
+      void handleEventsApiEnvelope(envelopeId, obj);
+      return;
+    }
+
     // 未対応の type (events_api / interactive / etc.) は ack だけ返して payload は無視。
     // Slack 側の再送ストームを避けるため必ず ack する。
     ackEnvelope(envelopeId);
+  };
+
+  const handleEventsApiEnvelope = async (
+    envelopeId: string,
+    obj: Record<string, unknown>
+  ): Promise<void> => {
+    const seenBefore = rememberEnvelope(envelopeId);
+    ackEnvelope(envelopeId);
+    if (seenBefore) {
+      log.info(
+        `[slack-socket] duplicate events_api envelope_id=${envelopeId} — re-acked without enqueue`
+      );
+      return;
+    }
+
+    const payload = asRecord(obj["payload"]);
+    if (!payload) return;
+    if (readString(payload, "type") !== "event_callback") return;
+    const event = asRecord(payload["event"]);
+    if (!event) return;
+
+    const normalized = normalizeAgentEvent(event, payload, installation);
+    if (!normalized) return;
+
+    try {
+      const result = await enqueueSlackAgentJob({
+        boss: opts.boss,
+        payload: normalized,
+      });
+      if (result.jobId === null) {
+        log.info(
+          `[slack-socket] slack_agent rejected by singletonKey (${result.singletonKey})`
+        );
+      }
+    } catch (err) {
+      log.error(
+        `[slack-socket] slack_agent enqueue failed (envelope_id=${envelopeId}): ${(err as Error).message}`
+      );
+    }
   };
 
   const handleSlashCommandEnvelope = async (
@@ -566,4 +615,75 @@ function normalizeSlashRequest(
   const triggerId = str("trigger_id");
   if (triggerId) out.trigger_id = triggerId;
   return out;
+}
+
+function normalizeAgentEvent(
+  event: Record<string, unknown>,
+  payload: Record<string, unknown>,
+  installation: SlackInstallation | null
+): Omit<SlackAgentJobPayload, "enqueuedAt"> | null {
+  const eventType = resolveAgentEventType(event);
+  if (!eventType) return null;
+  if (readString(event, "bot_id")) return null;
+  if (readString(event, "subtype")) return null;
+
+  const userId = readString(event, "user");
+  if (!userId || userId === installation?.botUserId) return null;
+  const channelId = readString(event, "channel");
+  const eventTs = readString(event, "ts");
+  if (!channelId || !eventTs) return null;
+
+  const rawText = readString(event, "text");
+  const text = eventType === "app_mention"
+    ? stripBotMention(rawText, installation?.botUserId)
+    : rawText.trim();
+  if (!text) return null;
+
+  const threadTs = readString(event, "thread_ts") || eventTs;
+  const teamId = readString(payload, "team_id") || installation?.teamId || "";
+  const userName = readString(event, "username");
+  return {
+    text,
+    slackUserId: userId,
+    ...(userName ? { slackUserName: userName } : {}),
+    slackChannelId: channelId,
+    ...(teamId ? { slackTeamId: teamId } : {}),
+    threadTs,
+    eventTs,
+    eventType,
+  };
+}
+
+function resolveAgentEventType(
+  event: Record<string, unknown>
+): SlackAgentEventType | null {
+  const type = readString(event, "type");
+  if (type === "app_mention") return "app_mention";
+  if (type === "message" && readString(event, "channel_type") === "im") {
+    return "message.im";
+  }
+  return null;
+}
+
+function stripBotMention(text: string, botUserId?: string): string {
+  let out = text;
+  if (botUserId) {
+    out = out.replace(new RegExp(`<@${escapeRegExp(botUserId)}>`, "gu"), "");
+  }
+  return out.replace(/<@[A-Z0-9]+>/gu, "").trim();
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readString(obj: Record<string, unknown>, key: string): string {
+  const value = obj[key];
+  return typeof value === "string" ? value : "";
 }
