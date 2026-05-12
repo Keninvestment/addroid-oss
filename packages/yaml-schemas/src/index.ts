@@ -172,6 +172,7 @@ export const CronEntrySchema = z
       "github_poll",
       "daily_report",
       "today_report",
+      "budget_guard",
       "improvement_pr",
       "retention_sweep",
     ]),

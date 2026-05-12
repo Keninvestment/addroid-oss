@@ -5,10 +5,12 @@ import { StatusBadge } from "../../components/ui/StatusBadge";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { BootstrapOpsRepoButton } from "./BootstrapOpsRepoButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,7 @@ interface SearchParamsInput {
   oauth?: string | string[];
   bootstrap?: string | string[];
   reason?: string | string[];
+  prsPage?: string | string[];
 }
 
 function single(v: string | string[] | undefined): string | undefined {
@@ -43,9 +46,13 @@ export default async function GithubPage({
   let oauth: OAuthRow[] = [];
   let repos: RepoRow[] = [];
   let prs: PrRow[] = [];
+  let prsTotal = 0;
   let dbReady = true;
   try {
     const workspace = await ensureWebWorkspace();
+    const prsWhere = { repo: { workspace: { is: { id: workspace.id } } } };
+    prsTotal = await prisma.githubPullRequest.count({ where: prsWhere });
+    const prsPagination = getPaginationState(resolvedSearchParams, "prsPage", prsTotal);
     [oauth, repos, prs] = await Promise.all([
       prisma.oAuthToken.findMany({
         where: { provider: "github" },
@@ -65,9 +72,10 @@ export default async function GithubPage({
         },
       }),
       prisma.githubPullRequest.findMany({
-        where: { repo: { workspace: { is: { id: workspace.id } } } },
+        where: prsWhere,
         orderBy: { polledAt: "desc" },
-        take: 50,
+        skip: prsPagination.skip,
+        take: prsPagination.take,
         select: { id: true, number: true, title: true, state: true, headSha: true, mergedAt: true, polledAt: true },
       }),
     ]);
@@ -90,6 +98,7 @@ export default async function GithubPage({
   const reasonQuery = single(resolvedSearchParams?.reason);
   const banner = renderBanner(oauthQuery, bootstrapQuery, reasonQuery);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const prsPagination = getPaginationState(resolvedSearchParams, "prsPage", prsTotal);
 
   return (
     <>
@@ -179,17 +188,18 @@ export default async function GithubPage({
           )}
         </Panel>
 
-        <Panel title="承認待ち・承認済みの変更" subtitle={`${prs.length} 件`}>
-          <DataTable
-            rows={prs}
-            rowKey={(row) => row.id}
-            empty={
-              <EmptyState
-                title="追跡中の Pull Request はまだありません。"
-                description="AdDroid がGitHubに承認待ちの変更を作成すると、ここに表示されます。"
-              />
-            }
-            columns={[
+        <Panel title="承認待ち・承認済みの変更" subtitle={paginationLabel(prsPagination)}>
+          <div>
+            <DataTable
+              rows={prs}
+              rowKey={(row) => row.id}
+              empty={
+                <EmptyState
+                  title="追跡中の Pull Request はまだありません。"
+                  description="AdDroid がGitHubに承認待ちの変更を作成すると、ここに表示されます。"
+                />
+              }
+              columns={[
               { header: "#", cell: (row) => `#${row.number}`, className: "tabular mono", headerClassName: "tabular" },
               { header: "内容", cell: (row) => row.title },
               {
@@ -215,8 +225,15 @@ export default async function GithubPage({
                 className: "tabular mono",
                 headerClassName: "tabular",
               },
-            ]}
-          />
+              ]}
+            />
+            <Pagination
+              basePath="/github"
+              searchParams={resolvedSearchParams}
+              pageParam="prsPage"
+              state={prsPagination}
+            />
+          </div>
         </Panel>
       </div>
     </>

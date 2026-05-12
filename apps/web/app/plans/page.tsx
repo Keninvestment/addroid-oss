@@ -13,6 +13,7 @@ import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { EmptyState } from "../../components/ui/EmptyState";
+import { Pagination } from "../../components/ui/Pagination";
 import { InlineCode } from "../../components/ui/CodeBlock";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { AdhocPlanForm } from "./AdhocPlanForm";
@@ -20,6 +21,7 @@ import { PlanHistoryRow } from "./PlanHistoryRow";
 import type { PlanRunPayloadJson } from "../../../worker/src/lib/plan-runtime";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/meta-runtime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -39,11 +41,21 @@ interface RawLogRow {
   payload: unknown;
 }
 
-export default async function PlansPage() {
+interface SearchParamsInput {
+  historyPage?: string | string[];
+}
+
+export default async function PlansPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   let dbReady = true;
   let accounts: AccountRow[] = [];
   let defaultAdAccountId: string | null = null;
   let logs: RawLogRow[] = [];
+  let logsTotal = 0;
 
   try {
     const currentWorkspace = await ensureWebWorkspace();
@@ -53,6 +65,13 @@ export default async function PlansPage() {
     });
     if (ws) {
       defaultAdAccountId = ws.defaultAdAccountId ?? null;
+      const logsWhere = { workspaceId: currentWorkspace.id, kind: "plan" };
+      logsTotal = await prisma.executionLog.count({ where: logsWhere });
+      const historyPagination = getPaginationState(
+        resolvedSearchParams,
+        "historyPage",
+        logsTotal
+      );
       [accounts, logs] = await Promise.all([
         prisma.adAccount.findMany({
           where: { workspaceId: currentWorkspace.id, active: true },
@@ -66,9 +85,10 @@ export default async function PlansPage() {
           },
         }),
         prisma.executionLog.findMany({
-          where: { kind: "plan" },
+          where: logsWhere,
           orderBy: { createdAt: "desc" },
-          take: 50,
+          skip: historyPagination.skip,
+          take: historyPagination.take,
           select: {
             id: true,
             createdAt: true,
@@ -87,6 +107,11 @@ export default async function PlansPage() {
   const opsRepoBaseDir = process.env.ADDROID_OPS_REPO_BASE_DIR?.trim() || "";
   const defaultAccount = accounts.find((account) => account.id === defaultAdAccountId) ?? null;
   const pageDisplayTimeZone = resolveDisplayTimeZone(defaultAccount?.timezoneName);
+  const historyPagination = getPaginationState(
+    resolvedSearchParams,
+    "historyPage",
+    logsTotal
+  );
 
   const rows = logs
     .map((row) => {
@@ -164,7 +189,7 @@ export default async function PlansPage() {
 
         <Panel
           title="チェック履歴"
-          subtitle="直近 50 件。行を開くと変更内容を確認できます。"
+          subtitle={`${paginationLabel(historyPagination)}。行を開くと変更内容を確認できます。`}
         >
           {!dbReady ? (
             <EmptyState
@@ -177,24 +202,32 @@ export default async function PlansPage() {
               description="上の「今すぐチェック」を実行すると記録されます。"
             />
           ) : (
-            <table className="data-table plan-history">
-              <thead>
-                <tr>
-                  <th scope="col" className="tabular">Time</th>
-                  <th scope="col">Account</th>
-                  <th scope="col">実行元</th>
-                  <th scope="col" className="tabular">変更数</th>
-                  <th scope="col">リスク</th>
-                  <th scope="col" className="tabular">所要時間</th>
-                  <th scope="col">詳細</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <PlanHistoryRow key={row.id} row={row} />
-                ))}
-              </tbody>
-            </table>
+            <div>
+              <table className="data-table plan-history">
+                <thead>
+                  <tr>
+                    <th scope="col" className="tabular">Time</th>
+                    <th scope="col">Account</th>
+                    <th scope="col">実行元</th>
+                    <th scope="col" className="tabular">変更数</th>
+                    <th scope="col">リスク</th>
+                    <th scope="col" className="tabular">所要時間</th>
+                    <th scope="col">詳細</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <PlanHistoryRow key={row.id} row={row} />
+                  ))}
+                </tbody>
+              </table>
+              <Pagination
+                basePath="/plans"
+                searchParams={resolvedSearchParams}
+                pageParam="historyPage"
+                state={historyPagination}
+              />
+            </div>
           )}
         </Panel>
       </div>

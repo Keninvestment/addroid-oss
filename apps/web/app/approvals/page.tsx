@@ -16,6 +16,7 @@ import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { DataTable } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot } from "../../components/ui/StatusDot";
@@ -26,6 +27,7 @@ import {
   approvalStateBadge,
   approvalStateLabel,
 } from "../../lib/approvals";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +53,11 @@ interface MergedPrRow {
   decision: string | null;
 }
 
+interface SearchParamsInput {
+  openPage?: string | string[];
+  mergedPage?: string | string[];
+}
+
 function readDecisionSource(metadata: unknown): string | null {
   if (
     metadata &&
@@ -64,17 +71,37 @@ function readDecisionSource(metadata: unknown): string | null {
   return null;
 }
 
-export default async function ApprovalsPage() {
+export default async function ApprovalsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   let openPrs: PendingPrRow[] = [];
   let recentMerges: MergedPrRow[] = [];
+  let openTotal = 0;
+  let mergedTotal = 0;
   let dbReady = true;
 
   try {
     const workspace = await ensureWebWorkspace();
+    const openWhere = { state: "open", repo: { workspace: { is: { id: workspace.id } } } };
+    const mergedWhere = { state: "merged", repo: { workspace: { is: { id: workspace.id } } } };
+    [openTotal, mergedTotal] = await Promise.all([
+      prisma.githubPullRequest.count({ where: openWhere }),
+      prisma.githubPullRequest.count({ where: mergedWhere }),
+    ]);
+    const openPagination = getPaginationState(resolvedSearchParams, "openPage", openTotal);
+    const mergedPagination = getPaginationState(
+      resolvedSearchParams,
+      "mergedPage",
+      mergedTotal
+    );
     const open = await prisma.githubPullRequest.findMany({
-      where: { state: "open", repo: { workspace: { is: { id: workspace.id } } } },
+      where: openWhere,
       orderBy: { polledAt: "desc" },
-      take: 50,
+      skip: openPagination.skip,
+      take: openPagination.take,
       select: {
         id: true,
         number: true,
@@ -104,9 +131,10 @@ export default async function ApprovalsPage() {
     }));
 
     const merged = await prisma.githubPullRequest.findMany({
-      where: { state: "merged", repo: { workspace: { is: { id: workspace.id } } } },
+      where: mergedWhere,
       orderBy: { mergedAt: "desc" },
-      take: 10,
+      skip: mergedPagination.skip,
+      take: mergedPagination.take,
       select: {
         id: true,
         number: true,
@@ -133,6 +161,12 @@ export default async function ApprovalsPage() {
     dbReady = false;
   }
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const openPagination = getPaginationState(resolvedSearchParams, "openPage", openTotal);
+  const mergedPagination = getPaginationState(
+    resolvedSearchParams,
+    "mergedPage",
+    mergedTotal
+  );
   const approvalRequiredCount = openPrs.filter((pr) =>
     approvalRequiresAction(pr.latestDecision)
   ).length;
@@ -166,7 +200,7 @@ export default async function ApprovalsPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${openPrs.length} 件`
+              : paginationLabel(openPagination)
           }
           status={<StatusDot state={headerStatus}>{headerStatusLabel}</StatusDot>}
         >
@@ -176,16 +210,17 @@ export default async function ApprovalsPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={openPrs}
-              rowKey={(row) => row.id}
-              empty={
-                <EmptyState
-                  title="マージ待ちの PR はありません。"
-                  description="改善提案や入稿変更が作成されると、ここに表示されます。"
-                />
-              }
-              columns={[
+            <div>
+              <DataTable
+                rows={openPrs}
+                rowKey={(row) => row.id}
+                empty={
+                  <EmptyState
+                    title="マージ待ちの PR はありません。"
+                    description="改善提案や入稿変更が作成されると、ここに表示されます。"
+                  />
+                }
+                columns={[
                 {
                   header: "#",
                   cell: (row) => (
@@ -240,8 +275,15 @@ export default async function ApprovalsPage() {
                     </Link>
                   ),
                 },
-              ]}
-            />
+                ]}
+              />
+              <Pagination
+                basePath="/approvals"
+                searchParams={resolvedSearchParams}
+                pageParam="openPage"
+                state={openPagination}
+              />
+            </div>
           )}
         </Panel>
 
@@ -250,7 +292,7 @@ export default async function ApprovalsPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `直近 ${recentMerges.length} 件`
+              : paginationLabel(mergedPagination)
           }
         >
           {!dbReady ? (
@@ -259,16 +301,17 @@ export default async function ApprovalsPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={recentMerges}
-              rowKey={(row) => row.id}
-              empty={
-                <EmptyState
-                  title="マージ済みの PR はまだありません。"
-                  description="承認した変更があると履歴に表示されます。"
-                />
-              }
-              columns={[
+            <div>
+              <DataTable
+                rows={recentMerges}
+                rowKey={(row) => row.id}
+                empty={
+                  <EmptyState
+                    title="マージ済みの PR はまだありません。"
+                    description="承認した変更があると履歴に表示されます。"
+                  />
+                }
+                columns={[
                 {
                   header: "#",
                   cell: (row) => (
@@ -302,8 +345,15 @@ export default async function ApprovalsPage() {
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },
-              ]}
-            />
+                ]}
+              />
+              <Pagination
+                basePath="/approvals"
+                searchParams={resolvedSearchParams}
+                pageParam="mergedPage"
+                state={mergedPagination}
+              />
+            </div>
           )}
         </Panel>
       </div>

@@ -60,6 +60,8 @@ import type { PrismaClient } from "@addroid/db";
 import type { MetaAdapter } from "@addroid/meta-adapter";
 import { executeActivate } from "./activate-runtime.js";
 import { type LoadedBudgetGuardPolicy, buildBudgetGuardSpendContext } from "./budget-guard-runtime.js";
+import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performance-context.js";
+import { refreshLatestInsightsForManualImprovementPr } from "./improvement-pr-insights-refresh.js";
 
 // ---------------------------------------------------------------------
 // Public API
@@ -160,6 +162,8 @@ async function loadActiveAdAccounts(
     key: string;
     displayName: string;
     metaAccountId: string | null;
+    currency: string | null;
+    timezoneName: string | null;
     modeOverride: string | null;
   }>
 > {
@@ -170,6 +174,8 @@ async function loadActiveAdAccounts(
       key: true,
       displayName: true,
       metaAccountId: true,
+      currency: true,
+      timezoneName: true,
       modeOverride: true,
     },
     orderBy: { key: "asc" },
@@ -191,6 +197,38 @@ function deepLink(deps: SlackCommandHandlersDeps, path: string): string | undefi
   const base = (deps.webBaseUrl ?? "").trim();
   if (!/^https?:\/\//i.test(base)) return undefined;
   return base.replace(/\/+$/, "") + path;
+}
+
+function buildImprovementRefreshFailedSummary(input: {
+  workspaceId: string;
+  accountId: string;
+  accountKey: string;
+  currency: string;
+  mode: ImprovementPrSummary["mode"];
+  refresh: Awaited<ReturnType<typeof refreshLatestInsightsForManualImprovementPr>>;
+}): ImprovementPrSummary {
+  return {
+    status: "ai_failed",
+    workspaceId: input.workspaceId,
+    accountKey: input.accountKey,
+    accountId: input.accountId,
+    mode: input.mode,
+    aiRunId: null,
+    aiRunIds: [],
+    creativeIds: [],
+    decision: null,
+    proposalCount: 0,
+    currency: input.currency,
+    pullRequest: null,
+    classification: null,
+    auditDecision: null,
+    dangerousCategories: [],
+    errorMessage:
+      "最新レポートを取得できなかったため、古い実績を使った改善提案は作成しませんでした。" +
+      (input.refresh.errors.length > 0
+        ? ` ${input.refresh.errors.join("; ")}`
+        : ""),
+  };
 }
 
 function summarizeMessage(text: string): string {
@@ -523,9 +561,48 @@ async function handleImprove(
           accountKey: acc.key,
         }),
         async () => {
-          const snapshotIds = await loadLatestPerformanceSnapshotIds(
+          const refresh = await refreshLatestInsightsForManualImprovementPr({
+            accountId: acc.id,
+            accountKey: acc.key,
+            timeZone: acc.timezoneName ?? deps.userTimeZone ?? "UTC",
+            insightsProvider: deps.dailyReportInsights,
+            store: deps.dailyReportStore,
+          });
+          if (refresh.status === "failed") {
+            await deps.improvementPrAudit.recordImprovementPrAudit({
+              workspaceId: deps.workspaceId,
+              accountKey: acc.key,
+              accountId: acc.id,
+              cronRunId: null,
+              action: "improvement_pr.failed",
+              pullRequest: null,
+              aiRunIds: [],
+              auditDecision: null,
+              classification: null,
+              dangerousCategories: [],
+              metadata: {
+                failedAt: "refresh_insights",
+                refresh,
+                requestedBy: "slack",
+              },
+              summary: "improvement_pr refresh_insights failed; PR not opened",
+            });
+            return buildImprovementRefreshFailedSummary({
+              workspaceId: deps.workspaceId,
+              accountId: acc.id,
+              accountKey: acc.key,
+              currency: acc.currency ?? "JPY",
+              mode: effectiveMode,
+              refresh,
+            });
+          }
+          const performanceContext = await loadRecentPerformanceSnapshotContext(
             deps.prisma,
-            acc.id
+            {
+              accountId: acc.id,
+              timeZone: acc.timezoneName ?? deps.userTimeZone ?? "UTC",
+              includeToday: true,
+            }
           );
           return runImprovementPrOnce({
             workspaceId: deps.workspaceId,
@@ -533,7 +610,8 @@ async function handleImprove(
             accountKey: acc.key,
             repo: repo.repoSpec,
             baseRef: repo.baseRef,
-            snapshotIds,
+            snapshotIds: performanceContext.snapshotIds,
+            analysisWindow: performanceContext.analysisWindow,
             store: deps.improvementPrStore,
             pipeline: deps.improvementPrPipeline,
             publisher: deps.improvementPrPublisher,
@@ -605,24 +683,6 @@ async function handleImprove(
       errorCode: "improvement_pr_failed",
     };
   }
-}
-
-async function loadLatestPerformanceSnapshotIds(
-  prisma: PrismaClient,
-  accountId: string
-): Promise<string[]> {
-  const latest = await prisma.performanceSnapshot.findFirst({
-    where: { accountId },
-    orderBy: { metricDate: "desc" },
-    select: { metricDate: true },
-  });
-  if (!latest) return [];
-  const rows = await prisma.performanceSnapshot.findMany({
-    where: { accountId, metricDate: latest.metricDate },
-    select: { id: true },
-    orderBy: { createdAt: "asc" },
-  });
-  return rows.map((r) => r.id);
 }
 
 // ---------------------------------------------------------------------

@@ -34,9 +34,15 @@ export const CRON_PRESETS = [
     enabledByDefault: false,
   },
   {
+    name: "budget_guard",
+    cron: "30 9 * * *",
+    description: "予算超過、月間ペース、急増、成果なしを毎朝確認する",
+    enabledByDefault: false,
+  },
+  {
     name: "improvement_pr",
     cron: "0 10 * * 1",
-    description: "AI 改善提案 PR を週次で作成 (後続コントラクト)",
+    description: "前日までの直近 7 日の実績から AI 改善提案 PR を週次で作成",
     enabledByDefault: false,
   },
   {

@@ -349,8 +349,9 @@ export {
 
 export {
   runImprovementPrOnce,
-  type ImprovementPrAgentRunResult,
-  type ImprovementPrAnalystOutput,
+	  type ImprovementPrAgentRunResult,
+	  type ImprovementPrAnalysisWindow,
+	  type ImprovementPrAnalystOutput,
   type ImprovementPrAuditAction,
   type ImprovementPrAuditClassification,
   type ImprovementPrAuditDecision,
@@ -376,7 +377,8 @@ export {
   type ImprovementPrGithubPublisher,
   type ImprovementPrImagePromptOutput,
   type ImprovementPrImagePromptVariant,
-  type ImprovementPrMediaBuyerOutput,
+	  type ImprovementPrMediaBuyerOutput,
+	  type ImprovementPrPerformanceMetrics,
   type ImprovementPrPipelineInput,
   type ImprovementPrPipelineRunner,
   type ImprovementPrPlanCounts,

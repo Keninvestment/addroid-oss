@@ -33,6 +33,8 @@
 //     人間の merge を待つ。本ページはその境界を明示するコピーを page-header
 //     subtitle と承認境界カードの 2 箇所で出す。
 
+import Link from "next/link";
+import type { ReactNode } from "react";
 import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
@@ -40,6 +42,7 @@ import {
   DataTable,
   type DataTableColumn,
 } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { EmptyState } from "../../components/ui/EmptyState";
 import {
   KeyValueList,
@@ -51,8 +54,16 @@ import { InlineCode } from "../../components/ui/CodeBlock";
 import { RunCronButton } from "../../components/RunCronButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 
 export const dynamic = "force-dynamic";
+
+interface SearchParamsInput {
+  auditId?: string | string[];
+  proposalsPage?: string | string[];
+  runsPage?: string | string[];
+  aiRunsPage?: string | string[];
+}
 
 type ImprovementPrClassification = "safe" | "requires_approval" | "dangerous";
 type ImprovementPrAuditDecision =
@@ -118,6 +129,12 @@ interface AiRunRow {
   createdAt: Date;
 }
 
+interface AiRunDetailRow {
+  id: string;
+  agent: string;
+  outputs: unknown;
+}
+
 interface AuditRow {
   id: string;
   workspaceId: string | null;
@@ -145,9 +162,13 @@ interface AdAccountTimeZoneRow {
 interface ParsedAuditMetadata {
   accountKey: string | null;
   accountId: string | null;
+  aiRunIds: string[];
   classification: ImprovementPrClassification | null;
   auditDecision: ImprovementPrAuditDecision | null;
   dangerousCategories: string[];
+  proposals: ImprovementProposalDetail[];
+  mediaBuyerRationale: string | null;
+  dryRunSummary: string | null;
   proposalCount: number | null;
   fileCount: number | null;
   budgetImpact: BudgetImpact | null;
@@ -158,6 +179,14 @@ interface ParsedAuditMetadata {
   htmlUrl: string | null;
   headSha: string | null;
   summary: string | null;
+}
+
+interface ImprovementProposalDetail {
+  hierarchy: "account" | "campaign" | "adset" | "ad" | "unknown";
+  target: string;
+  category: string;
+  proposedChange: string;
+  rationale: string;
 }
 
 interface BudgetImpact {
@@ -194,6 +223,11 @@ function readNullableNumber(v: unknown): number | null {
 
 function readString(v: unknown, fallback: string | null = null): string | null {
   return typeof v === "string" ? v : fallback;
+}
+
+function single(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
 }
 
 function parseCronRunAggregate(output: unknown): CronRunAggregate | null {
@@ -233,6 +267,10 @@ function parseAuditMetadata(metadata: unknown): ParsedAuditMetadata {
   const snapshotIds = Array.isArray(m.snapshotIds)
     ? m.snapshotIds.filter((x): x is string => typeof x === "string")
     : [];
+  const aiRunIds = Array.isArray(m.aiRunIds)
+    ? m.aiRunIds.filter((x): x is string => typeof x === "string")
+    : [];
+  const proposals = parseProposalDetails(m.proposals);
 
   let budgetImpact: BudgetImpact | null = null;
   if (isRecord(m.budgetImpact)) {
@@ -267,9 +305,13 @@ function parseAuditMetadata(metadata: unknown): ParsedAuditMetadata {
   return {
     accountKey: readString(m.accountKey),
     accountId: readString(m.accountId),
+    aiRunIds,
     classification,
     auditDecision,
     dangerousCategories,
+    proposals,
+    mediaBuyerRationale: readString(m.mediaBuyerRationale),
+    dryRunSummary: readString(m.dryRunSummary),
     proposalCount: readNullableNumber(m.proposalCount),
     fileCount: readNullableNumber(m.fileCount),
     budgetImpact,
@@ -280,6 +322,57 @@ function parseAuditMetadata(metadata: unknown): ParsedAuditMetadata {
     htmlUrl: readString(m.htmlUrl),
     headSha: readString(m.headSha),
     summary: readString(m.summary),
+  };
+}
+
+function parseProposalDetails(value: unknown): ImprovementProposalDetail[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const hierarchyRaw = readString(item.hierarchy) ?? "unknown";
+    const hierarchy =
+      hierarchyRaw === "account" ||
+      hierarchyRaw === "campaign" ||
+      hierarchyRaw === "adset" ||
+      hierarchyRaw === "ad"
+        ? hierarchyRaw
+        : "unknown";
+    const target = readString(item.target) ?? "";
+    const category = readString(item.category) ?? "";
+    const proposedChange = readString(item.proposedChange) ?? "";
+    const rationale = readString(item.rationale) ?? "";
+    if (!target && !category && !proposedChange && !rationale) return [];
+    return [{ hierarchy, target, category, proposedChange, rationale }];
+  });
+}
+
+function parseMediaBuyerOutput(outputs: unknown): {
+  proposals: ImprovementProposalDetail[];
+  rationale: string | null;
+  dryRunSummary: string | null;
+  budgetImpact: BudgetImpact | null;
+} {
+  if (!isRecord(outputs)) {
+    return {
+      proposals: [],
+      rationale: null,
+      dryRunSummary: null,
+      budgetImpact: null,
+    };
+  }
+  let budgetImpact: BudgetImpact | null = null;
+  if (isRecord(outputs.budgetImpact)) {
+    budgetImpact = {
+      deltaCurrency: readNumber(outputs.budgetImpact.deltaCurrency),
+      afterCurrency: readNumber(outputs.budgetImpact.afterCurrency),
+      notes: readString(outputs.budgetImpact.notes) ?? "",
+    };
+  }
+  return {
+    proposals: parseProposalDetails(outputs.proposals),
+    rationale: readString(outputs.rationale),
+    dryRunSummary: readString(outputs.dryRunSummary),
+    budgetImpact,
   };
 }
 
@@ -381,26 +474,207 @@ function formatBudgetDelta(impact: BudgetImpact): string {
   return `${sign}${impact.deltaCurrency.toFixed(2)} → ${impact.afterCurrency.toFixed(2)}`;
 }
 
-export default async function ImprovementsPage() {
+function actionLabel(action: ImprovementPrAction): string {
+  switch (action) {
+    case "improvement_pr.opened":
+      return "PR作成";
+    case "improvement_pr.skipped":
+      return "PR未作成";
+    case "improvement_pr.failed":
+      return "失敗";
+  }
+}
+
+function classificationLabel(c: ImprovementPrClassification | null): string {
+  switch (c) {
+    case "dangerous":
+      return "要注意";
+    case "requires_approval":
+      return "承認が必要";
+    case "safe":
+      return "低リスク";
+    default:
+      return "未判定";
+  }
+}
+
+function auditDecisionLabel(d: ImprovementPrAuditDecision | null): string {
+  switch (d) {
+    case "auto_approved":
+      return "自動承認可";
+    case "approval_required":
+      return "承認待ち";
+    case "auto_blocked":
+      return "自動ブロック";
+    default:
+      return "未判定";
+  }
+}
+
+function cronStateLabel(state: string): string {
+  switch (state) {
+    case "ok":
+    case "success":
+      return "成功";
+    case "error":
+    case "failed":
+      return "失敗";
+    case "warn":
+      return "要確認";
+    case "running":
+      return "実行中";
+    case "queued":
+      return "待機中";
+    default:
+      return state;
+  }
+}
+
+function aiRunStatusLabel(status: string): string {
+  switch (status) {
+    case "succeeded":
+      return "成功";
+    case "failed":
+      return "失敗";
+    case "running":
+      return "実行中";
+    case "queued":
+      return "待機中";
+    default:
+      return status;
+  }
+}
+
+function agentLabel(agent: string): string {
+  const labels: Record<string, string> = {
+    analyst: "分析",
+    strategy: "戦略",
+    copy: "文言",
+    image_prompt: "画像案",
+    creative_qa: "クリエイティブ確認",
+    media_buyer: "改善判断",
+    gitops: "PR作成準備",
+    audit: "安全確認",
+  };
+  return labels[agent] ?? agent;
+}
+
+function decisionLabel(decision: string): string {
+  const labels: Record<string, string> = {
+    propose: "提案あり",
+    skip_no_proposal: "提案なし",
+    approve: "承認可",
+    reject: "却下",
+    request_changes: "要修正",
+    report_only: "確認のみ",
+    auto_approved: "自動承認可",
+    approval_required: "承認待ち",
+    auto_blocked: "自動ブロック",
+  };
+  return labels[decision] ?? decision;
+}
+
+function hierarchyLabel(value: ImprovementProposalDetail["hierarchy"]): string {
+  switch (value) {
+    case "account":
+      return "アカウント";
+    case "campaign":
+      return "キャンペーン";
+    case "adset":
+      return "広告セット";
+    case "ad":
+      return "広告";
+    default:
+      return "対象";
+  }
+}
+
+function proposalCategoryLabel(value: string): string {
+  if (!value) return "改善提案";
+  const labels: Record<string, string> = {
+    budget_increase: "予算増額",
+    budget_decrease: "予算減額",
+    budget_shift: "予算配分変更",
+    bid_change: "入札調整",
+    targeting_change: "ターゲット変更",
+    creative_refresh: "クリエイティブ改善",
+    copy_change: "文言改善",
+    pause: "停止提案",
+    new_campaign: "新規キャンペーン",
+    monthly_budget_change: "月予算変更",
+  };
+  return labels[value] ?? value.replaceAll("_", " ");
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: "0.75rem",
+        fontWeight: 600,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        color: "var(--color-text-secondary)",
+        marginBottom: "0.25rem",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+export default async function ImprovementsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
+  const selectedAuditId = single(resolvedSearchParams?.auditId);
   let runs: CronRunRow[] = [];
   let aiRuns: AiRunRow[] = [];
   let audits: AuditRow[] = [];
+  let latestAudits: AuditRow[] = [];
+  let selectedAuditFromQuery: AuditRow | null = null;
+  let detailAiRuns: AiRunDetailRow[] = [];
+  let runsTotal = 0;
+  let aiRunsTotal = 0;
+  let auditsTotal = 0;
   let schedules: ScheduleRow[] = [];
   let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
   let dbReady = true;
   try {
     const workspace = await ensureWebWorkspace();
-    [runs, aiRuns, audits, schedules, adAccountTimeZones] = await Promise.all([
+    const runsWhere = {
+      name: "improvement_pr",
+      OR: [
+        { schedule: { is: { workspaceId: workspace.id } } },
+        { executionLogs: { some: { workspaceId: workspace.id } } },
+      ],
+    };
+    const aiRunsWhere = { workspaceId: workspace.id, workflow: "improvement_pr" };
+    const auditsWhere = { workspaceId: workspace.id, action: { startsWith: "improvement_pr." } };
+    [runsTotal, aiRunsTotal, auditsTotal] = await Promise.all([
+      prisma.cronRun.count({ where: runsWhere }),
+      prisma.aiRun.count({ where: aiRunsWhere }),
+      prisma.auditLog.count({ where: auditsWhere }),
+    ]);
+    const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+    const aiRunsPagination = getPaginationState(
+      resolvedSearchParams,
+      "aiRunsPage",
+      aiRunsTotal
+    );
+    const auditsPagination = getPaginationState(
+      resolvedSearchParams,
+      "proposalsPage",
+      auditsTotal
+    );
+    [runs, aiRuns, audits, latestAudits, selectedAuditFromQuery, schedules, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: {
-          name: "improvement_pr",
-          OR: [
-            { schedule: { is: { workspaceId: workspace.id } } },
-            { executionLogs: { some: { workspaceId: workspace.id } } },
-          ],
-        },
+        where: runsWhere,
         orderBy: { startedAt: "desc" },
-        take: 25,
+        skip: runsPagination.skip,
+        take: runsPagination.take,
         select: {
           id: true,
           state: true,
@@ -412,9 +686,10 @@ export default async function ImprovementsPage() {
         },
       }),
       prisma.aiRun.findMany({
-        where: { workspaceId: workspace.id, workflow: "improvement_pr" },
+        where: aiRunsWhere,
         orderBy: { createdAt: "desc" },
-        take: 25,
+        skip: aiRunsPagination.skip,
+        take: aiRunsPagination.take,
         select: {
           id: true,
           agent: true,
@@ -430,9 +705,10 @@ export default async function ImprovementsPage() {
         },
       }),
       prisma.auditLog.findMany({
-        where: { workspaceId: workspace.id, action: { startsWith: "improvement_pr." } },
+        where: auditsWhere,
         orderBy: { createdAt: "desc" },
-        take: 25,
+        skip: auditsPagination.skip,
+        take: auditsPagination.take,
         select: {
           id: true,
           workspaceId: true,
@@ -443,6 +719,34 @@ export default async function ImprovementsPage() {
           createdAt: true,
         },
       }),
+      prisma.auditLog.findMany({
+        where: auditsWhere,
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          workspaceId: true,
+          action: true,
+          target: true,
+          ref: true,
+          metadata: true,
+          createdAt: true,
+        },
+      }),
+      selectedAuditId
+        ? prisma.auditLog.findFirst({
+            where: { ...auditsWhere, id: selectedAuditId },
+            select: {
+              id: true,
+              workspaceId: true,
+              action: true,
+              target: true,
+              ref: true,
+              metadata: true,
+              createdAt: true,
+            },
+          })
+        : Promise.resolve(null),
       prisma.cronSchedule.findMany({
         where: { workspaceId: workspace.id, name: "improvement_pr" },
         select: {
@@ -468,11 +772,58 @@ export default async function ImprovementsPage() {
     )
     .map((a) => ({ row: a, parsed: parseAuditMetadata(a.metadata) }));
 
-  const latestAudit = auditRows[0] ?? null;
+  const latestAuditRows = latestAudits
+    .filter((a): a is AuditRow & { action: ImprovementPrAction } =>
+      VALID_ACTIONS.has(a.action as ImprovementPrAction)
+    )
+    .map((a) => ({ row: a, parsed: parseAuditMetadata(a.metadata) }));
+
+  const latestAudit = latestAuditRows[0] ?? null;
+  const selectedAudit =
+    selectedAuditFromQuery && VALID_ACTIONS.has(selectedAuditFromQuery.action as ImprovementPrAction)
+      ? {
+          row: selectedAuditFromQuery as AuditRow & { action: ImprovementPrAction },
+          parsed: parseAuditMetadata(selectedAuditFromQuery.metadata),
+        }
+      : null;
+  const detailAudit = selectedAudit ?? latestAudit;
+  const showMissingSelectedAudit = Boolean(selectedAuditId && !selectedAudit);
+  if (dbReady && detailAudit?.parsed.aiRunIds.length) {
+    detailAiRuns = await prisma.aiRun
+      .findMany({
+        where: { id: { in: detailAudit.parsed.aiRunIds } },
+        select: { id: true, agent: true, outputs: true },
+      })
+      .catch(() => []);
+  }
+  const mediaBuyerOutput =
+    detailAiRuns.find((run) => run.agent === "media_buyer")?.outputs ?? null;
+  const mediaBuyerDetail = parseMediaBuyerOutput(mediaBuyerOutput);
+  const detailProposals =
+    detailAudit?.parsed.proposals.length
+      ? detailAudit.parsed.proposals
+      : mediaBuyerDetail.proposals;
+  const detailMediaBuyerRationale =
+    detailAudit?.parsed.mediaBuyerRationale ?? mediaBuyerDetail.rationale;
+  const detailDryRunSummary =
+    detailAudit?.parsed.dryRunSummary ?? mediaBuyerDetail.dryRunSummary;
+  const detailBudgetImpact =
+    detailAudit?.parsed.budgetImpact ?? mediaBuyerDetail.budgetImpact;
   const scheduleRow = schedules[0] ?? null;
-  const runsCount = runs.length;
-  const aiRunsCount = aiRuns.length;
-  const auditCount = auditRows.length;
+  const runsCount = runsTotal;
+  const aiRunsCount = aiRunsTotal;
+  const auditCount = auditsTotal;
+  const auditsPagination = getPaginationState(
+    resolvedSearchParams,
+    "proposalsPage",
+    auditsTotal
+  );
+  const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+  const aiRunsPagination = getPaginationState(
+    resolvedSearchParams,
+    "aiRunsPage",
+    aiRunsTotal
+  );
   const timeZoneByAccount = new Map(
     adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
   );
@@ -481,21 +832,21 @@ export default async function ImprovementsPage() {
       ? timeZoneByAccount.get(`${row.workspaceId}:${parsed.accountKey}`) ?? null
       : null;
   const pageDisplayTimeZone = resolveDisplayTimeZone(
-    latestAudit ? auditTimeZone(latestAudit.row, latestAudit.parsed) : null
+    detailAudit ? auditTimeZone(detailAudit.row, detailAudit.parsed) : null
   );
 
   const runColumns: DataTableColumn<CronRunRow>[] = [
     {
-      header: "Started",
+      header: "開始日時",
       cell: (row) => formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "State",
+      header: "状態",
       cell: (row) => (
         <StatusBadge state={cronStateToStatus(row.state)}>
-          {row.state}
+          {cronStateLabel(row.state)}
         </StatusBadge>
       ),
     },
@@ -513,7 +864,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Succeeded",
+      header: "PR作成",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -526,7 +877,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Skipped (no proposal)",
+      header: "提案なし",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -539,7 +890,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Auto-blocked",
+      header: "自動ブロック",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -552,7 +903,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "AI failed",
+      header: "AI失敗",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -565,7 +916,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "PR failed",
+      header: "PR失敗",
       cell: (row) => {
         const agg = parseCronRunAggregate(row.output);
         return agg ? (
@@ -578,7 +929,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Duration",
+      header: "所要時間",
       cell: (row) => (row.durationMs == null ? "—" : `${row.durationMs} ms`),
       className: "tabular",
       headerClassName: "tabular",
@@ -590,7 +941,7 @@ export default async function ImprovementsPage() {
     parsed: ParsedAuditMetadata;
   }>[] = [
     {
-      header: "Created",
+      header: "作成日時",
       cell: ({ row, parsed }) =>
         formatDateTime(row.createdAt, {
           timeZone: resolveDisplayTimeZone(auditTimeZone(row, parsed), pageDisplayTimeZone),
@@ -599,13 +950,13 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Action",
+      header: "結果",
       cell: ({ row }) => (
-        <StatusBadge state={actionToState(row.action)}>{row.action}</StatusBadge>
+        <StatusBadge state={actionToState(row.action)}>{actionLabel(row.action)}</StatusBadge>
       ),
     },
     {
-      header: "Account",
+      header: "広告アカウント",
       cell: ({ parsed }) =>
         parsed.accountKey ? (
           <InlineCode>{parsed.accountKey}</InlineCode>
@@ -614,7 +965,7 @@ export default async function ImprovementsPage() {
         ),
     },
     {
-      header: "Mode",
+      header: "運用モード",
       cell: ({ parsed }) =>
         parsed.mode ? (
           <StatusBadge state={modeToState(parsed.mode)}>{parsed.mode}</StatusBadge>
@@ -623,31 +974,29 @@ export default async function ImprovementsPage() {
         ),
     },
     {
-      header: "Risk",
+      header: "リスク",
       cell: ({ parsed }) =>
         parsed.classification ? (
           <StatusBadge state={classificationToState(parsed.classification)}>
-            {parsed.classification}
+            {classificationLabel(parsed.classification)}
           </StatusBadge>
         ) : (
           <span>—</span>
         ),
     },
     {
-      header: "Decision",
+      header: "判断",
       cell: ({ parsed }) =>
         parsed.auditDecision ? (
           <StatusBadge state={auditDecisionToState(parsed.auditDecision)}>
-            {parsed.auditDecision === "approval_required"
-              ? "approval-required"
-              : parsed.auditDecision}
+            {auditDecisionLabel(parsed.auditDecision)}
           </StatusBadge>
         ) : (
           <span>—</span>
         ),
     },
     {
-      header: "Proposals",
+      header: "提案数",
       cell: ({ parsed }) =>
         parsed.proposalCount === null ? (
           <span>—</span>
@@ -658,7 +1007,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Budget impact",
+      header: "予算影響",
       cell: ({ parsed }) =>
         parsed.budgetImpact ? (
           <span
@@ -706,18 +1055,34 @@ export default async function ImprovementsPage() {
           <span>—</span>
         ),
     },
+    {
+      header: "表示",
+      cell: ({ row }) => (
+        <Link
+          href={`/improvements?auditId=${encodeURIComponent(row.id)}#improvement-detail`}
+          className="btn btn--ghost btn--sm"
+          aria-current={row.id === selectedAuditId ? "true" : undefined}
+        >
+          {row.id === selectedAuditId ? "表示中" : "表示"}
+        </Link>
+      ),
+    },
   ];
 
   const aiRunColumns: DataTableColumn<AiRunRow>[] = [
     {
-      header: "Created",
+      header: "作成日時",
       cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
       className: "tabular mono",
       headerClassName: "tabular",
     },
     {
-      header: "Agent",
-      cell: (row) => <InlineCode>{row.agent}</InlineCode>,
+      header: "役割",
+      cell: (row) => (
+        <span>
+          {agentLabel(row.agent)} <InlineCode>{row.agent}</InlineCode>
+        </span>
+      ),
     },
     {
       header: "AIモデル",
@@ -728,20 +1093,26 @@ export default async function ImprovementsPage() {
       ),
     },
     {
-      header: "Status",
+      header: "状態",
       cell: (row) => (
         <StatusBadge state={aiRunStatusState(row.status)}>
-          {row.status}
+          {aiRunStatusLabel(row.status)}
         </StatusBadge>
       ),
     },
     {
-      header: "Decision",
+      header: "判断",
       cell: (row) =>
-        row.decision ? <InlineCode>{row.decision}</InlineCode> : <span>—</span>,
+        row.decision ? (
+          <span>
+            {decisionLabel(row.decision)} <InlineCode>{row.decision}</InlineCode>
+          </span>
+        ) : (
+          <span>—</span>
+        ),
     },
     {
-      header: "Confidence",
+      header: "確信度",
       cell: (row) =>
         row.confidence === null ? (
           <span>—</span>
@@ -757,7 +1128,7 @@ export default async function ImprovementsPage() {
       headerClassName: "tabular",
     },
     {
-      header: "Tokens (in/out)",
+      header: "トークン数",
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {row.inputTokens.toLocaleString()} / {row.outputTokens.toLocaleString()}
@@ -771,19 +1142,19 @@ export default async function ImprovementsPage() {
   const scheduleItems: KeyValueEntry[] = scheduleRow
     ? [
         {
-          label: "Schedule",
+          label: "実行予定",
           value: <InlineCode>{scheduleRow.cron || "(unscheduled)"}</InlineCode>,
         },
         {
-          label: "Enabled",
+          label: "有効化",
           value: (
             <StatusBadge state={scheduleRow.enabled ? "ok" : "idle"}>
-              {scheduleRow.enabled ? "on" : "off"}
+              {scheduleRow.enabled ? "有効" : "無効"}
             </StatusBadge>
           ),
         },
         {
-          label: "Last run state",
+          label: "前回の状態",
           value: scheduleRow.lastRunState ? (
             <StatusBadge
               state={
@@ -796,14 +1167,14 @@ export default async function ImprovementsPage() {
                       : "idle"
               }
             >
-              {scheduleRow.lastRunState}
+              {cronStateLabel(scheduleRow.lastRunState)}
             </StatusBadge>
           ) : (
             <span>未実行</span>
           ),
         },
         {
-          label: "Next run",
+          label: "次回実行",
           value: scheduleRow.nextRunAt ? (
             <span
               className="tabular-nums"
@@ -818,111 +1189,109 @@ export default async function ImprovementsPage() {
       ]
     : [];
 
-  const latestAuditItems: KeyValueEntry[] = latestAudit
+  const detailAuditItems: KeyValueEntry[] = detailAudit
     ? [
         {
-          label: "Action",
+          label: "結果",
           value: (
-            <StatusBadge state={actionToState(latestAudit.row.action)}>
-              {latestAudit.row.action}
+            <StatusBadge state={actionToState(detailAudit.row.action)}>
+              {actionLabel(detailAudit.row.action)}
             </StatusBadge>
           ),
         },
         {
-          label: "Account",
-          value: latestAudit.parsed.accountKey ? (
-            <InlineCode>{latestAudit.parsed.accountKey}</InlineCode>
+          label: "広告アカウント",
+          value: detailAudit.parsed.accountKey ? (
+            <InlineCode>{detailAudit.parsed.accountKey}</InlineCode>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Mode",
-          value: latestAudit.parsed.mode ? (
-            <StatusBadge state={modeToState(latestAudit.parsed.mode)}>
-              {latestAudit.parsed.mode}
+          label: "運用モード",
+          value: detailAudit.parsed.mode ? (
+            <StatusBadge state={modeToState(detailAudit.parsed.mode)}>
+              {detailAudit.parsed.mode}
             </StatusBadge>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Risk classification",
-          value: latestAudit.parsed.classification ? (
+          label: "リスク",
+          value: detailAudit.parsed.classification ? (
             <StatusBadge
-              state={classificationToState(latestAudit.parsed.classification)}
+              state={classificationToState(detailAudit.parsed.classification)}
             >
-              {latestAudit.parsed.classification}
+              {classificationLabel(detailAudit.parsed.classification)}
             </StatusBadge>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Audit decision",
-          value: latestAudit.parsed.auditDecision ? (
+          label: "判断",
+          value: detailAudit.parsed.auditDecision ? (
             <StatusBadge
-              state={auditDecisionToState(latestAudit.parsed.auditDecision)}
+              state={auditDecisionToState(detailAudit.parsed.auditDecision)}
             >
-              {latestAudit.parsed.auditDecision === "approval_required"
-                ? "approval-required"
-                : latestAudit.parsed.auditDecision}
+              {auditDecisionLabel(detailAudit.parsed.auditDecision)}
             </StatusBadge>
           ) : (
             <span>—</span>
           ),
         },
         {
-          label: "Dangerous categories",
+          label: "注意が必要な変更",
           value:
-            latestAudit.parsed.dangerousCategories.length === 0 ? (
+            detailAudit.parsed.dangerousCategories.length === 0 ? (
               <span>—</span>
             ) : (
               <span style={{ fontFamily: "var(--font-mono)" }}>
-                {latestAudit.parsed.dangerousCategories.join(", ")}
+                {detailAudit.parsed.dangerousCategories.join(", ")}
               </span>
             ),
         },
         {
-          label: "Proposals",
+          label: "提案数",
           value:
-            latestAudit.parsed.proposalCount === null ? (
+            detailAudit.parsed.proposalCount === null ? (
               <span>—</span>
             ) : (
               <span className="tabular-nums">
-                {latestAudit.parsed.proposalCount}
+                {detailAudit.parsed.proposalCount}
               </span>
             ),
         },
         {
-          label: "Files",
+          label: "変更ファイル",
           value:
-            latestAudit.parsed.fileCount === null ? (
+            detailAudit.parsed.fileCount === null ? (
               <span>—</span>
             ) : (
               <span className="tabular-nums">
-                {latestAudit.parsed.fileCount}
+                {detailAudit.parsed.fileCount}
               </span>
             ),
         },
         {
-          label: "Budget impact",
-          value: latestAudit.parsed.budgetImpact ? (
+          label: "予算影響",
+          value: detailBudgetImpact ? (
             <span style={{ display: "grid", gap: "0.125rem" }}>
               <span
                 className="tabular-nums"
                 style={{ fontFamily: "var(--font-mono)" }}
               >
-                {formatBudgetDelta(latestAudit.parsed.budgetImpact)}
+                {formatBudgetDelta(detailBudgetImpact)}
               </span>
-              {latestAudit.parsed.budgetImpact.notes ? (
+              {detailBudgetImpact.notes ? (
                 <span
                   style={{
                     fontSize: "0.8125rem",
                     color: "var(--color-text-secondary)",
                   }}
                 >
-                  {latestAudit.parsed.budgetImpact.notes}
+                  {detailBudgetImpact.notes}
                 </span>
               ) : null}
             </span>
@@ -932,35 +1301,35 @@ export default async function ImprovementsPage() {
         },
         {
           label: "入稿前チェック",
-          value: latestAudit.parsed.planValidation ? (
+          value: detailAudit.parsed.planValidation ? (
             <span style={{ display: "grid", gap: "0.125rem" }}>
-              {latestAudit.parsed.planValidation.available ? (
+              {detailAudit.parsed.planValidation.available ? (
                 <span style={{ display: "flex", gap: "0.5rem" }}>
                   <StatusBadge
-                    state={planRiskToState(latestAudit.parsed.planValidation.risk)}
+                    state={planRiskToState(detailAudit.parsed.planValidation.risk)}
                   >
-                    {latestAudit.parsed.planValidation.risk}
+                    {detailAudit.parsed.planValidation.risk}
                   </StatusBadge>
                   <StatusBadge
-                    state={latestAudit.parsed.planValidation.ok ? "ok" : "error"}
+                    state={detailAudit.parsed.planValidation.ok ? "ok" : "error"}
                   >
-                    {latestAudit.parsed.planValidation.ok ? "ok" : "errors"}
+                    {detailAudit.parsed.planValidation.ok ? "ok" : "errors"}
                   </StatusBadge>
                 </span>
               ) : (
                 <StatusBadge state="idle">skipped (no ops repo)</StatusBadge>
               )}
-              {latestAudit.parsed.planValidation.summary ? (
+              {detailAudit.parsed.planValidation.summary ? (
                 <span
                   style={{
                     fontSize: "0.8125rem",
                     color: "var(--color-text-secondary)",
                   }}
                 >
-                  {latestAudit.parsed.planValidation.summary}
+                  {detailAudit.parsed.planValidation.summary}
                 </span>
               ) : null}
-              {latestAudit.parsed.planValidation.counts ? (
+              {detailAudit.parsed.planValidation.counts ? (
                 <span
                   className="tabular-nums"
                   style={{
@@ -969,11 +1338,11 @@ export default async function ImprovementsPage() {
                     color: "var(--color-text-secondary)",
                   }}
                 >
-                  creates={latestAudit.parsed.planValidation.counts.creates}{" "}
-                  updates={latestAudit.parsed.planValidation.counts.updates}{" "}
-                  deletes={latestAudit.parsed.planValidation.counts.deletes}{" "}
-                  errors={latestAudit.parsed.planValidation.counts.errors}{" "}
-                  warnings={latestAudit.parsed.planValidation.counts.warnings}
+                  creates={detailAudit.parsed.planValidation.counts.creates}{" "}
+                  updates={detailAudit.parsed.planValidation.counts.updates}{" "}
+                  deletes={detailAudit.parsed.planValidation.counts.deletes}{" "}
+                  errors={detailAudit.parsed.planValidation.counts.errors}{" "}
+                  warnings={detailAudit.parsed.planValidation.counts.warnings}
                 </span>
               ) : null}
             </span>
@@ -982,33 +1351,33 @@ export default async function ImprovementsPage() {
           ),
         },
         {
-          label: "Snapshot IDs",
+          label: "参照データ",
           value:
-            latestAudit.parsed.snapshotIds.length === 0 ? (
+            detailAudit.parsed.snapshotIds.length === 0 ? (
               <span>—</span>
             ) : (
               <span style={{ fontFamily: "var(--font-mono)" }}>
-                {latestAudit.parsed.snapshotIds.length} 件 (
-                {latestAudit.parsed.snapshotIds.slice(0, 4).join(", ")}
-                {latestAudit.parsed.snapshotIds.length > 4 ? ", …" : ""})
+                {detailAudit.parsed.snapshotIds.length} 件 (
+                {detailAudit.parsed.snapshotIds.slice(0, 4).join(", ")}
+                {detailAudit.parsed.snapshotIds.length > 4 ? ", …" : ""})
               </span>
             ),
         },
         {
-          label: "Pull request",
+          label: "Pull Request",
           value:
-            latestAudit.parsed.prNumber !== null ? (
-              latestAudit.parsed.htmlUrl ? (
+            detailAudit.parsed.prNumber !== null ? (
+              detailAudit.parsed.htmlUrl ? (
                 <a
-                  href={latestAudit.parsed.htmlUrl}
+                  href={detailAudit.parsed.htmlUrl}
                   target="_blank"
                   rel="noreferrer noopener"
                   style={{ color: "var(--color-accent)" }}
                 >
-                  <InlineCode>#{latestAudit.parsed.prNumber}</InlineCode>
+                  <InlineCode>#{detailAudit.parsed.prNumber}</InlineCode>
                 </a>
               ) : (
-                <InlineCode>#{latestAudit.parsed.prNumber}</InlineCode>
+                <InlineCode>#{detailAudit.parsed.prNumber}</InlineCode>
               )
             ) : (
               <span>—</span>
@@ -1017,16 +1386,24 @@ export default async function ImprovementsPage() {
       ]
     : [];
 
-  const latestAuditState: StatusState = !dbReady
+  const detailAuditState: StatusState = !dbReady
     ? "warn"
-    : !latestAudit
+    : showMissingSelectedAudit
+      ? "warn"
+      : !detailAudit
       ? "idle"
-      : actionToState(latestAudit.row.action);
-  const latestAuditLabel = !dbReady
+      : actionToState(detailAudit.row.action);
+  const detailAuditLabel = !dbReady
     ? "warn"
-    : !latestAudit
-      ? "no records yet"
-      : latestAudit.row.action;
+    : showMissingSelectedAudit
+      ? "履歴なし"
+      : !detailAudit
+        ? "未実行"
+        : actionLabel(detailAudit.row.action);
+  const detailPanelTitle = selectedAudit ? "過去の改善提案" : "最新の改善提案";
+  const detailPanelSubtitle = selectedAudit
+    ? `${formatDateTime(selectedAudit.row.createdAt, { timeZone: pageDisplayTimeZone })} の提案内容`
+    : "最新の提案内容、リスク、予算影響、承認待ち状況";
 
   return (
     <>
@@ -1091,8 +1468,8 @@ export default async function ImprovementsPage() {
                 : !scheduleRow
                   ? "未登録"
                   : scheduleRow.enabled
-                    ? "on"
-                    : "off"}
+                    ? "有効"
+                    : "無効"}
             </StatusDot>
           }
         >
@@ -1112,10 +1489,10 @@ export default async function ImprovementsPage() {
         </Panel>
 
         <Panel
-          title="最新の改善提案"
-          subtitle="最新の提案内容、リスク、予算影響、承認待ち状況"
+          title={detailPanelTitle}
+          subtitle={detailPanelSubtitle}
           status={
-            <StatusDot state={latestAuditState}>{latestAuditLabel}</StatusDot>
+            <StatusDot state={detailAuditState}>{detailAuditLabel}</StatusDot>
           }
         >
           {!dbReady ? (
@@ -1123,29 +1500,109 @@ export default async function ImprovementsPage() {
               title="改善提案の履歴を読み出せません"
               description="接続と健康状態を確認してください。"
             />
-          ) : !latestAudit ? (
+          ) : showMissingSelectedAudit ? (
+            <EmptyState
+              title="指定された改善提案が見つかりません"
+              description="下の履歴から表示する提案を選び直してください。"
+            />
+          ) : !detailAudit ? (
             <EmptyState
               title="改善提案はまだ実行されていません"
               description="自動実行画面から改善提案を有効化すると、最新の提案内容と承認待ち状況がここに表示されます。"
             />
           ) : (
-            <div style={{ display: "grid", gap: "1rem" }}>
-              <KeyValueList items={latestAuditItems} />
-              {latestAudit.parsed.summary ? (
-                <div>
-                  <div
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 600,
-                      letterSpacing: "0.06em",
-                      textTransform: "uppercase",
-                      color: "var(--color-text-secondary)",
-                      marginBottom: "0.25rem",
-                    }}
-                  >
-                    提案サマリ
+            <div id="improvement-detail" style={{ display: "grid", gap: "1rem" }}>
+              {selectedAudit ? (
+                <div
+                  style={{
+                    fontSize: "0.8125rem",
+                    color: "var(--color-text-secondary)",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: "0.75rem",
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span>
+                    履歴ID <InlineCode>{selectedAudit.row.id}</InlineCode>
+                  </span>
+                  <Link href="/improvements" className="btn btn--ghost btn--sm">
+                    最新に戻る
+                  </Link>
+                </div>
+              ) : null}
+              <KeyValueList items={detailAuditItems} />
+              {detailProposals.length > 0 ? (
+                <div style={{ display: "grid", gap: "0.75rem" }}>
+                  <SectionLabel>提案された改善</SectionLabel>
+                  <div style={{ display: "grid", gap: "0.75rem" }}>
+                    {detailProposals.map((proposal, index) => (
+                      <div
+                        key={`${proposal.hierarchy}:${proposal.target}:${index}`}
+                        style={{
+                          border: "1px solid var(--color-border-subtle)",
+                          borderRadius: "var(--radius-md)",
+                          padding: "0.875rem",
+                          display: "grid",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "0.5rem",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <StatusBadge state="info">
+                            {proposalCategoryLabel(proposal.category)}
+                          </StatusBadge>
+                          <span style={{ fontWeight: 600 }}>
+                            {hierarchyLabel(proposal.hierarchy)}: {proposal.target || "未指定"}
+                          </span>
+                        </div>
+                        {proposal.proposedChange ? (
+                          <div>{proposal.proposedChange}</div>
+                        ) : null}
+                        {proposal.rationale ? (
+                          <div
+                            style={{
+                              fontSize: "0.8125rem",
+                              color: "var(--color-text-secondary)",
+                            }}
+                          >
+                            理由: {proposal.rationale}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
-                  <p style={{ margin: 0 }}>{latestAudit.parsed.summary}</p>
+                </div>
+              ) : null}
+              {detailMediaBuyerRationale || detailDryRunSummary ? (
+                <div style={{ display: "grid", gap: "0.5rem" }}>
+                  <SectionLabel>提案の補足</SectionLabel>
+                  {detailMediaBuyerRationale ? (
+                    <p style={{ margin: 0 }}>{detailMediaBuyerRationale}</p>
+                  ) : null}
+                  {detailDryRunSummary ? (
+                    <p
+                      style={{
+                        margin: 0,
+                        color: "var(--color-text-secondary)",
+                        fontSize: "0.875rem",
+                      }}
+                    >
+                      入稿前チェック: {detailDryRunSummary}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+              {detailAudit.parsed.summary ? (
+                <div>
+                  <SectionLabel>実行サマリ</SectionLabel>
+                  <p style={{ margin: 0 }}>{detailAudit.parsed.summary}</p>
                 </div>
               ) : null}
             </div>
@@ -1157,7 +1614,7 @@ export default async function ImprovementsPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${auditCount} 件 (直近 25)`
+              : paginationLabel(auditsPagination)
           }
           status={
             <StatusDot
@@ -1167,7 +1624,7 @@ export default async function ImprovementsPage() {
                 ? "warn"
                 : auditCount === 0
                   ? "idle"
-                  : `${auditCount} records`}
+                  : `${auditCount} 件`}
             </StatusDot>
           }
         >
@@ -1177,17 +1634,25 @@ export default async function ImprovementsPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={auditRows}
-              rowKey={({ row }) => row.id}
-              columns={auditColumns}
-              empty={
-                <EmptyState
-                  title="改善提案の履歴はまだありません"
-                  description="改善提案が実行されると、広告アカウントごとの結果、リスク、判断、予算影響、承認待ち番号が表示されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={auditRows}
+                rowKey={({ row }) => row.id}
+                columns={auditColumns}
+                empty={
+                  <EmptyState
+                    title="改善提案の履歴はまだありません"
+                    description="改善提案が実行されると、広告アカウントごとの結果、リスク、判断、予算影響、承認待ち番号が表示されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/improvements"
+                searchParams={resolvedSearchParams}
+                pageParam="proposalsPage"
+                state={auditsPagination}
+              />
+            </div>
           )}
         </Panel>
 
@@ -1196,7 +1661,7 @@ export default async function ImprovementsPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${runsCount} 件 (直近 25)`
+              : paginationLabel(runsPagination)
           }
           status={
             <StatusDot
@@ -1216,17 +1681,25 @@ export default async function ImprovementsPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={runs}
-              rowKey={(row) => row.id}
-              columns={runColumns}
-              empty={
-                <EmptyState
-                  title="改善提案はまだ実行されていません"
-                  description="自動実行を有効化すると、各回の処理件数と結果がここに記録されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={runs}
+                rowKey={(row) => row.id}
+                columns={runColumns}
+                empty={
+                  <EmptyState
+                    title="改善提案はまだ実行されていません"
+                    description="自動実行を有効化すると、各回の処理件数と結果がここに記録されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/improvements"
+                searchParams={resolvedSearchParams}
+                pageParam="runsPage"
+                state={runsPagination}
+              />
+            </div>
           )}
         </Panel>
 
@@ -1235,7 +1708,7 @@ export default async function ImprovementsPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${aiRunsCount} 件 (直近 25)`
+              : paginationLabel(aiRunsPagination)
           }
           status={
             <StatusDot
@@ -1255,17 +1728,25 @@ export default async function ImprovementsPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={aiRuns}
-              rowKey={(row) => row.id}
-              columns={aiRunColumns}
-              empty={
-                <EmptyState
-                  title="AI 判断履歴はまだありません"
-                  description="改善提案が実行されると、判断結果とコストの概要がここに保存されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={aiRuns}
+                rowKey={(row) => row.id}
+                columns={aiRunColumns}
+                empty={
+                  <EmptyState
+                    title="AI 判断履歴はまだありません"
+                    description="改善提案が実行されると、判断結果とコストの概要がここに保存されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/improvements"
+                searchParams={resolvedSearchParams}
+                pageParam="aiRunsPage"
+                state={aiRunsPagination}
+              />
+            </div>
           )}
         </Panel>
       </div>

@@ -419,6 +419,25 @@ export interface ImprovementPrPipelineInput {
   baseRef?: string;
 }
 
+export interface ImprovementPrPerformanceMetrics {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  ctr?: number;
+  cpc?: number;
+  cpa?: number;
+}
+
+export interface ImprovementPrAnalysisWindow {
+  periodStart: string;
+  periodEnd: string;
+  priorPeriodStart?: string;
+  priorPeriodEnd?: string;
+  current: ImprovementPrPerformanceMetrics;
+  prior?: ImprovementPrPerformanceMetrics;
+}
+
 export interface ImprovementPrAnalystOutput {
   commentary: string;
   deltas: Record<string, string>;
@@ -521,13 +540,14 @@ export interface ImprovementPrAuditOutput {
  * 早期 short-circuit を担当する。
  */
 export interface ImprovementPrPipelineRunner {
-  runAnalyst(input: {
-    accountId: string;
-    accountDisplayName: string;
-    currency: string;
-    snapshotIds: string[];
-    currentDailyBudget: number;
-  }): Promise<ImprovementPrAgentRunResult<ImprovementPrAnalystOutput>>;
+	  runAnalyst(input: {
+	    accountId: string;
+	    accountDisplayName: string;
+	    currency: string;
+	    snapshotIds: string[];
+	    currentDailyBudget: number;
+	    analysisWindow: ImprovementPrAnalysisWindow;
+	  }): Promise<ImprovementPrAgentRunResult<ImprovementPrAnalystOutput>>;
   runStrategy(input: {
     accountId: string;
     accountDisplayName: string;
@@ -655,7 +675,7 @@ export interface ImprovementPrAuditInput {
   auditDecision: ImprovementPrAuditDecision | null;
   classification: ImprovementPrAuditClassification | null;
   dangerousCategories: string[];
-  /** 実体としては budget impact / dry-run summary / proposalCount / snapshotIds 等を含む。 */
+  /** 実体としては budget impact / proposalCount / snapshotIds 等を含む。 */
   metadata: Record<string, unknown>;
   summary: string;
 }
@@ -706,6 +726,11 @@ export interface RunImprovementPrOptions {
   snapshotIds?: string[];
   /** 現在の日次予算 (account 合計, currency 単位)。0 が既定。 */
   currentDailyBudget?: number;
+  /**
+   * 改善提案の判断に使う実績期間。未指定時は後方互換のため実行日・0実績に倒す。
+   * production cron は前日までの直近 7 日を渡す。
+   */
+  analysisWindow?: ImprovementPrAnalysisWindow;
   riskTolerance?: ImprovementPrRiskTolerance;
   /** ops repo "owner/name". 未設定だと PR 経路は無効化される。 */
   repo?: string;
@@ -819,6 +844,8 @@ async function runPipelineMode(
   const creativeIds: string[] = [];
   const creativeAttachments: ImprovementPrCreativeAttachment[] = [];
   const safeCategories = opts.safeCategories ?? [];
+  const analysisWindow =
+    opts.analysisWindow ?? defaultImprovementPrAnalysisWindow(opts.now?.() ?? new Date());
 
   // ── 1) analyst ────────────────────────────────────────────────────────
   const analyst = await pipeline.runAnalyst({
@@ -827,6 +854,7 @@ async function runPipelineMode(
     currency: account.currency,
     snapshotIds: opts.snapshotIds ?? [],
     currentDailyBudget: opts.currentDailyBudget ?? 0,
+    analysisWindow,
   });
   const analystRow = await opts.store.createAiRun(analyst.aiRunInput);
   aiRunIds.push(analystRow.id);
@@ -1183,6 +1211,9 @@ async function runPipelineMode(
         skippedAt: "media_buyer",
         decision: mediaBuyer.decision,
         proposalCount: mediaBuyer.output.proposals.length,
+        proposals: mediaBuyer.output.proposals,
+        mediaBuyerRationale: mediaBuyer.output.rationale,
+        budgetImpact: mediaBuyer.output.budgetImpact,
         creativeIds,
       },
       summary: `media_buyer decision=${mediaBuyer.decision}; PR not opened`,
@@ -1379,6 +1410,8 @@ async function runPipelineMode(
       metadata: {
         skippedAt: "policy_auto_blocked",
         proposalCount: mediaBuyer.output.proposals.length,
+        proposals: mediaBuyer.output.proposals,
+        mediaBuyerRationale: mediaBuyer.output.rationale,
         fileCount: gitops.output.files.length,
         budgetImpact: mediaBuyer.output.budgetImpact,
         planValidation: planValidationToMetadata(planValidation),
@@ -1465,6 +1498,9 @@ async function runPipelineMode(
         attachedCreativeIds: attachableCreativeIds,
         blockedCreativeIds,
         proposalCount: mediaBuyer.output.proposals.length,
+        proposals: mediaBuyer.output.proposals,
+        mediaBuyerRationale: mediaBuyer.output.rationale,
+        budgetImpact: mediaBuyer.output.budgetImpact,
         aiClassification: audit.output.classification,
         aiDecision: audit.decision,
         aiDangerousCategories: audit.output.dangerousCategories,
@@ -1528,6 +1564,8 @@ async function runPipelineMode(
     dangerousCategories: finalDangerousCategories,
     metadata: {
       proposalCount: mediaBuyer.output.proposals.length,
+      proposals: mediaBuyer.output.proposals,
+      mediaBuyerRationale: mediaBuyer.output.rationale,
       fileCount: gitops.output.files.length,
       // implementation item: PR diff には gitops files に加えて 1 creative につき
       // 1 manifest YAML (`ads/accounts/<key>/creatives/<creative_id>.yaml`) を
@@ -1662,6 +1700,20 @@ function buildSummary(args: BuildSummaryArgs): ImprovementPrSummary {
     auditDecision: args.audit?.decision ?? null,
     dangerousCategories: args.audit?.dangerousCategories ?? [],
     ...(args.errorMessage !== undefined ? { errorMessage: args.errorMessage } : {}),
+  };
+}
+
+function defaultImprovementPrAnalysisWindow(now: Date): ImprovementPrAnalysisWindow {
+  const period = now.toISOString().slice(0, 10);
+  return {
+    periodStart: period,
+    periodEnd: period,
+    current: {
+      spend: 0,
+      impressions: 0,
+      clicks: 0,
+      conversions: 0,
+    },
   };
 }
 
@@ -2314,4 +2366,3 @@ async function runImageGenerationHop(
     providerError: null,
   };
 }
-

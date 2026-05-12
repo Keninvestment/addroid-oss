@@ -18,6 +18,7 @@ import {
   registerCronPresets,
   resolveCronScheduleTimeZone,
   runDailyReportOnce,
+  runBudgetGuardOnce,
   runExecuteApply,
   runGithubPollOnce,
   runImprovementPrOnce,
@@ -26,6 +27,11 @@ import {
   runSlackCommandJob,
   startCronRun,
   type DailyReportSummary,
+  type DailyReportInsightsProvider,
+  type DailyReportSnapshotStore,
+  type BudgetGuardSummary,
+  type ImprovementPrAuditWriter,
+  type ImprovementPrExecutionMode,
   type ImprovementPrSummary,
   type JsonValue,
   type RetentionSweepSummary,
@@ -75,9 +81,10 @@ import {
 } from "./lib/daily-report-runtime.js";
 import { resolveMetaCliInsightsProvider } from "./lib/meta-cli-insights-runtime.js";
 import {
+  buildBudgetGuardSpendContext,
   createBudgetGuardAuditRunner,
   createPrismaBudgetGuardStore,
-  loadBudgetGuardPolicy,
+  loadBudgetGuardPolicyForRoot,
 } from "./lib/budget-guard-runtime.js";
 import {
   createImprovementPrAuditWriter,
@@ -86,6 +93,8 @@ import {
   createImprovementPrPlanValidator,
   createPrismaImprovementPrStore,
 } from "./lib/improvement-pr-runtime.js";
+import { loadRecentPerformanceSnapshotContext } from "./lib/improvement-pr-performance-context.js";
+import { refreshLatestInsightsForManualImprovementPr } from "./lib/improvement-pr-insights-refresh.js";
 import { createPrismaPerformanceSnapshotRetentionStore } from "./lib/retention-runtime.js";
 import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
 import { selectImageProviderForWorker } from "./lib/image-runtime.js";
@@ -569,7 +578,132 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             } else {
               await finishCronRun(cronStore, handle, aggregate);
             }
+          } else if (presetName === "budget_guard") {
+            const accounts = await prisma.adAccount.findMany({
+              where: { workspaceId: workspace.id, active: true },
+              select: {
+                id: true,
+                key: true,
+                displayName: true,
+                currency: true,
+                modeOverride: true,
+              },
+              orderBy: { key: "asc" },
+            });
+            const wsMode = await loadWorkspaceMode(prisma, workspace.id);
+            const loadedPolicy = loadBudgetGuardPolicyForRoot(opsRepoRootDir);
+            const summaries: BudgetGuardSummary[] = [];
+            const errors: string[] = [];
+            const auditRunner = createBudgetGuardAuditRunner({
+              provider: llmSelection.provider,
+              workspaceId: workspace.id,
+              cronRunId: handle.cronRunId,
+            });
+            for (const acc of accounts) {
+              const effectiveMode = resolveExecutionMode(
+                wsMode,
+                acc.modeOverride
+              );
+              const accountBudget = loadedPolicy?.accountBudgets[acc.key];
+              const summary = await adAccountLockProvider.withLock(
+                buildAdAccountLockKey({
+                  workspaceId: workspace.id,
+                  accountKey: acc.key,
+                }),
+                async () => {
+                  if (!loadedPolicy) {
+                    return runBudgetGuardOnce({
+                      workspaceId: workspace.id,
+                      mode: effectiveMode,
+                      accountKey: acc.key,
+                      policy: null,
+                      store: budgetGuardStore,
+                      runner: auditRunner,
+                    });
+                  }
+                  return runBudgetGuardOnce({
+                    workspaceId: workspace.id,
+                    mode: effectiveMode,
+                    accountKey: acc.key,
+                    policy: loadedPolicy.policy,
+                    spendContext: await buildBudgetGuardSpendContext({
+                      prisma,
+                      accountId: acc.id,
+                      dailyBudget: accountBudget?.dailyBudget ?? 0,
+                      monthlyBudget: accountBudget?.monthlyBudget ?? 0,
+                      currency: accountBudget?.currency ?? acc.currency ?? "JPY",
+                    }),
+                    store: budgetGuardStore,
+                    runner: auditRunner,
+                  });
+                }
+              );
+              summaries.push(summary);
+              const level: "info" | "warn" | "error" =
+                summary.status === "ai_failed"
+                  ? "error"
+                  : summary.status === "policy_missing" ||
+                      summary.status === "no_account"
+                    ? "warn"
+                    : "info";
+              await cronStore.recordExecutionLog({
+                cronRunId: handle.cronRunId,
+                workspaceId: workspace.id,
+                kind: "cron",
+                refType: "cron_run",
+                refId: handle.cronRunId,
+                level,
+                message:
+                  `budget_guard ${acc.key}: ${summary.status}` +
+                  (summary.errorMessage ? ` — ${summary.errorMessage}` : ""),
+                payload: budgetGuardSummaryToPayload(summary),
+              });
+              if (summary.status === "ai_failed") {
+                errors.push(`${acc.key}: ${summary.errorMessage ?? "ai failed"}`);
+                const budgetRunsUrl = buildWebUrl(webBaseUrl, "/cron/runs");
+                await sendSlackNotification({
+                  kind: "budget_guard.failed",
+                  data: {
+                    adAccountKey: acc.key,
+                    errorMessage: summary.errorMessage ?? "ai failed",
+                    mode: summary.mode,
+                    ...(summary.aiRunId ? { aiRunId: summary.aiRunId } : {}),
+                    ...(budgetRunsUrl ? { runsUrl: budgetRunsUrl } : {}),
+                  },
+                });
+              }
+            }
+            const aggregate = {
+              kind: "budget_guard",
+              status: errors.length > 0 ? "failed" : "succeeded",
+              accountsProcessed: summaries.length,
+              succeeded: summaries.filter((s) => s.status === "succeeded").length,
+              policy_missing: summaries.filter((s) => s.status === "policy_missing").length,
+              ai_failed: summaries.filter((s) => s.status === "ai_failed").length,
+              no_account: summaries.filter((s) => s.status === "no_account").length,
+              llmProvider: llmSelection.choice,
+              policyPath: opsRepoRootDir
+                ? "workflows/budget-guard.yaml"
+                : null,
+              accounts: summaries.map((s) => budgetGuardSummaryToPayload(s)),
+            };
+            if (errors.length > 0) {
+              await failCronRun(
+                cronStore,
+                handle,
+                `budget_guard had AI failures: ${errors.join("; ")}`
+              );
+            } else {
+              await finishCronRun(cronStore, handle, {
+                ...aggregate,
+                ...(summaries.length === 0
+                  ? { note: "no active ad_accounts in workspace" }
+                  : {}),
+              });
+            }
           } else if (presetName === "improvement_pr") {
+            const manualRun = isManualCronJobData(job.data);
+            const manualRefreshNow = new Date();
             // regression fix: workspace mode + per-account modeOverride を取得し、
             // 解決した実効 mode を ad_account ごとに改めて渡す。dangerous category
             // / safe-category の policy gate (execution-mode.ts) が mode に応じて
@@ -580,6 +714,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                 id: true,
                 key: true,
                 displayName: true,
+                currency: true,
+                timezoneName: true,
                 modeOverride: true,
               },
               orderBy: { key: "asc" },
@@ -625,9 +761,9 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               // を読みつつ analyst → media_buyer → gitops を順に走らせる per
               // -account パイプラインのため、Apply/Activate / 他 cron と同じ
               // canonical lock で直列化する (1 ad_account = 1 並行)。
-              // regression fix: 直近 daily_report が残した performance_snapshots
-              // を analyst input + PR body の "Snapshots" セクションへ流すため、
-              // ロック内で最新 metricDate 分の id を収集して `snapshotIds` に渡す。
+              // 自動 cron では daily_report が残した前日までの直近 7 日を使う。
+              // Web/CLI/Chat からの手動実行では、この場で最新 insights を取得し、
+              // 今日を含む直近 7 日を analyst input + PR body へ流す。
               const effectiveMode = resolveExecutionMode(
                 wsMode,
                 acc.modeOverride
@@ -638,10 +774,30 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   accountKey: acc.key,
                 }),
                 async () => {
-                  const snapshotIds = await loadLatestPerformanceSnapshotIds(
-                    prisma,
-                    acc.id
-                  );
+                  const performanceContext =
+                    manualRun
+                      ? await refreshInsightsAndLoadManualImprovementContext({
+                          prisma,
+                          cronStore,
+                          cronRunId: handle.cronRunId,
+                          workspaceId: workspace.id,
+                          accountId: acc.id,
+                          accountKey: acc.key,
+                          accountCurrency: acc.currency ?? "JPY",
+                          mode: effectiveMode,
+                          timeZone: acc.timezoneName ?? userTimeZone,
+                          insightsProvider: dailyReportInsights,
+                          snapshotStore: dailyReportStore,
+                          now: manualRefreshNow,
+                          auditWriter,
+                        })
+                      : await loadRecentPerformanceSnapshotContext(prisma, {
+                          accountId: acc.id,
+                          timeZone: acc.timezoneName ?? userTimeZone,
+                        });
+                  if ("refreshFailedSummary" in performanceContext) {
+                    return performanceContext.refreshFailedSummary;
+                  }
                   return runImprovementPrOnce({
                     workspaceId: workspace.id,
                     // regression fix: workspace + ad_account の解決済み mode。
@@ -652,7 +808,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     accountKey: acc.key,
                     repo: repoSpec,
                     baseRef,
-                    snapshotIds,
+                    snapshotIds: performanceContext.snapshotIds,
+                    analysisWindow: performanceContext.analysisWindow,
                     store: improvementPrStore,
                     pipeline: pipelineRunner,
                     publisher,
@@ -1178,7 +1335,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       provider: llmSelection.provider,
       workspaceId: workspace.id,
     }),
-    loadBudgetGuardPolicy: () => loadBudgetGuardPolicy(process.env),
+    loadBudgetGuardPolicy: () => loadBudgetGuardPolicyForRoot(opsRepoRootDir),
     improvementPrStore,
     improvementPrPipeline: createImprovementPrPipelineRunner({
       provider: llmSelection.provider,
@@ -1372,6 +1529,34 @@ function dailyReportSummaryToPayload(summary: DailyReportSummary): JsonValue {
 }
 
 /**
+ * budget_guard summary → execution_logs.payload / cron_runs.output accounts。
+ */
+function budgetGuardSummaryToPayload(summary: BudgetGuardSummary): JsonValue {
+  const payload: Record<string, JsonValue> = {
+    status: summary.status,
+    workspaceId: summary.workspaceId,
+    accountKey: summary.accountKey,
+    accountId: summary.accountId,
+    mode: summary.mode,
+    aiRunId: summary.aiRunId,
+    classification: summary.classification,
+    decision: summary.decision,
+    dangerousCategories: summary.dangerousCategories,
+    policyReasons: summary.policyReasons,
+    candidateCount: summary.candidateCount,
+    alerts: summary.alerts.map((alert) => ({
+      rule: alert.rule,
+      severity: alert.severity,
+      message: alert.message,
+      observedValue: alert.observedValue,
+      threshold: alert.threshold,
+    })),
+  };
+  if (summary.errorMessage) payload.errorMessage = summary.errorMessage;
+  return payload;
+}
+
+/**
  * Regression fix: improvement_pr summary → execution_logs.payload。
  */
 function improvementPrSummaryToPayload(summary: ImprovementPrSummary): JsonValue {
@@ -1428,17 +1613,6 @@ function retentionSummaryToPayload(summary: RetentionSweepSummary): JsonValue {
   };
 }
 
-/**
- * Regression fix: improvement_pr に紐付ける `performance_snapshots`
- * の id を返す。直近 daily_report が確定させた最新 metricDate に属する全行を
- * 1 セットとして扱う (account/campaign/adset/ad の混在)。
- *
- * - スナップショットがまだ無い account では空配列を返す。`composePrBody` は
- *   その場合 "- (none)" を出力するが、これは「直近 daily_report が未実行」の
- *   正当な状態であり、PR をブロックしない。
- * - 順序は createdAt 昇順 (= daily_report が書いた順) で固定し、PR body の
- *   差分が冪等になるようにする。
- */
 /**
  * Regression fix: cron tick 単位で `workspaces.executionMode` を
  * 読み出す。worker 起動時にも `ensureWorkspace` が値を返すが、UI/CLI の mode
@@ -1586,6 +1760,119 @@ function readMetricDateFromCronJobData(data: unknown): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(trimmed) ? trimmed : null;
 }
 
+function isManualCronJobData(data: unknown): boolean {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+  return (data as Record<string, unknown>).manual === true;
+}
+
+async function refreshInsightsAndLoadManualImprovementContext(input: {
+  prisma: PrismaClient;
+  cronStore: {
+    recordExecutionLog(args: {
+      cronRunId: string;
+      workspaceId: string;
+      kind: string;
+      refType: string;
+      refId: string;
+      level: "info" | "warn" | "error";
+      message: string;
+      payload?: JsonValue;
+    }): Promise<unknown>;
+  };
+  cronRunId: string;
+  workspaceId: string;
+  accountId: string;
+  accountKey: string;
+  accountCurrency: string;
+  mode: ImprovementPrExecutionMode;
+  timeZone: string;
+  insightsProvider: DailyReportInsightsProvider;
+  snapshotStore: DailyReportSnapshotStore;
+  now: Date;
+  auditWriter: ImprovementPrAuditWriter;
+}): Promise<
+  | Awaited<ReturnType<typeof loadRecentPerformanceSnapshotContext>>
+  | { refreshFailedSummary: ImprovementPrSummary }
+> {
+  const refresh = await refreshLatestInsightsForManualImprovementPr({
+    accountId: input.accountId,
+    accountKey: input.accountKey,
+    timeZone: input.timeZone,
+    insightsProvider: input.insightsProvider,
+    store: input.snapshotStore,
+    now: input.now,
+  });
+  const message =
+    `improvement_pr ${input.accountKey}: refreshed latest insights ` +
+    `${refresh.datesSucceeded.length}/${refresh.datesRequested.length} dates, ` +
+    `${refresh.rowsUpserted} rows`;
+  await input.cronStore.recordExecutionLog({
+    cronRunId: input.cronRunId,
+    workspaceId: input.workspaceId,
+    kind: "cron",
+    refType: "cron_run",
+    refId: input.cronRunId,
+    level:
+      refresh.status === "failed"
+        ? "error"
+        : refresh.status === "partial"
+          ? "warn"
+          : "info",
+    message,
+    payload: refresh as unknown as JsonValue,
+  });
+
+  if (refresh.status === "failed") {
+    const errorMessage =
+      "最新レポートを取得できなかったため、古い実績を使った改善提案は作成しませんでした。" +
+      (refresh.errors.length > 0 ? ` ${refresh.errors.join("; ")}` : "");
+    await input.auditWriter.recordImprovementPrAudit({
+      workspaceId: input.workspaceId,
+      accountKey: input.accountKey,
+      accountId: input.accountId,
+      cronRunId: input.cronRunId,
+      action: "improvement_pr.failed",
+      pullRequest: null,
+      aiRunIds: [],
+      auditDecision: null,
+      classification: null,
+      dangerousCategories: [],
+      metadata: {
+        failedAt: "refresh_insights",
+        refresh,
+      },
+      summary: `improvement_pr refresh_insights failed; PR not opened`,
+    });
+    return {
+      refreshFailedSummary: {
+        status: "ai_failed",
+        workspaceId: input.workspaceId,
+        accountKey: input.accountKey,
+        accountId: input.accountId,
+        mode: input.mode,
+        aiRunId: null,
+        aiRunIds: [],
+        creativeIds: [],
+        decision: null,
+        proposalCount: 0,
+        currency: input.accountCurrency,
+        pullRequest: null,
+        classification: null,
+        auditDecision: null,
+        dangerousCategories: [],
+        errorMessage,
+      },
+    };
+  }
+
+  return loadRecentPerformanceSnapshotContext(input.prisma, {
+    accountId: input.accountId,
+    timeZone: input.timeZone,
+    now: input.now,
+    includeToday: true,
+  });
+}
+
 function resolveRuntimeUserTimeZone(env: NodeJS.ProcessEnv): string {
   const candidates = [
     env.ADDROID_USER_TIMEZONE,
@@ -1604,24 +1891,6 @@ function resolveRuntimeUserTimeZone(env: NodeJS.ProcessEnv): string {
     }
   }
   return "UTC";
-}
-
-async function loadLatestPerformanceSnapshotIds(
-  client: PrismaClient,
-  accountId: string
-): Promise<string[]> {
-  const latest = await client.performanceSnapshot.findFirst({
-    where: { accountId },
-    orderBy: { metricDate: "desc" },
-    select: { metricDate: true },
-  });
-  if (!latest) return [];
-  const rows = await client.performanceSnapshot.findMany({
-    where: { accountId, metricDate: latest.metricDate },
-    select: { id: true },
-    orderBy: { createdAt: "asc" },
-  });
-  return rows.map((r) => r.id);
 }
 
 export type { PgBoss };

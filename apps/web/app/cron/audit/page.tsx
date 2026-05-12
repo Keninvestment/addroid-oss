@@ -1,15 +1,26 @@
 import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
 import { DataTable } from "../../../components/ui/DataTable";
+import { Pagination } from "../../../components/ui/Pagination";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { PageHeader } from "../../../components/ui/PageHeader";
 import { KeyValueList } from "../../../components/ui/KeyValueList";
 import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
 import { ensureWebWorkspace } from "../../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
-export default async function AuditLogPage() {
+interface SearchParamsInput {
+  page?: string | string[];
+}
+
+export default async function AuditLogPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   type Row = {
     id: string;
     createdAt: Date;
@@ -20,28 +31,43 @@ export default async function AuditLogPage() {
   };
 
   let rows: Row[] = [];
+  let latestRows: Row[] = [];
+  let total = 0;
   let warning: string | null = null;
   try {
     const workspace = await ensureWebWorkspace();
-    rows = await prisma.auditLog.findMany({
-      where: { workspaceId: workspace.id },
-      orderBy: { createdAt: "desc" },
-      take: 100,
-      select: { id: true, createdAt: true, actor: true, action: true, target: true, ref: true },
-    });
+    const where = { workspaceId: workspace.id };
+    total = await prisma.auditLog.count({ where });
+    const pagination = getPaginationState(resolvedSearchParams, "page", total);
+    [rows, latestRows] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip: pagination.skip,
+        take: pagination.take,
+        select: { id: true, createdAt: true, actor: true, action: true, target: true, ref: true },
+      }),
+      prisma.auditLog.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        select: { id: true, createdAt: true, actor: true, action: true, target: true, ref: true },
+      }),
+    ]);
   } catch {
     warning = "保存先を確認してください。";
   }
 
-  const latest = rows[0] ?? null;
-  const userActions = rows.filter((row) => row.actor.startsWith("user:")).length;
-  const automatedActions = rows.filter(
+  const latest = latestRows[0] ?? null;
+  const userActions = latestRows.filter((row) => row.actor.startsWith("user:")).length;
+  const automatedActions = latestRows.filter(
     (row) => row.actor.startsWith("agent:") || row.actor.includes("cron")
   ).length;
-  const approvalActions = rows.filter(
+  const approvalActions = latestRows.filter(
     (row) => row.action.includes("pr.") || row.action.includes("approval")
   ).length;
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const pagination = getPaginationState(resolvedSearchParams, "page", total);
 
   return (
     <>
@@ -72,17 +98,18 @@ export default async function AuditLogPage() {
           />
         </Panel>
 
-        <Panel title="操作イベント" subtitle={warning ?? `${rows.length} 件`}>
-          <DataTable
-            rows={rows}
-            rowKey={(row) => row.id}
-            empty={
-              <EmptyState
-                title="操作履歴はまだありません。"
-                description="AdDroid が初回 PR を生成すると記録されます。"
-              />
-            }
-            columns={[
+        <Panel title="操作イベント" subtitle={warning ?? paginationLabel(pagination)}>
+          <div>
+            <DataTable
+              rows={rows}
+              rowKey={(row) => row.id}
+              empty={
+                <EmptyState
+                  title="操作履歴はまだありません。"
+                  description="AdDroid が初回 PR を生成すると記録されます。"
+                />
+              }
+              columns={[
               {
                 header: "日時",
                 cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
@@ -93,8 +120,15 @@ export default async function AuditLogPage() {
               { header: "内容", cell: (row) => actionLabel(row.action) },
               { header: "対象", cell: (row) => targetLabel(row.target), className: "mono" },
               { header: "関連ID", cell: (row) => row.ref ? shortId(row.ref) : "—", className: "mono" },
-            ]}
-          />
+              ]}
+            />
+            <Pagination
+              basePath="/cron/audit"
+              searchParams={resolvedSearchParams}
+              pageParam="page"
+              state={pagination}
+            />
+          </div>
         </Panel>
       </div>
     </>

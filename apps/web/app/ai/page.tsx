@@ -14,16 +14,22 @@ import { StatusBadge } from "../../components/ui/StatusBadge";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { CodeBlock, InlineCode } from "../../components/ui/CodeBlock";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { getActiveCodexProviderSelection } from "../../lib/codex-runtime";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 import { AiProviderForm } from "./AiProviderForm";
 
 export const dynamic = "force-dynamic";
 
 const LLM_PROVIDER_KEYS = ["codex", "openai", "anthropic", "mock"] as const;
+
+interface SearchParamsInput {
+  runsPage?: string | string[];
+}
 
 interface ProviderRow {
   provider: string;
@@ -89,12 +95,20 @@ function confidenceState(value: number): StatusState {
   return "idle";
 }
 
-export default async function AiPage() {
+export default async function AiPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   let providers: ProviderRow[] = [];
   let runs: AiRunRow[] = [];
+  let runsTotal = 0;
   let dbReady = true;
   try {
     const workspace = await ensureWebWorkspace();
+    runsTotal = await prisma.aiRun.count({ where: { workspaceId: workspace.id } });
+    const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
     const [tokenRows, runRows] = await Promise.all([
       prisma.oAuthToken.findMany({
         where: { provider: { in: [...LLM_PROVIDER_KEYS] } },
@@ -111,7 +125,8 @@ export default async function AiPage() {
       prisma.aiRun.findMany({
         where: { workspaceId: workspace.id },
         orderBy: { createdAt: "desc" },
-        take: 50,
+        skip: runsPagination.skip,
+        take: runsPagination.take,
         select: {
           id: true,
           agent: true,
@@ -141,6 +156,7 @@ export default async function AiPage() {
   } catch {
     dbReady = false;
   }
+  const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
 
   const env = process.env;
   const llmMockEnabled = env.ADDROID_LLM_MOCK === "1";
@@ -352,10 +368,10 @@ addroid connect ai --provider codex`}
         <div className="col-span-12">
           <Panel
             title="AI Runs"
-            subtitle="ai_runs 直近 50 件 (provider / model / status / tokens を含む)"
+            subtitle={`ai_runs · ${paginationLabel(runsPagination)} (provider / model / status / tokens を含む)`}
             status={
-              <StatusDot state={!dbReady ? "warn" : runs.length === 0 ? "idle" : "ok"}>
-                {!dbReady ? "warn" : runs.length === 0 ? "idle" : `${runs.length} runs`}
+              <StatusDot state={!dbReady ? "warn" : runsTotal === 0 ? "idle" : "ok"}>
+                {!dbReady ? "warn" : runsTotal === 0 ? "idle" : `${runsTotal} runs`}
               </StatusDot>
             }
           >
@@ -365,17 +381,25 @@ addroid connect ai --provider codex`}
                 description="Prisma スキーマが未反映の可能性があります。npm run db:push を実行してください。"
               />
             ) : (
-              <DataTable
-                columns={runColumns}
-                rows={runs}
-                rowKey={(row) => row.id}
-                empty={
-                  <EmptyState
-                    title="AI run はまだ実行されていません"
-                    description="/cron から daily_report / today_report / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens が記録されます。"
-                  />
-                }
-              />
+              <div>
+                <DataTable
+                  columns={runColumns}
+                  rows={runs}
+                  rowKey={(row) => row.id}
+                  empty={
+                    <EmptyState
+                      title="AI run はまだ実行されていません"
+                      description="/cron から daily_report / today_report / improvement_pr を有効化するか、各ワークフローを Adhoc 起動すると、ここに provider / model / decision / confidence / tokens が記録されます。"
+                    />
+                  }
+                />
+                <Pagination
+                  basePath="/ai"
+                  searchParams={resolvedSearchParams}
+                  pageParam="runsPage"
+                  state={runsPagination}
+                />
+              </div>
             )}
           </Panel>
         </div>

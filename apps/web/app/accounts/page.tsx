@@ -21,6 +21,7 @@ import { StatusBadge } from "../../components/ui/StatusBadge";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { KeyValueList } from "../../components/ui/KeyValueList";
 import { DataTable } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { PageHeader } from "../../components/ui/PageHeader";
 import { InlineCode } from "../../components/ui/CodeBlock";
 import { AddAccountForm } from "./AddAccountForm";
@@ -28,6 +29,7 @@ import { SetDefaultAccountForm } from "./SetDefaultAccountForm";
 import { ReauthButton } from "./ReauthButton";
 import { RefreshBusinessesButton } from "./RefreshBusinessesButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -35,6 +37,7 @@ interface SearchParamsInput {
   oauth?: string | string[];
   reason?: string | string[];
   accounts?: string | string[];
+  reauthPage?: string | string[];
 }
 
 function single(v: string | string[] | undefined): string | undefined {
@@ -75,6 +78,7 @@ export default async function AccountsPage({
   let accounts: AccountRow[] = [];
   let defaultAdAccountId: string | null = null;
   let reauthEvents: AuditRow[] = [];
+  let reauthTotal = 0;
   let dbReady = true;
 
   try {
@@ -85,6 +89,22 @@ export default async function AccountsPage({
     });
     if (ws) {
       defaultAdAccountId = ws.defaultAdAccountId ?? null;
+      const auditWhere = {
+        workspaceId: currentWorkspace.id,
+        action: {
+          in: [
+            "oauth.meta.connected",
+            "oauth.meta.refreshed",
+            "oauth.meta.reauth_required",
+          ],
+        },
+      };
+      const auditCount = await prisma.auditLog.count({ where: auditWhere });
+      const reauthPagination = getPaginationState(
+        resolvedSearchParams,
+        "reauthPage",
+        auditCount
+      );
       const [oauthRow, accountRows, audits] = await Promise.all([
         prisma.oAuthToken.findFirst({
           where: { provider: "meta" },
@@ -109,18 +129,10 @@ export default async function AccountsPage({
           },
         }),
         prisma.auditLog.findMany({
-          where: {
-            workspaceId: currentWorkspace.id,
-            action: {
-              in: [
-                "oauth.meta.connected",
-                "oauth.meta.refreshed",
-                "oauth.meta.reauth_required",
-              ],
-            },
-          },
+          where: auditWhere,
           orderBy: { createdAt: "desc" },
-          take: 10,
+          skip: reauthPagination.skip,
+          take: reauthPagination.take,
           select: {
             id: true,
             action: true,
@@ -134,6 +146,7 @@ export default async function AccountsPage({
       oauth = oauthRow ?? null;
       accounts = accountRows;
       reauthEvents = audits;
+      reauthTotal = auditCount;
     }
   } catch {
     dbReady = false;
@@ -176,6 +189,11 @@ export default async function AccountsPage({
   const accountsQuery = single(resolvedSearchParams?.accounts);
   const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const reauthPagination = getPaginationState(
+    resolvedSearchParams,
+    "reauthPage",
+    reauthTotal
+  );
 
   return (
     <>
@@ -350,48 +368,56 @@ export default async function AccountsPage({
 
         <Panel
           title="接続履歴"
-          subtitle="Meta への接続・更新の直近 10 件"
+          subtitle={`Meta への接続・更新 · ${paginationLabel(reauthPagination)}`}
         >
-          <DataTable
-            rows={reauthEvents}
-            rowKey={(row) => row.id}
-            empty={
-              <EmptyState
-                title="再認証イベントはまだありません。"
-                description="Meta 接続・再認証・期限切れがここに記録されます。"
-              />
-            }
-            columns={[
-              {
-                header: "Time",
-                cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
-                className: "tabular mono",
-                headerClassName: "tabular",
-              },
-              {
-                header: "Action",
-                cell: (row) => (
-                  <StatusBadge
-                    state={
-                      row.action === "oauth.meta.refreshed"
-                        ? "ok"
-                        : row.action === "oauth.meta.connected"
-                          ? "info"
-                          : "warn"
-                    }
-                  >
-                    {row.action}
-                  </StatusBadge>
-                ),
-              },
-              { header: "実行者", cell: (row) => row.actor.startsWith("user:") ? "ユーザー" : row.actor },
-              {
-                header: "Ref",
-                cell: (row) => row.ref ?? "—",
-                className: "mono",
-              },
-            ]}
-          />
+          <div>
+            <DataTable
+              rows={reauthEvents}
+              rowKey={(row) => row.id}
+              empty={
+                <EmptyState
+                  title="再認証イベントはまだありません。"
+                  description="Meta 接続・再認証・期限切れがここに記録されます。"
+                />
+              }
+              columns={[
+                {
+                  header: "Time",
+                  cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
+                  className: "tabular mono",
+                  headerClassName: "tabular",
+                },
+                {
+                  header: "Action",
+                  cell: (row) => (
+                    <StatusBadge
+                      state={
+                        row.action === "oauth.meta.refreshed"
+                          ? "ok"
+                          : row.action === "oauth.meta.connected"
+                            ? "info"
+                            : "warn"
+                      }
+                    >
+                      {row.action}
+                    </StatusBadge>
+                  ),
+                },
+                { header: "実行者", cell: (row) => row.actor.startsWith("user:") ? "ユーザー" : row.actor },
+                {
+                  header: "Ref",
+                  cell: (row) => row.ref ?? "—",
+                  className: "mono",
+                },
+              ]}
+            />
+            <Pagination
+              basePath="/accounts"
+              searchParams={resolvedSearchParams}
+              pageParam="reauthPage"
+              state={reauthPagination}
+            />
+          </div>
         </Panel>
       </div>
     </>

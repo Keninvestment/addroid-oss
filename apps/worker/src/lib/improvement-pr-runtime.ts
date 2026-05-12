@@ -361,14 +361,16 @@ export function createImprovementPrPipelineRunner(
     async runAnalyst(input) {
       const agentInput: AnalystAgentInput = {
         accountId: input.accountId,
-        periodStart: yyyymmddUtc(opts.now ? opts.now() : new Date()),
-        periodEnd: yyyymmddUtc(opts.now ? opts.now() : new Date()),
-        current: {
-          spend: 0,
-          impressions: 0,
-          clicks: 0,
-          conversions: 0,
-        },
+        periodStart: input.analysisWindow.periodStart,
+        periodEnd: input.analysisWindow.periodEnd,
+        ...(input.analysisWindow.priorPeriodStart
+          ? { priorPeriodStart: input.analysisWindow.priorPeriodStart }
+          : {}),
+        ...(input.analysisWindow.priorPeriodEnd
+          ? { priorPeriodEnd: input.analysisWindow.priorPeriodEnd }
+          : {}),
+        current: input.analysisWindow.current,
+        ...(input.analysisWindow.prior ? { prior: input.analysisWindow.prior } : {}),
         snapshotIds: input.snapshotIds,
       };
       try {
@@ -672,13 +674,6 @@ function failedAiRun(args: FailedAiRunArgs): {
     finishedAt: startedAt,
   });
   return { aiRunInput, output: null, error: message };
-}
-
-function yyyymmddUtc(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = (d.getUTCMonth() + 1).toString().padStart(2, "0");
-  const day = d.getUTCDate().toString().padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 /**

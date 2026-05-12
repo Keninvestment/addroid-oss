@@ -16,6 +16,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { cronRunMonitorConfigForPreset } from "../../components/cronRunMonitorConfig";
 import { useCronRunMonitor } from "../../components/useCronRunMonitor";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { BusyLabel } from "../../components/ui/AsyncFeedback";
@@ -55,8 +56,10 @@ export function CronControls({
     | { kind: "run" }
   >(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
+  const monitorConfig = cronRunMonitorConfigForPreset(presetName);
   const runMonitor = useCronRunMonitor({
     presetName,
+    ...monitorConfig,
     onTerminal: (state) => {
       router.refresh();
       if (state.phase === "failed") {
@@ -66,6 +69,14 @@ export function CronControls({
           variant: "error",
           title: `${presetName} の手動実行が失敗しました`,
           description: msg,
+        });
+      } else if (state.phase === "timeout") {
+        toast.push({
+          variant: "info",
+          title: `${presetName} はバックグラウンドで継続中です`,
+          description:
+            state.errorMessage ??
+            "実行履歴で完了状況を確認してください。",
         });
       }
     },
@@ -334,6 +345,9 @@ export function CronControls({
             <BusyLabel>{runMonitor.label}</BusyLabel>
           ) : runMonitor.state.phase === "success" ? (
             "完了しました。"
+          ) : runMonitor.state.phase === "timeout" ? (
+            runMonitor.state.errorMessage ??
+            "画面上の確認を停止しました。実行履歴を確認してください。"
           ) : (
             `失敗しました${runMonitor.state.errorMessage ? `: ${runMonitor.state.errorMessage}` : "。"}`
           )}
@@ -440,7 +454,7 @@ function presetLabel(name: string): string {
     today_report: "当日レポート",
     improvement_pr: "改善提案",
     github_poll: "承認済み変更の確認",
-    retention_cleanup: "古い履歴の整理",
+    retention_sweep: "古い履歴の整理",
   };
   return labels[name] ?? name;
 }

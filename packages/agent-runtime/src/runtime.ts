@@ -380,6 +380,15 @@ function resolveTool(
         display: "set preset schedule",
         why: tool.why,
       };
+    case "configure_budget_guard":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "configure budget guard",
+        why: tool.why,
+      };
     case "manage_schedule":
       return commandTool(name, "schedule", buildScheduleArgs(tool.args), tool.args, tool.why);
     case "show_logs":

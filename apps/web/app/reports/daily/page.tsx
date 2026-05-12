@@ -14,6 +14,7 @@ import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
 import { PageHeader } from "../../../components/ui/PageHeader";
 import { DataTable, type DataTableColumn } from "../../../components/ui/DataTable";
+import { Pagination } from "../../../components/ui/Pagination";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { KeyValueList, type KeyValueEntry } from "../../../components/ui/KeyValueList";
 import { StatusBadge } from "../../../components/ui/StatusBadge";
@@ -22,6 +23,7 @@ import { InlineCode } from "../../../components/ui/CodeBlock";
 import { RunCronButton } from "../../../components/RunCronButton";
 import { formatDateTime, formatStoredDateOnly, resolveDisplayTimeZone } from "../../../lib/datetime";
 import { ensureWebWorkspace } from "../../../lib/meta-runtime";
+import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -99,6 +101,8 @@ interface AdAccountTimeZoneRow {
 
 interface SearchParamsInput {
   runId?: string | string[];
+  runsPage?: string | string[];
+  snapshotsPage?: string | string[];
 }
 
 function single(v: string | string[] | undefined): string | undefined {
@@ -593,22 +597,39 @@ export default async function ReportsDailyPage({
   const resolvedSearchParams = await searchParams;
   const selectedRunId = single(resolvedSearchParams?.runId) ?? null;
   let runs: CronRunRow[] = [];
+  let latestRunCandidates: CronRunRow[] = [];
+  let selectedRunFromQuery: CronRunRow | null = null;
   let snapshots: SnapshotRow[] = [];
+  let runsTotal = 0;
+  let snapshotsTotal = 0;
   let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
   let dbReady = true;
   try {
     const workspace = await ensureWebWorkspace();
-    [runs, snapshots, adAccountTimeZones] = await Promise.all([
+    const runsWhere = {
+      name: { in: ["daily_report", "today_report"] },
+      OR: [
+        { schedule: { is: { workspaceId: workspace.id } } },
+        { executionLogs: { some: { workspaceId: workspace.id } } },
+      ],
+    };
+    const snapshotsWhere = { account: { workspaceId: workspace.id } };
+    [runsTotal, snapshotsTotal] = await Promise.all([
+      prisma.cronRun.count({ where: runsWhere }),
+      prisma.performanceSnapshot.count({ where: snapshotsWhere }),
+    ]);
+    const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+    const snapshotsPagination = getPaginationState(
+      resolvedSearchParams,
+      "snapshotsPage",
+      snapshotsTotal
+    );
+    [runs, latestRunCandidates, selectedRunFromQuery, snapshots, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: {
-          name: { in: ["daily_report", "today_report"] },
-          OR: [
-            { schedule: { is: { workspaceId: workspace.id } } },
-            { executionLogs: { some: { workspaceId: workspace.id } } },
-          ],
-        },
+        where: runsWhere,
         orderBy: { startedAt: "desc" },
-        take: 25,
+        skip: runsPagination.skip,
+        take: runsPagination.take,
         select: {
           id: true,
           name: true,
@@ -620,10 +641,41 @@ export default async function ReportsDailyPage({
           output: true,
         },
       }),
+      prisma.cronRun.findMany({
+        where: runsWhere,
+        orderBy: { startedAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          name: true,
+          state: true,
+          startedAt: true,
+          finishedAt: true,
+          durationMs: true,
+          errorMessage: true,
+          output: true,
+        },
+      }),
+      selectedRunId
+        ? prisma.cronRun.findFirst({
+            where: { ...runsWhere, id: selectedRunId },
+            select: {
+              id: true,
+              name: true,
+              state: true,
+              startedAt: true,
+              finishedAt: true,
+              durationMs: true,
+              errorMessage: true,
+              output: true,
+            },
+          })
+        : Promise.resolve(null),
       prisma.performanceSnapshot.findMany({
-        where: { account: { workspaceId: workspace.id } },
+        where: snapshotsWhere,
         orderBy: [{ metricDate: "desc" }, { createdAt: "desc" }],
-        take: 50,
+        skip: snapshotsPagination.skip,
+        take: snapshotsPagination.take,
         select: {
           id: true,
           accountId: true,
@@ -648,20 +700,26 @@ export default async function ReportsDailyPage({
   }
 
   // 直近 succeeded run の output を拾う。なければ最新 run の output を拾う。
-  const parsedSummaries = runs.flatMap((r) =>
+  const parsedSummaries = latestRunCandidates.flatMap((r) =>
     parseDailyReportSummaries(r.output).map((summary) => ({ run: r, summary }))
   );
   const latestSucceeded =
     parsedSummaries.find(({ summary }) => summary.status === "succeeded") ??
     parsedSummaries[0] ??
     null;
-  const selectedRun = selectedRunId ? runs.find((run) => run.id === selectedRunId) ?? null : null;
+  const selectedRun = selectedRunId ? selectedRunFromQuery : null;
   const selectedSummaries = selectedRun ? parseDailyReportSummaries(selectedRun.output) : [];
   const displayedSummaries = selectedRun ? selectedSummaries : latestSucceeded ? [latestSucceeded.summary] : [];
   const showMissingSelectedRun = Boolean(selectedRunId && !selectedRun);
 
-  const runsCount = runs.length;
-  const snapshotsCount = snapshots.length;
+  const runsCount = runsTotal;
+  const snapshotsCount = snapshotsTotal;
+  const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+  const snapshotsPagination = getPaginationState(
+    resolvedSearchParams,
+    "snapshotsPage",
+    snapshotsTotal
+  );
   const timeZoneByAccount = new Map(
     adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
   );
@@ -963,7 +1021,7 @@ export default async function ReportsDailyPage({
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${runsCount} 件 (直近 25)`
+              : paginationLabel(runsPagination)
           }
           status={
             <StatusDot state={!dbReady ? "warn" : runsCount === 0 ? "idle" : "ok"}>
@@ -977,17 +1035,25 @@ export default async function ReportsDailyPage({
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={runs}
-              rowKey={(row) => row.id}
-              columns={runColumns}
-              empty={
-                <EmptyState
-                  title="日次レポートはまだ実行されていません"
-                  description="自動実行を有効化すると、各回の状態・対象日・所要時間がここに記録されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={runs}
+                rowKey={(row) => row.id}
+                columns={runColumns}
+                empty={
+                  <EmptyState
+                    title="日次レポートはまだ実行されていません"
+                    description="自動実行を有効化すると、各回の状態・対象日・所要時間がここに記録されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/reports/daily"
+                searchParams={resolvedSearchParams}
+                pageParam="runsPage"
+                state={runsPagination}
+              />
+            </div>
           )}
         </Panel>
 
@@ -996,7 +1062,7 @@ export default async function ReportsDailyPage({
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `直近 ${snapshotsCount} 件`
+              : paginationLabel(snapshotsPagination)
           }
           status={
             <StatusDot state={!dbReady ? "warn" : snapshotsCount === 0 ? "idle" : "ok"}>
@@ -1010,17 +1076,25 @@ export default async function ReportsDailyPage({
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={snapshots}
-              rowKey={(row) => row.id}
-              columns={snapshotColumns}
-              empty={
-                <EmptyState
-                  title="保存された成果データはまだありません"
-                  description="日次レポートが実行されると、広告アカウント、キャンペーン、広告セット、広告ごとの成果がここに保存されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={snapshots}
+                rowKey={(row) => row.id}
+                columns={snapshotColumns}
+                empty={
+                  <EmptyState
+                    title="保存された成果データはまだありません"
+                    description="日次レポートが実行されると、広告アカウント、キャンペーン、広告セット、広告ごとの成果がここに保存されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/reports/daily"
+                searchParams={resolvedSearchParams}
+                pageParam="snapshotsPage"
+                state={snapshotsPagination}
+              />
+            </div>
           )}
         </Panel>
       </div>

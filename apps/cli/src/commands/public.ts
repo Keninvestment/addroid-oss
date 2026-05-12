@@ -20,6 +20,7 @@ type CronPreset =
   | "github_poll"
   | "daily_report"
   | "today_report"
+  | "budget_guard"
   | "improvement_pr"
   | "retention_sweep";
 
@@ -239,6 +240,7 @@ function reportPreset(value: string): CronPreset | null {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
   if (v === "today" || v === "current" || v === "today_report") return "today_report";
+  if (v === "budget" || v === "budget_guard") return "budget_guard";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";

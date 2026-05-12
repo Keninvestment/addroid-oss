@@ -89,16 +89,27 @@ export const AGENT_TOOL_MANIFEST = [
     name: "set_schedule_enabled",
     description:
       "既存の pg-boss preset schedule を cron と enabled 状態込みで更新する。preset 自体の ON/OFF が明示された場合に使う。",
-    args: "{preset:'daily'|'today'|'improvement'|'github'|'retention', cron?: string, enabled:boolean}",
+    args: "{preset:'daily'|'today'|'budget'|'improvement'|'github'|'retention', cron?: string, enabled:boolean}",
     effects: ["local-write"],
     allowedSurfaces: ["cli-chat", "web-chat"],
     guidance:
       "If the user asks to schedule a business task in natural language, prefer create_scheduled_agent_task. Use this only when they refer to an existing preset schedule.",
   },
   {
+    name: "configure_budget_guard",
+    description:
+      "広告アカウントごとの予算チェックルールを保存し、必要なら budget_guard schedule を有効化する。Meta は直接変更しない。",
+    args:
+      "{accountKey?:string,dailyBudget:number,monthlyBudget:number,currency?:string,dailyBudgetAlertRatio?:number,monthlyPaceRatio?:number,dayOverDayRatio?:number,noConversionsSpendMin?:number,autoPauseEnabled?:boolean,autoPauseMinDailyBudgetRatio?:number,autoPauseMinDayOverDayRatio?:number,safeCategories?:string[],cron?:string,enabled?:boolean}",
+    effects: ["local-write", "queue"],
+    allowedSurfaces: ["cli-chat", "web-chat"],
+    guidance:
+      "Use this when the user explicitly provides budget amounts or threshold values. If the account or budget amounts are missing, ask a concise clarification question first. autoPause only creates approval-gated candidates; it must not directly mutate Meta from chat.",
+  },
+  {
     name: "manage_schedule",
     description: "既存 preset schedule の一覧、履歴、または単発実行を扱う。",
-    args: "{action:'list'|'run'|'logs', preset?:'daily'|'today'|'improvement'|'github'|'retention', limit?: number}",
+    args: "{action:'list'|'run'|'logs', preset?:'daily'|'today'|'budget'|'improvement'|'github'|'retention', limit?: number}",
     effects: ["read", "queue"],
     allowedSurfaces: ["cli-chat", "web-chat", "scheduled-agent"],
   },

@@ -62,6 +62,10 @@ import {
   enqueueAgentTaskNow,
   scheduleAgentTaskNextRun,
 } from "../../../worker/src/lib/agent-task-runtime.js";
+import {
+  saveBudgetGuardPolicyConfig,
+  type BudgetGuardPolicyConfigInput,
+} from "../../../worker/src/lib/budget-guard-policy-config.js";
 
 type ChatCommandName =
   | "doctor"
@@ -539,6 +543,10 @@ async function executeUserFacingTool(
     const code = await setScheduleEnabledForChat(tool, opts);
     return { handled: true, code, message: `schedule update exit ${code}` };
   }
+  if (tool.tool === "configure_budget_guard") {
+    const code = await configureBudgetGuardForChat(tool, opts);
+    return { handled: true, code, message: `budget guard config exit ${code}` };
+  }
   if (tool.tool === "open_web_ui") {
     opts.out.write(`Web UI を開くにはこちらを使ってください:\n${opts.agentContext.webUrl}\n`);
     return { handled: true, code: 0, message: opts.agentContext.webUrl };
@@ -575,6 +583,80 @@ function normalizeReportKind(value: string): "daily" | "budget" | "improvement" 
   return "daily";
 }
 
+async function configureBudgetGuardForChat(
+  tool: ReadyAgentTool,
+  opts: { out: NodeJS.WritableStream; env: NodeJS.ProcessEnv; agentContext: AgentContext }
+): Promise<number> {
+  if (!opts.env.DATABASE_URL) {
+    opts.out.write("予算チェックを設定できません。先に `addroid init` を完了してください。\n");
+    return 2;
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const { CRON_PRESETS, scheduleCron, validateCronExpression } = await import("@addroid/queue");
+    ctx = await prepareChatCronContext(opts.env);
+    const saved = await saveBudgetGuardPolicyConfig({
+      prisma: ctx.prisma as never,
+      workspaceId: ctx.workspaceId,
+      input: normalizeBudgetGuardConfigInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      env: opts.env,
+    });
+    const presetDef = CRON_PRESETS.find((p) => p.name === "budget_guard");
+    if (!presetDef) throw new Error("budget_guard preset が見つかりません。");
+    const requestedCron = readMetaStringArg(tool.toolArgs, "cron");
+    if (requestedCron) {
+      const validation = validateCronExpression(requestedCron);
+      if (!validation.ok) {
+        opts.out.write(`予算チェックは保存しましたが、cron 式が不正です: ${validation.reason}\n`);
+        return 2;
+      }
+    }
+    const existing = await ctx.prisma.cronSchedule.findUnique({
+      where: { workspaceId_name: { workspaceId: ctx.workspaceId, name: "budget_guard" } },
+      select: { cron: true, enabled: true },
+    });
+    const cron = requestedCron ?? existing?.cron ?? presetDef.cron;
+    const enabled =
+      typeof tool.toolArgs.enabled === "boolean"
+        ? tool.toolArgs.enabled
+        : existing?.enabled ?? false;
+    if (enabled) await scheduleCron(ctx.boss, "budget_guard", cron);
+    else await ctx.boss.unschedule("budget_guard");
+    await ctx.prisma.cronSchedule.update({
+      where: { workspaceId_name: { workspaceId: ctx.workspaceId, name: "budget_guard" } },
+      data: { cron, enabled },
+    });
+    await ctx.prisma.auditLog.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        actor: "agent:cli-chat",
+        action: "budget_guard.policy_schedule_set_via_chat",
+        target: "budget_guard_policy",
+        ref: "workflows/budget-guard.yaml",
+        metadata: { accountKey: saved.accountKey, cron, enabled },
+      },
+    }).catch(() => undefined);
+    opts.out.write(
+      [
+        "予算チェックのルールを保存しました。",
+        `- account: ${saved.accountKey}`,
+        `- file: ${saved.yamlPath}`,
+        `- schedule: ${cron}`,
+        `- 状態: ${enabled ? "ON" : "OFF"}`,
+        `確認: ${opts.agentContext.webUrl}/budget`,
+        "",
+      ].join("\n")
+    );
+    return 0;
+  } catch (err) {
+    opts.out.write(`予算チェックを設定できませんでした: ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
 async function runDailyReportForChat(
   tool: ReadyAgentTool,
   opts: {
@@ -596,7 +678,12 @@ async function runDailyReportForChat(
       typeof tool.toolArgs.kind === "string" ? tool.toolArgs.kind : "daily"
     );
     const metricDate = resolveMetricDateArg(tool.toolArgs);
-    const jobId = await ctx.boss.send(preset, metricDate ? { metricDate } : {});
+    const jobId = await ctx.boss.send(preset, {
+      ...(metricDate ? { metricDate } : {}),
+      manual: true,
+      requestedBy: "agent:cli-chat",
+      requestedAt: new Date().toISOString(),
+    });
     if (!jobId) {
       opts.out.write(
         [
@@ -1819,6 +1906,50 @@ function normalizeAutomationRuleUpdateInput(
   };
 }
 
+function normalizeBudgetGuardConfigInput(
+  args: Record<string, unknown>
+): BudgetGuardPolicyConfigInput {
+  return {
+    accountKey: readMetaStringArg(args, "accountKey", "account_key"),
+    dailyBudget: readRequiredToolNumber(args, "dailyBudget"),
+    monthlyBudget: readRequiredToolNumber(args, "monthlyBudget"),
+    currency: readMetaStringArg(args, "currency"),
+    dailyBudgetAlertRatio: readOptionalToolNumber(args, "dailyBudgetAlertRatio"),
+    monthlyPaceRatio: readOptionalToolNumber(args, "monthlyPaceRatio"),
+    dayOverDayRatio: readOptionalToolNumber(args, "dayOverDayRatio"),
+    noConversionsSpendMin: readOptionalToolNumber(args, "noConversionsSpendMin"),
+    autoPauseEnabled: args.autoPauseEnabled === true,
+    autoPauseMinDailyBudgetRatio: readOptionalToolNumber(
+      args,
+      "autoPauseMinDailyBudgetRatio"
+    ),
+    autoPauseMinDayOverDayRatio: readOptionalToolNumber(
+      args,
+      "autoPauseMinDayOverDayRatio"
+    ),
+    safeCategories:
+      Array.isArray(args.safeCategories) || typeof args.safeCategories === "string"
+        ? (args.safeCategories as string[] | string)
+        : [],
+  };
+}
+
+function readRequiredToolNumber(args: Record<string, unknown>, key: string): number {
+  const n = readOptionalToolNumber(args, key);
+  if (n === null) throw new Error(`${key} が指定されていません`);
+  return n;
+}
+
+function readOptionalToolNumber(
+  args: Record<string, unknown>,
+  key: string
+): number | null {
+  const value = args[key];
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function resolveMetricDateArg(args: Record<string, unknown>): string | null {
   const explicit = readMetaStringArg(args, "metricDate", "metric_date");
   if (explicit) return explicit;
@@ -1850,6 +1981,7 @@ function normalizePresetName(value: string): string {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "daily" || v === "report" || v === "daily_report") return "daily_report";
   if (v === "today" || v === "current" || v === "today_report") return "today_report";
+  if (v === "budget" || v === "budget_guard") return "budget_guard";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";

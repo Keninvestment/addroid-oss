@@ -16,9 +16,8 @@
 // 設計原則:
 //   - ガードレール「No Placeholder Data」: ダミーデータを描かない。
 //     データが無い場合は明示的な空状態 / fail-closed バナーを出す。
-//   - ガードレール「No Dead UI」: 本ページは read-only で書き込み操作を持たない。
-//     policy 編集は ops repo (workflows/budget-guard.yaml) を介する設計境界
-//     のため、UI 側に編集ボタンを置かない。
+//   - ルール編集は ops repo (workflows/budget-guard.yaml) を介して行う。
+//     Web UI はこの YAML を生成し、budget_guard preset の有効化だけを行う。
 //   - sanitize-on-render: ai_runs の prompt/inputs/outputs は本ページでは
 //     描画しない (一覧へのリンクは /ai を通じて辿らせる)。
 
@@ -29,6 +28,7 @@ import {
   DataTable,
   type DataTableColumn,
 } from "../../components/ui/DataTable";
+import { Pagination } from "../../components/ui/Pagination";
 import { EmptyState } from "../../components/ui/EmptyState";
 import {
   KeyValueList,
@@ -37,10 +37,19 @@ import {
 import { StatusBadge } from "../../components/ui/StatusBadge";
 import { StatusDot, type StatusState } from "../../components/ui/StatusDot";
 import { InlineCode } from "../../components/ui/CodeBlock";
+import { CRON_PRESETS } from "@addroid/queue";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../lib/pagination";
+import { loadBudgetGuardPolicyConfig } from "../../../worker/src/lib/budget-guard-policy-config";
+import { BudgetGuardPolicyForm } from "./BudgetGuardPolicyForm";
 
 export const dynamic = "force-dynamic";
+
+interface SearchParamsInput {
+  runsPage?: string | string[];
+  aiRunsPage?: string | string[];
+}
 
 type BudgetGuardRunStatus =
   | "succeeded"
@@ -403,22 +412,59 @@ function formatRule(rule: BudgetGuardAlertRule): string {
   }
 }
 
-export default async function BudgetGuardPage() {
+export default async function BudgetGuardPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   let runs: CronRunRow[] = [];
+  let latestRunCandidates: CronRunRow[] = [];
   let aiRuns: AiRunRow[] = [];
+  let runsTotal = 0;
+  let aiRunsTotal = 0;
   let schedules: ScheduleRow[] = [];
   let adAccountTimeZones: AdAccountTimeZoneRow[] = [];
+  let policyConfig: Awaited<ReturnType<typeof loadBudgetGuardPolicyConfig>> | null = null;
   let dbReady = true;
   try {
     const workspace = await ensureWebWorkspace();
-    [runs, aiRuns, schedules, adAccountTimeZones] = await Promise.all([
+    const runsWhere = {
+      name: "budget_guard",
+      schedule: { is: { workspaceId: workspace.id } },
+    };
+    const aiRunsWhere = { workspaceId: workspace.id, workflow: "budget_guard" };
+    [runsTotal, aiRunsTotal] = await Promise.all([
+      prisma.cronRun.count({ where: runsWhere }),
+      prisma.aiRun.count({ where: aiRunsWhere }),
+    ]);
+    const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+    const aiRunsPagination = getPaginationState(
+      resolvedSearchParams,
+      "aiRunsPage",
+      aiRunsTotal
+    );
+    [runs, latestRunCandidates, aiRuns, schedules, adAccountTimeZones] = await Promise.all([
       prisma.cronRun.findMany({
-        where: {
-          name: "budget_guard",
-          schedule: { is: { workspaceId: workspace.id } },
-        },
+        where: runsWhere,
         orderBy: { startedAt: "desc" },
-        take: 25,
+        skip: runsPagination.skip,
+        take: runsPagination.take,
+        select: {
+          id: true,
+          name: true,
+          state: true,
+          startedAt: true,
+          finishedAt: true,
+          durationMs: true,
+          errorMessage: true,
+          output: true,
+        },
+      }),
+      prisma.cronRun.findMany({
+        where: runsWhere,
+        orderBy: { startedAt: "desc" },
+        take: 10,
         select: {
           id: true,
           name: true,
@@ -431,9 +477,10 @@ export default async function BudgetGuardPage() {
         },
       }),
       prisma.aiRun.findMany({
-        where: { workspaceId: workspace.id, workflow: "budget_guard" },
+        where: aiRunsWhere,
         orderBy: { createdAt: "desc" },
-        take: 25,
+        skip: aiRunsPagination.skip,
+        take: aiRunsPagination.take,
         select: {
           id: true,
           agent: true,
@@ -463,11 +510,15 @@ export default async function BudgetGuardPage() {
         select: { workspaceId: true, key: true, timezoneName: true },
       }),
     ]);
+    policyConfig = await loadBudgetGuardPolicyConfig({
+      prisma,
+      workspaceId: workspace.id,
+    }).catch(() => null);
   } catch {
     dbReady = false;
   }
 
-  const parsedSummaries = runs
+  const parsedSummaries = latestRunCandidates
     .map((r) => ({ run: r, summary: parseBudgetGuardSummary(r.output) }))
     .filter(
       (x): x is { run: CronRunRow; summary: BudgetGuardSummary } =>
@@ -483,10 +534,17 @@ export default async function BudgetGuardPage() {
     ({ summary }) => summary.status === "policy_missing"
   );
 
-  const runsCount = runs.length;
-  const aiRunsCount = aiRuns.length;
+  const runsCount = runsTotal;
+  const aiRunsCount = aiRunsTotal;
+  const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", runsTotal);
+  const aiRunsPagination = getPaginationState(
+    resolvedSearchParams,
+    "aiRunsPage",
+    aiRunsTotal
+  );
   const scheduleRow = schedules[0] ?? null;
   const scheduleView: ScheduleRow | null = scheduleRow;
+  const budgetPreset = CRON_PRESETS.find((preset) => preset.name === "budget_guard");
   const timeZoneByAccount = new Map(
     adAccountTimeZones.map((row) => [`${row.workspaceId}:${row.key}`, row.timezoneName])
   );
@@ -883,6 +941,35 @@ export default async function BudgetGuardPage() {
         ) : null}
 
         <Panel
+          title="ルール設定"
+          subtitle="広告アカウントごとの予算、アラート条件、定期実行を保存します。"
+        >
+          {policyConfig?.rootDir ? null : (
+            <div
+              className="banner"
+              data-state="warn"
+              style={{ marginBottom: "1rem" }}
+            >
+              <strong>ops repo のローカル checkout が見つかりません。</strong>
+              <span>GitHub 連携を確認してから保存してください。</span>
+            </div>
+          )}
+          <BudgetGuardPolicyForm
+            accounts={
+              policyConfig?.accounts.map((account) => ({
+                key: account.key,
+                displayName: account.displayName,
+                currency: account.currency,
+              })) ?? []
+            }
+            policy={policyConfig?.policy ?? null}
+            initialCron={scheduleView?.cron ?? budgetPreset?.cron ?? "30 9 * * *"}
+            initialEnabled={scheduleView?.enabled ?? false}
+            disabled={!dbReady || !policyConfig?.rootDir}
+          />
+        </Panel>
+
+        <Panel
           title="ルールの状態"
           subtitle="予算・月間ペース・急な変化・成果なし・自動停止候補を確認します"
           status={
@@ -1044,7 +1131,7 @@ export default async function BudgetGuardPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${runsCount} 件 (直近 25)`
+              : paginationLabel(runsPagination)
           }
           status={
             <StatusDot state={!dbReady ? "warn" : runsCount === 0 ? "idle" : "ok"}>
@@ -1058,17 +1145,25 @@ export default async function BudgetGuardPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={runs}
-              rowKey={(row) => row.id}
-              columns={runColumns}
-              empty={
-                <EmptyState
-                  title="予算チェックはまだ実行されていません"
-                  description="自動実行を有効化すると、各回の状態・判断・アラートがここに記録されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={runs}
+                rowKey={(row) => row.id}
+                columns={runColumns}
+                empty={
+                  <EmptyState
+                    title="予算チェックはまだ実行されていません"
+                    description="自動実行を有効化すると、各回の状態・判断・アラートがここに記録されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/budget"
+                searchParams={resolvedSearchParams}
+                pageParam="runsPage"
+                state={runsPagination}
+              />
+            </div>
           )}
         </Panel>
 
@@ -1077,7 +1172,7 @@ export default async function BudgetGuardPage() {
           subtitle={
             !dbReady
               ? "保存先を確認してください"
-              : `${aiRunsCount} 件 (直近 25)`
+              : paginationLabel(aiRunsPagination)
           }
           status={
             <StatusDot
@@ -1097,17 +1192,25 @@ export default async function BudgetGuardPage() {
               description="接続と健康状態を確認してください。"
             />
           ) : (
-            <DataTable
-              rows={aiRuns}
-              rowKey={(row) => row.id}
-              columns={aiRunColumns}
-              empty={
-                <EmptyState
-                  title="AI判断履歴はまだありません"
-                  description="予算チェックが実行されると、判断結果とコストの概要がここに保存されます。"
-                />
-              }
-            />
+            <div>
+              <DataTable
+                rows={aiRuns}
+                rowKey={(row) => row.id}
+                columns={aiRunColumns}
+                empty={
+                  <EmptyState
+                    title="AI判断履歴はまだありません"
+                    description="予算チェックが実行されると、判断結果とコストの概要がここに保存されます。"
+                  />
+                }
+              />
+              <Pagination
+                basePath="/budget"
+                searchParams={resolvedSearchParams}
+                pageParam="aiRunsPage"
+                state={aiRunsPagination}
+              />
+            </div>
           )}
         </Panel>
       </div>

@@ -55,6 +55,10 @@ import {
   type AutomationRuleProposalInput,
 } from "../../worker/src/lib/automation-rule-proposal-runtime";
 import {
+  saveBudgetGuardPolicyConfig,
+  type BudgetGuardPolicyConfigInput,
+} from "../../worker/src/lib/budget-guard-policy-config";
+import {
   ensureOpsRepoLocalCheckout,
   resolveOpsRepoLocalDirForWorkspace,
 } from "../../worker/src/lib/ops-repo-local";
@@ -276,6 +280,8 @@ export async function executeWebAgentTool(
         return await createScheduledAgentTaskTool(tool.toolArgs, tool.display);
       case "set_schedule_enabled":
         return await setScheduleEnabledTool(tool.toolArgs, tool.display);
+      case "configure_budget_guard":
+        return await configureBudgetGuardTool(tool.toolArgs, tool.display, webUrl);
       case "manage_schedule":
         return await manageScheduleTool(tool.toolArgs, tool.display);
       case "check_submission":
@@ -950,6 +956,58 @@ async function setScheduleEnabledTool(
         data: result,
       }
     : { display, status: "error", message: result.error };
+}
+
+async function configureBudgetGuardTool(
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string
+): Promise<WebAgentExecution> {
+  const workspace = await ensureWebWorkspace();
+  const saved = await saveBudgetGuardPolicyConfig({
+    prisma,
+    workspaceId: workspace.id,
+    input: normalizeBudgetGuardConfigInput(args),
+    actor: "agent:web-chat",
+  });
+  const existing = await prisma.cronSchedule.findUnique({
+    where: { workspaceId_name: { workspaceId: workspace.id, name: "budget_guard" } },
+    select: { enabled: true },
+  });
+  const result = await setCronScheduleEnabled("budget_guard", {
+    cron: readOptionalString(args.cron),
+    enabled:
+      typeof args.enabled === "boolean"
+        ? args.enabled
+        : existing?.enabled ?? false,
+  });
+  if (!result.ok) {
+    return {
+      display,
+      status: "error",
+      message: `ルールは保存しましたが schedule 更新に失敗しました: ${result.error}`,
+      data: { saved },
+    };
+  }
+  await recordAgentAudit(
+    workspace.id,
+    "budget_guard.policy_schedule_set_via_chat",
+    {
+      accountKey: saved.accountKey,
+      cron: result.cron,
+      enabled: result.enabled,
+      path: "workflows/budget-guard.yaml",
+    },
+    "agent:web-chat"
+  );
+  return {
+    display,
+    status: "ok",
+    message:
+      `予算チェックを保存しました。${result.enabled ? "自動実行はON" : "自動実行はOFF"}です。` +
+      ` 確認: ${webUrl}/budget`,
+    data: { saved, schedule: result },
+  };
 }
 
 async function manageScheduleTool(
@@ -1963,6 +2021,45 @@ function normalizeAutomationRuleUpdateInput(
   };
 }
 
+function normalizeBudgetGuardConfigInput(
+  args: Record<string, unknown>
+): BudgetGuardPolicyConfigInput {
+  return {
+    accountKey:
+      readOptionalString(args.accountKey) ?? readOptionalString(args.account_key),
+    dailyBudget: readRequiredNumber(args, "dailyBudget"),
+    monthlyBudget: readRequiredNumber(args, "monthlyBudget"),
+    currency: readOptionalString(args.currency),
+    dailyBudgetAlertRatio: readOptionalNumber(args.dailyBudgetAlertRatio),
+    monthlyPaceRatio: readOptionalNumber(args.monthlyPaceRatio),
+    dayOverDayRatio: readOptionalNumber(args.dayOverDayRatio),
+    noConversionsSpendMin: readOptionalNumber(args.noConversionsSpendMin),
+    autoPauseEnabled: args.autoPauseEnabled === true,
+    autoPauseMinDailyBudgetRatio: readOptionalNumber(
+      args.autoPauseMinDailyBudgetRatio
+    ),
+    autoPauseMinDayOverDayRatio: readOptionalNumber(
+      args.autoPauseMinDayOverDayRatio
+    ),
+    safeCategories:
+      Array.isArray(args.safeCategories) || typeof args.safeCategories === "string"
+        ? (args.safeCategories as string[] | string)
+        : [],
+  };
+}
+
+function readRequiredNumber(args: Record<string, unknown>, key: string): number {
+  const n = readOptionalNumber(args[key]);
+  if (n === null) throw new Error(`${key} が指定されていません。`);
+  return n;
+}
+
+function readOptionalNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function resolveMetricDateArg(args: Record<string, unknown>): string | null {
   const explicit = readOptionalString(args.metricDate) ?? readOptionalString(args.metric_date);
   if (explicit) return explicit;
@@ -2057,6 +2154,8 @@ function reportPreset(value: string): CronPresetName {
       ? "daily_report"
       : v === "today" || v === "current" || v === "today_report"
         ? "today_report"
+        : v === "budget" || v === "budget_guard"
+          ? "budget_guard"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "github" || v === "github_poll"

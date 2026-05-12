@@ -174,12 +174,14 @@ function fail<T>(
 
 class FakePipelineRunner implements ImprovementPrPipelineRunner {
   calls: string[] = [];
+  analystInputs: Parameters<ImprovementPrPipelineRunner["runAnalyst"]>[0][] = [];
   constructor(private readonly cfg: PipelineOverrides = {}) {}
 
   async runAnalyst(
-    _input: unknown
+    input: Parameters<ImprovementPrPipelineRunner["runAnalyst"]>[0]
   ): Promise<ImprovementPrAgentRunResult<ImprovementPrAnalystOutput>> {
     this.calls.push("analyst");
+    this.analystInputs.push(input);
     if (this.cfg.failures?.analyst) return fail("analyst");
     return ok("analyst", {
       commentary: "spend up, CTR flat",
@@ -438,6 +440,30 @@ test("pipeline: runImprovementPrOnce runs all 8 agents, opens PR, writes audit",
     repo: "myorg/ads-config",
     snapshotIds: ["snap-a"],
     currentDailyBudget: 5000,
+    analysisWindow: {
+      periodStart: "2026-05-04",
+      periodEnd: "2026-05-10",
+      priorPeriodStart: "2026-04-27",
+      priorPeriodEnd: "2026-05-03",
+      current: {
+        spend: 7000,
+        impressions: 70_000,
+        clicks: 1400,
+        conversions: 35,
+        ctr: 2,
+        cpc: 5,
+        cpa: 200,
+      },
+      prior: {
+        spend: 6000,
+        impressions: 60_000,
+        clicks: 900,
+        conversions: 20,
+        ctr: 1.5,
+        cpc: 6.67,
+        cpa: 300,
+      },
+    },
     store,
     pipeline,
     publisher,
@@ -498,6 +524,10 @@ test("pipeline: runImprovementPrOnce runs all 8 agents, opens PR, writes audit",
   assert.equal(summary.classification, "requires_approval");
   assert.equal(summary.auditDecision, "approval_required");
   assert.equal(summary.pullRequest?.prNumber, 42);
+  assert.equal(pipeline.analystInputs[0]!.analysisWindow.periodStart, "2026-05-04");
+  assert.equal(pipeline.analystInputs[0]!.analysisWindow.periodEnd, "2026-05-10");
+  assert.equal(pipeline.analystInputs[0]!.analysisWindow.current.spend, 7000);
+  assert.equal(pipeline.analystInputs[0]!.analysisWindow.prior?.conversions, 20);
   // regression fix: audit metadata records the structured plan result, not
   // the LLM-authored dryRunSummary text.
   const planMeta = audit.calls[0]!.metadata.planValidation as {

@@ -233,6 +233,12 @@ export function loadBudgetGuardPolicy(
   env: NodeJS.ProcessEnv
 ): LoadedBudgetGuardPolicy | null {
   const root = env.ADDROID_OPS_REPO_LOCAL_DIR?.trim();
+  return loadBudgetGuardPolicyForRoot(root || null);
+}
+
+export function loadBudgetGuardPolicyForRoot(
+  root: string | null | undefined
+): LoadedBudgetGuardPolicy | null {
   if (!root || !fs.existsSync(root)) return null;
   const yaml = loadBudgetGuardPolicyYaml(root);
   if (!yaml) return null;

@@ -659,6 +659,8 @@ function reportPreset(value: string): CronPresetName {
       ? "daily_report"
       : v === "today" || v === "current" || v === "today_report"
         ? "today_report"
+        : v === "budget" || v === "budget_guard"
+          ? "budget_guard"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "github" || v === "github_poll"

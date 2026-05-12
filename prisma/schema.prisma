@@ -565,7 +565,7 @@ model GithubPollingState {
 model CronSchedule {
   id           String    @id @default(uuid())
   workspaceId  String
-  name         String // "github_poll" | "daily_report" | "today_report" | "improvement_pr" | "retention_sweep"
+  name         String // "github_poll" | "daily_report" | "today_report" | "budget_guard" | "improvement_pr" | "retention_sweep"
   cron         String
   enabled      Boolean   @default(false)
   lastRunState String? // ok / warn / error / idle

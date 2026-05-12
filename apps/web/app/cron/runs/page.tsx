@@ -1,6 +1,7 @@
 import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
 import { DataTable } from "../../../components/ui/DataTable";
+import { Pagination } from "../../../components/ui/Pagination";
 import { EmptyState } from "../../../components/ui/EmptyState";
 import { StatusBadge } from "../../../components/ui/StatusBadge";
 import { PageHeader } from "../../../components/ui/PageHeader";
@@ -8,10 +9,21 @@ import { KeyValueList } from "../../../components/ui/KeyValueList";
 import type { StatusState } from "../../../components/ui/StatusDot";
 import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
 import { ensureWebWorkspace } from "../../../lib/github-runtime";
+import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
-export default async function CronRunsPage() {
+interface SearchParamsInput {
+  runsPage?: string | string[];
+  logsPage?: string | string[];
+}
+
+export default async function CronRunsPage({
+  searchParams,
+}: {
+  searchParams?: Promise<SearchParamsInput>;
+}) {
+  const resolvedSearchParams = await searchParams;
   type CronRunRow = {
     id: string;
     startedAt: Date;
@@ -33,24 +45,59 @@ export default async function CronRunsPage() {
   };
 
   let cronRuns: CronRunRow[] = [];
+  let latestCronRuns: CronRunRow[] = [];
   let executionLogs: ExecutionLogRow[] = [];
+  let latestExecutionLogs: ExecutionLogRow[] = [];
+  let cronRunsTotal = 0;
+  let executionLogsTotal = 0;
   let warning: string | null = null;
   try {
     const workspace = await ensureWebWorkspace();
-    [cronRuns, executionLogs] = await Promise.all([
+    const cronRunsWhere = {
+      OR: [
+        { schedule: { is: { workspaceId: workspace.id } } },
+        { executionLogs: { some: { workspaceId: workspace.id } } },
+      ],
+    };
+    const executionLogsWhere = { workspaceId: workspace.id };
+    [cronRunsTotal, executionLogsTotal] = await Promise.all([
+      prisma.cronRun.count({ where: cronRunsWhere }),
+      prisma.executionLog.count({ where: executionLogsWhere }),
+    ]);
+    const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", cronRunsTotal);
+    const logsPagination = getPaginationState(resolvedSearchParams, "logsPage", executionLogsTotal);
+    [cronRuns, latestCronRuns, executionLogs, latestExecutionLogs] = await Promise.all([
       prisma.cronRun.findMany({
-        where: {
-          OR: [
-            { schedule: { is: { workspaceId: workspace.id } } },
-            { executionLogs: { some: { workspaceId: workspace.id } } },
-          ],
-        },
+        where: cronRunsWhere,
+        orderBy: { startedAt: "desc" },
+        skip: runsPagination.skip,
+        take: runsPagination.take,
+        select: { id: true, startedAt: true, name: true, durationMs: true, state: true, jobId: true },
+      }),
+      prisma.cronRun.findMany({
+        where: cronRunsWhere,
         orderBy: { startedAt: "desc" },
         take: 100,
         select: { id: true, startedAt: true, name: true, durationMs: true, state: true, jobId: true },
       }),
       prisma.executionLog.findMany({
-        where: { workspaceId: workspace.id },
+        where: executionLogsWhere,
+        orderBy: { createdAt: "desc" },
+        skip: logsPagination.skip,
+        take: logsPagination.take,
+        select: {
+          id: true,
+          createdAt: true,
+          kind: true,
+          level: true,
+          message: true,
+          refType: true,
+          refId: true,
+          cronRunId: true,
+        },
+      }),
+      prisma.executionLog.findMany({
+        where: executionLogsWhere,
         orderBy: { createdAt: "desc" },
         take: 100,
         select: {
@@ -76,14 +123,16 @@ export default async function CronRunsPage() {
     return "idle";
   };
 
-  const succeededRuns = cronRuns.filter((row) => row.state === "success").length;
-  const failedRuns = cronRuns.filter((row) => row.state === "failed").length;
-  const runningRuns = cronRuns.filter((row) => row.state === "running" || row.state === "queued").length;
-  const latestRun = cronRuns[0] ?? null;
-  const latestLog = executionLogs[0] ?? null;
-  const errorLogs = executionLogs.filter((row) => row.level === "error").length;
-  const warnLogs = executionLogs.filter((row) => row.level === "warn").length;
+  const succeededRuns = latestCronRuns.filter((row) => row.state === "success").length;
+  const failedRuns = latestCronRuns.filter((row) => row.state === "failed").length;
+  const runningRuns = latestCronRuns.filter((row) => row.state === "running" || row.state === "queued").length;
+  const latestRun = latestCronRuns[0] ?? null;
+  const latestLog = latestExecutionLogs[0] ?? null;
+  const errorLogs = latestExecutionLogs.filter((row) => row.level === "error").length;
+  const warnLogs = latestExecutionLogs.filter((row) => row.level === "warn").length;
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const runsPagination = getPaginationState(resolvedSearchParams, "runsPage", cronRunsTotal);
+  const logsPagination = getPaginationState(resolvedSearchParams, "logsPage", executionLogsTotal);
 
   return (
     <>
@@ -118,17 +167,18 @@ export default async function CronRunsPage() {
           />
         </Panel>
 
-        <Panel title="自動実行の履歴" subtitle={warning ?? `${cronRuns.length} 件`}>
-          <DataTable
-            rows={cronRuns}
-            rowKey={(row) => row.id}
-            empty={
-              <EmptyState
-                title="自動実行の履歴はまだありません。"
-                description="自動実行が動くと記録されます。"
-              />
-            }
-            columns={[
+        <Panel title="自動実行の履歴" subtitle={warning ?? paginationLabel(runsPagination)}>
+          <div>
+            <DataTable
+              rows={cronRuns}
+              rowKey={(row) => row.id}
+              empty={
+                <EmptyState
+                  title="自動実行の履歴はまだありません。"
+                  description="自動実行が動くと記録されます。"
+                />
+              }
+              columns={[
               {
                 header: "開始日時",
                 cell: (row) => formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone }),
@@ -161,21 +211,29 @@ export default async function CronRunsPage() {
                 ),
               },
               { header: "詳細", cell: (row) => row.jobId ? `受付ID ${shortId(row.jobId)}` : "—", className: "mono" },
-            ]}
-          />
+              ]}
+            />
+            <Pagination
+              basePath="/cron/runs"
+              searchParams={resolvedSearchParams}
+              pageParam="runsPage"
+              state={runsPagination}
+            />
+          </div>
         </Panel>
 
-        <Panel title="処理ログ" subtitle={warning ?? `${executionLogs.length} 件`}>
-          <DataTable
-            rows={executionLogs}
-            rowKey={(row) => row.id}
-            empty={
-              <EmptyState
-                title="実行ログはまだありません。"
-                description="レポート取得、チェック、承認済み変更の確認などが動くと記録されます。"
-              />
-            }
-            columns={[
+        <Panel title="処理ログ" subtitle={warning ?? paginationLabel(logsPagination)}>
+          <div>
+            <DataTable
+              rows={executionLogs}
+              rowKey={(row) => row.id}
+              empty={
+                <EmptyState
+                  title="実行ログはまだありません。"
+                  description="レポート取得、チェック、承認済み変更の確認などが動くと記録されます。"
+                />
+              }
+              columns={[
               {
                 header: "日時",
                 cell: (row) => formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
@@ -199,8 +257,15 @@ export default async function CronRunsPage() {
                 },
                 className: "mono",
               },
-            ]}
-          />
+              ]}
+            />
+            <Pagination
+              basePath="/cron/runs"
+              searchParams={resolvedSearchParams}
+              pageParam="logsPage"
+              state={logsPagination}
+            />
+          </div>
         </Panel>
       </div>
     </>

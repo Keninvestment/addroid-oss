@@ -552,7 +552,12 @@ async function execRun(
 ): Promise<number> {
   let jobId: string | null = null;
   try {
-    jobId = await ctx.boss.send(opts.name, opts.data);
+    jobId = await ctx.boss.send(opts.name, {
+      ...opts.data,
+      manual: true,
+      requestedBy: "user:cli",
+      requestedAt: new Date().toISOString(),
+    });
   } catch (err) {
     process.stderr.write(
       `[addroid cron run] pg-boss send に失敗: ${(err as Error).message}\n`

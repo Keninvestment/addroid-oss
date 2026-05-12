@@ -30,6 +30,7 @@ import {
   DataTable,
   type DataTableColumn,
 } from "../../../components/ui/DataTable";
+import { Pagination } from "../../../components/ui/Pagination";
 import {
   creativeStatusToState,
   formatBytes,
@@ -45,6 +46,7 @@ import {
   type CreativeMetadataQaCheck,
 } from "../../../lib/creative-helpers";
 import { ensureWebWorkspace, sanitizeForDisplay } from "../../../lib/meta-runtime";
+import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
@@ -52,10 +54,13 @@ const CREATIVE_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export default async function CreativeDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams?: Promise<{ auditPage?: string | string[] }>;
 }) {
   const { id } = await params;
+  const resolvedSearchParams = await searchParams;
   if (!CREATIVE_ID_PATTERN.test(id)) {
     notFound();
   }
@@ -174,14 +179,23 @@ export default async function CreativeDetailPage({
     metadata: unknown;
     createdAt: Date;
   }> = [];
+  let auditTotal = 0;
   try {
+    const auditWhere = {
+      ...(workspaceId ? { workspaceId } : {}),
+      target: `creative:${row.id}`,
+    };
+    auditTotal = await prisma.auditLog.count({ where: auditWhere });
+    const auditPagination = getPaginationState(
+      resolvedSearchParams,
+      "auditPage",
+      auditTotal
+    );
     auditRows = await prisma.auditLog.findMany({
-      where: {
-        ...(workspaceId ? { workspaceId } : {}),
-        target: `creative:${row.id}`,
-      },
+      where: auditWhere,
       orderBy: { createdAt: "desc" },
-      take: 25,
+      skip: auditPagination.skip,
+      take: auditPagination.take,
       select: {
         id: true,
         actor: true,
@@ -202,6 +216,11 @@ export default async function CreativeDetailPage({
   const overallQa = metadata?.qa.overall ?? null;
   const hasStorage = Boolean(row.storageRef);
   const storageReachable = metadata !== null;
+  const auditPagination = getPaginationState(
+    resolvedSearchParams,
+    "auditPage",
+    auditTotal
+  );
 
   const overviewItems: KeyValueEntry[] = [
     { label: "Creative ID", value: <InlineCode>{row.id}</InlineCode>, mono: true },
@@ -850,24 +869,32 @@ export default async function CreativeDetailPage({
 
         <Panel
           title="Audit trail"
-          subtitle={`audit_logs (target="creative:${row.id}") · ${auditRows.length} 件`}
+          subtitle={`audit_logs (target="creative:${row.id}") · ${paginationLabel(auditPagination)}`}
           status={
-            <StatusDot state={auditRows.length === 0 ? "idle" : "ok"}>
-              {auditRows.length === 0 ? "no records" : `${auditRows.length} records`}
+            <StatusDot state={auditTotal === 0 ? "idle" : "ok"}>
+              {auditTotal === 0 ? "no records" : `${auditTotal} records`}
             </StatusDot>
           }
         >
-          <DataTable
-            rows={auditRows}
-            rowKey={(r) => r.id}
-            columns={auditColumns}
-            empty={
-              <EmptyState
-                title="この creative に紐付く audit はまだありません"
-                description="creative.generated / creative.qa_passed / creative.qa_failed / creative.attached_to_pr 等の audit_log が書かれるとここに表示されます。"
-              />
-            }
-          />
+          <div>
+            <DataTable
+              rows={auditRows}
+              rowKey={(r) => r.id}
+              columns={auditColumns}
+              empty={
+                <EmptyState
+                  title="この creative に紐付く audit はまだありません"
+                  description="creative.generated / creative.qa_passed / creative.qa_failed / creative.attached_to_pr 等の audit_log が書かれるとここに表示されます。"
+                />
+              }
+            />
+            <Pagination
+              basePath={`/creatives/${encodeURIComponent(row.id)}`}
+              searchParams={resolvedSearchParams}
+              pageParam="auditPage"
+              state={auditPagination}
+            />
+          </div>
         </Panel>
       </div>
     </>
