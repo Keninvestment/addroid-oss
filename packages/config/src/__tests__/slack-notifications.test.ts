@@ -350,6 +350,23 @@ test("buildSlackNotificationMessage は daily_report の top improvements を最
   assert.ok(!all.includes("6. f"));
 });
 
+test("buildSlackNotificationMessage は daily_report の通貨を account currency で表示する", () => {
+  const msg = buildSlackNotificationMessage({
+    kind: "daily_report.completed",
+    data: {
+      reportId: "rpt_abc",
+      adAccountKey: "demo-account",
+      metricDate: "2026-05-01",
+      spend: 74,
+      currency: "JPY",
+    },
+  });
+  const all = blockTexts(msg).join("\n");
+  assert.ok(all.includes("Spend (JPY)"));
+  assert.ok(all.includes("74"));
+  assert.ok(!all.includes("Spend (USD)"));
+});
+
 test("buildSlackNotificationMessage は pr.opened に承認導線の context を含める", () => {
   const msg = buildSlackNotificationMessage({
     kind: "pr.opened",

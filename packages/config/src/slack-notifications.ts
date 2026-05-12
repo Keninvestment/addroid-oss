@@ -87,7 +87,9 @@ export interface DailyReportCompletedData {
   adAccountKey: string;
   /** ISO yyyy-mm-dd。 */
   metricDate: string;
-  spendUsd?: number | null;
+  spend?: number | null;
+  /** Meta ad account currency (JPY, USD, EUR, ...). */
+  currency?: string | null;
   impressions?: number | null;
   clicks?: number | null;
   conversions?: number | null;
@@ -523,8 +525,13 @@ function buildDailyReportCompleted(d: DailyReportCompletedData): SlackBlockKitMe
     { label: "Ad Account", value: d.adAccountKey },
     { label: "Metric Date", value: d.metricDate },
   ];
-  if (typeof d.spendUsd === "number" && Number.isFinite(d.spendUsd))
-    fields.push({ label: "Spend (USD)", value: d.spendUsd.toFixed(2) });
+  if (typeof d.spend === "number" && Number.isFinite(d.spend)) {
+    const currency = clean((d.currency ?? "").trim().toUpperCase());
+    fields.push({
+      label: currency ? `Spend (${currency})` : "Spend",
+      value: formatSpend(d.spend, currency),
+    });
+  }
   if (typeof d.impressions === "number")
     fields.push({ label: "Impressions", value: String(d.impressions) });
   if (typeof d.clicks === "number")
@@ -743,6 +750,14 @@ function buildApplyFailed(d: ApplyFailedData): SlackBlockKitMessage {
   }
 
   return { text: fallback, blocks };
+}
+
+function formatSpend(value: number, currency: string): string {
+  if (currency === "JPY") return Math.round(value).toLocaleString("ja-JP");
+  return value.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 // ---- daily_report.failed ------------------------------------------------
