@@ -1,12 +1,16 @@
 // `addroid down` — `addroid up` で起動した web/worker を停止する。
 
 import { resolveAddroidPaths } from "@addroid/config";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   clearUpState,
   isProcessAlive,
   readUpState,
   terminateProcess,
 } from "../lib/processes.js";
+
+const GRACEFUL_STOP_TIMEOUT_MS = 10_000;
+const FORCE_STOP_TIMEOUT_MS = 2_000;
 
 export async function runDown(args: string[]): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
@@ -63,9 +67,28 @@ export async function runDown(args: string[]): Promise<number> {
     }
   }
 
+  if (seenPids.size > 0) {
+    await waitForTargetsToStop(seenPids, GRACEFUL_STOP_TIMEOUT_MS);
+    const stillAlive = [...seenPids].filter((pid) => isProcessAlive(pid));
+    for (const pid of stillAlive) {
+      if (pid === process.pid) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+        process.stdout.write(
+          `[addroid down] pid ${pid} が終了しないため SIGKILL を送信。\n`
+        );
+      } catch {
+        /* ignore */
+      }
+    }
+    if (stillAlive.length > 0) {
+      await waitForTargetsToStop(new Set(stillAlive), FORCE_STOP_TIMEOUT_MS);
+    }
+  }
+
   // 親プロセスが上 (= addroid up) で稼働中なら、shutdown ハンドラが pid file を消すはず。
   // 親もすでに死んでいたケースのために pid file を念のため掃除する。
-  if (!isProcessAlive(state.parentPid)) {
+  if (![...seenPids].some((pid) => isProcessAlive(pid))) {
     await clearUpState(paths);
   }
 
@@ -73,4 +96,15 @@ export async function runDown(args: string[]): Promise<number> {
     `[addroid down] ${actedOn} 件のプロセスへ停止を要求しました。pid file: ${paths.pidFile}\n`
   );
   return 0;
+}
+
+async function waitForTargetsToStop(
+  pids: Set<number>,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (![...pids].some((pid) => isProcessAlive(pid))) return;
+    await delay(100);
+  }
 }

@@ -240,19 +240,26 @@ async function runShared(ctx: SharedContext): Promise<number> {
     exitCode = code;
     process.stdout.write(`\n[addroid up] shutting down (${reason})…\n`);
     try {
+      if (workerHandle) {
+        const workerStop = await withTimeout(workerHandle.stop(), 8_000);
+        if (workerStop === "timeout") {
+          process.stderr.write(
+            "[addroid up] worker stop timed out; forcing process shutdown.\n"
+          );
+        }
+      }
+    } catch (err) {
+      process.stderr.write(`[addroid up] worker stop error: ${(err as Error).message}\n`);
+    }
+    try {
       if (httpServer) await closeServer(httpServer);
     } catch (err) {
       process.stderr.write(`[addroid up] web close error: ${(err as Error).message}\n`);
     }
     try {
-      if (nextApp?.close) await nextApp.close();
+      if (nextApp?.close) await withTimeout(nextApp.close(), 5_000);
     } catch (err) {
       process.stderr.write(`[addroid up] next close error: ${(err as Error).message}\n`);
-    }
-    try {
-      if (workerHandle) await workerHandle.stop();
-    } catch (err) {
-      process.stderr.write(`[addroid up] worker stop error: ${(err as Error).message}\n`);
     }
     try {
       restoreTee();
@@ -414,8 +421,47 @@ function teeStdio(stream: fs.WriteStream): () => void {
 
 function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
+    let settled = false;
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (err) reject(err);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      try {
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+      } catch {
+        /* ignore */
+      }
+      settle();
+    }, 5_000);
+    try {
+      server.close((err) => (err ? settle(err) : settle()));
+      server.closeIdleConnections?.();
+    } catch (err) {
+      settle(err as Error);
+    }
   });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number
+): Promise<"completed" | "timeout"> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise.then(() => "completed" as const),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -482,7 +528,7 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
       process.stderr.write(`[addroid up] web close error: ${(err as Error).message}\n`);
     }
     try {
-      if (nextApp?.close) await nextApp.close();
+      if (nextApp?.close) await withTimeout(nextApp.close(), 5_000);
     } catch (err) {
       process.stderr.write(`[addroid up] next close error: ${(err as Error).message}\n`);
     }

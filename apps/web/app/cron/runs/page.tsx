@@ -13,6 +13,8 @@ import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
+const INTERNAL_CRON_NAMES = ["github_poll"] as const;
+
 interface SearchParamsInput {
   runsPage?: string | string[];
   logsPage?: string | string[];
@@ -54,12 +56,20 @@ export default async function CronRunsPage({
   try {
     const workspace = await ensureWebWorkspace();
     const cronRunsWhere = {
+      NOT: [{ name: { in: [...INTERNAL_CRON_NAMES] } }],
       OR: [
         { schedule: { is: { workspaceId: workspace.id } } },
         { executionLogs: { some: { workspaceId: workspace.id } } },
       ],
     };
-    const executionLogsWhere = { workspaceId: workspace.id };
+    const executionLogsWhere = {
+      workspaceId: workspace.id,
+      NOT: [
+        { kind: { in: [...INTERNAL_CRON_NAMES] } },
+        { message: { startsWith: "github_poll" } },
+        { cronRun: { is: { name: { in: [...INTERNAL_CRON_NAMES] } } } },
+      ],
+    };
     [cronRunsTotal, executionLogsTotal] = await Promise.all([
       prisma.cronRun.count({ where: cronRunsWhere }),
       prisma.executionLog.count({ where: executionLogsWhere }),
@@ -230,7 +240,7 @@ export default async function CronRunsPage({
               empty={
                 <EmptyState
                   title="実行ログはまだありません。"
-                  description="レポート取得、チェック、承認済み変更の確認などが動くと記録されます。"
+                  description="レポート取得、チェック、自動クリエイティブ生成などが動くと記録されます。"
                 />
               }
               columns={[
@@ -279,7 +289,7 @@ function workflowLabel(name: string): string {
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
-    github_poll: "承認済み変更の確認",
+    auto_creative_generation: "自動クリエイティブ生成",
     retention_cleanup: "古い履歴の整理",
     plan: "入稿前チェック",
   };
@@ -333,8 +343,8 @@ function friendlyMessage(message: string): string {
     .replaceAll("today_report", "当日レポート")
     .replaceAll("budget_guard", "予算チェック")
     .replaceAll("automation_rules", "自動運用ルール")
+    .replaceAll("auto_creative_generation", "自動クリエイティブ生成")
     .replaceAll("improvement_pr", "改善提案")
-    .replaceAll("github_poll", "承認済み変更の確認")
     .replaceAll("retention_cleanup", "古い履歴の整理")
     .replaceAll("cron", "自動実行")
     .replaceAll("ai_run", "AI実行")

@@ -30,6 +30,8 @@ export interface OpenAIImageProviderOptions {
   defaultModel?: string;
   /** Defaults to https://api.openai.com/v1/images/generations. */
   imagesGenerationsUrl?: string | null;
+  /** Defaults to https://api.openai.com/v1/images/edits. Used when referenceImages are supplied. */
+  imagesEditsUrl?: string | null;
   /** Defaults to medium. */
   quality?: "low" | "medium" | "high" | "auto";
   fetchImpl?: typeof fetch;
@@ -38,6 +40,7 @@ export interface OpenAIImageProviderOptions {
 const DEFAULT_MODEL = "gpt-image-2";
 const DEFAULT_IMAGES_GENERATIONS_URL =
   "https://api.openai.com/v1/images/generations";
+const DEFAULT_IMAGES_EDITS_URL = "https://api.openai.com/v1/images/edits";
 
 export class OpenAIImageProvider implements ImageProvider {
   readonly name: ImageProviderName = "openai";
@@ -47,6 +50,7 @@ export class OpenAIImageProvider implements ImageProvider {
   private readonly tokenStore: LLMProviderTokenStore;
   private readonly crypto: ApiKeyCryptoBoundary;
   private readonly imagesGenerationsUrl: string;
+  private readonly imagesEditsUrl: string;
   private readonly quality: "low" | "medium" | "high" | "auto";
   private readonly fetchImpl: typeof fetch;
 
@@ -56,6 +60,7 @@ export class OpenAIImageProvider implements ImageProvider {
     this.defaultModel = opts.defaultModel?.trim() || DEFAULT_MODEL;
     this.imagesGenerationsUrl =
       opts.imagesGenerationsUrl?.trim() || DEFAULT_IMAGES_GENERATIONS_URL;
+    this.imagesEditsUrl = opts.imagesEditsUrl?.trim() || DEFAULT_IMAGES_EDITS_URL;
     this.quality = opts.quality ?? "medium";
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
@@ -78,13 +83,22 @@ export class OpenAIImageProvider implements ImageProvider {
 
     for (const cond of normalizedConditions) {
       const prompt = buildPrompt(req.prompt, cond);
-      const response = await this.callOpenAI({
-        apiKey,
-        model,
-        prompt,
-        size: `${cond.width}x${cond.height}`,
-        outputFormat: cond.format ?? "png",
-      });
+      const response = req.referenceImages?.length
+        ? await this.callOpenAIEdit({
+            apiKey,
+            model,
+            prompt,
+            size: `${cond.width}x${cond.height}`,
+            outputFormat: cond.format ?? "png",
+            referenceImages: req.referenceImages,
+          })
+        : await this.callOpenAI({
+            apiKey,
+            model,
+            prompt,
+            size: `${cond.width}x${cond.height}`,
+            outputFormat: cond.format ?? "png",
+          });
       if (response.requestId) requestIds.push(response.requestId);
       assets.push({
         variantKey: cond.variantKey!,
@@ -108,11 +122,64 @@ export class OpenAIImageProvider implements ImageProvider {
           variationConditions: normalizedConditions,
           purpose: req.purpose ?? null,
           variantCount: normalizedConditions.length,
+          referenceImageCount: req.referenceImages?.length ?? 0,
         },
         qaResult: null,
       },
       costUsd: 0,
     };
+  }
+
+  private async callOpenAIEdit(params: {
+    apiKey: string;
+    model: string;
+    prompt: string;
+    size: string;
+    outputFormat: "png" | "jpeg";
+    referenceImages: NonNullable<ImageGenerateRequest["referenceImages"]>;
+  }): Promise<{
+    bytes: Uint8Array;
+    mimeType: "image/png" | "image/jpeg";
+    requestId: string | null;
+  }> {
+    const form = new FormData();
+    form.set("model", params.model);
+    form.set("prompt", params.prompt);
+    form.set("size", params.size);
+    form.set("quality", this.quality);
+    form.set("output_format", params.outputFormat);
+    form.set("n", "1");
+    for (let i = 0; i < params.referenceImages.length; i += 1) {
+      const ref = params.referenceImages[i]!;
+      const filename = ref.filename?.trim() || `reference-${i}${extensionForMime(ref.mimeType)}`;
+      const bytes = ref.bytes.buffer.slice(
+        ref.bytes.byteOffset,
+        ref.bytes.byteOffset + ref.bytes.byteLength
+      ) as ArrayBuffer;
+      form.append(
+        "image",
+        new Blob([bytes], { type: ref.mimeType }),
+        filename
+      );
+    }
+
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.imagesEditsUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${params.apiKey}`,
+        },
+        body: form,
+      });
+    } catch (err) {
+      throw new ImageProviderError(
+        this.name,
+        `failed to reach image edits endpoint: ${redactPayloadForError((err as Error).message).replaceAll(params.apiKey, "[REDACTED]")}`
+      );
+    }
+
+    return this.parseOpenAIImageResponse(res, params.outputFormat, params.apiKey);
   }
 
   private async callOpenAI(params: {
@@ -150,10 +217,21 @@ export class OpenAIImageProvider implements ImageProvider {
       );
     }
 
+    return this.parseOpenAIImageResponse(res, params.outputFormat, params.apiKey);
+  }
+
+  private async parseOpenAIImageResponse(
+    res: Response,
+    outputFormat: "png" | "jpeg",
+    apiKey: string
+  ): Promise<{
+    bytes: Uint8Array;
+    mimeType: "image/png" | "image/jpeg";
+    requestId: string | null;
+  }> {
     const requestId = res.headers.get("x-request-id");
     const text = await res.text();
     const json = parseJson(text);
-
     if (!res.ok) {
       const errorObj =
         json && typeof json === "object" && "error" in json
@@ -171,13 +249,13 @@ export class OpenAIImageProvider implements ImageProvider {
             : undefined;
       throw new ImageProviderError(
         this.name,
-        redactPayloadForError(rawMessage).replaceAll(params.apiKey, "[REDACTED]"),
+        redactPayloadForError(rawMessage).replaceAll(apiKey, "[REDACTED]"),
         {
           status: res.status,
           ...(rawCode
-            ? { code: redactPayloadForError(rawCode).replaceAll(params.apiKey, "[REDACTED]") }
+            ? { code: redactPayloadForError(rawCode).replaceAll(apiKey, "[REDACTED]") }
             : {}),
-          payload: redactPayloadForError(text).replaceAll(params.apiKey, "[REDACTED]"),
+          payload: redactPayloadForError(text).replaceAll(apiKey, "[REDACTED]"),
         }
       );
     }
@@ -187,17 +265,17 @@ export class OpenAIImageProvider implements ImageProvider {
       const bytes = decodeBase64Image(item.b64_json);
       return {
         bytes,
-        mimeType: params.outputFormat === "jpeg" ? "image/jpeg" : "image/png",
+        mimeType: outputFormat === "jpeg" ? "image/jpeg" : "image/png",
         requestId,
       };
     }
     if (item.url) {
-      const fetched = await this.fetchImageUrl(item.url, params.apiKey);
+      const fetched = await this.fetchImageUrl(item.url, apiKey);
       return { ...fetched, requestId };
     }
     throw new ImageProviderError(this.name, "image response did not contain image data", {
       status: res.status,
-      payload: redactPayloadForError(text).replaceAll(params.apiKey, "[REDACTED]"),
+      payload: redactPayloadForError(text).replaceAll(apiKey, "[REDACTED]"),
     });
   }
 
@@ -268,6 +346,12 @@ function buildPrompt(basePrompt: string, cond: ImageVariationCondition): string 
     parts.push(`Avoid: ${cond.negativePrompt.trim()}`);
   }
   return parts.join("\n\n");
+}
+
+function extensionForMime(mimeType: "image/png" | "image/jpeg" | "image/webp"): string {
+  if (mimeType === "image/jpeg") return ".jpg";
+  if (mimeType === "image/webp") return ".webp";
+  return ".png";
 }
 
 function parseJson(text: string): unknown {

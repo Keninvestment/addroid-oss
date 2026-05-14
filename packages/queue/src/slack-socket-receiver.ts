@@ -622,10 +622,11 @@ function normalizeAgentEvent(
   payload: Record<string, unknown>,
   installation: SlackInstallation | null
 ): Omit<SlackAgentJobPayload, "enqueuedAt"> | null {
-  const eventType = resolveAgentEventType(event);
+  const eventType = resolveAgentEventType(event, installation?.botUserId);
   if (!eventType) return null;
   if (readString(event, "bot_id")) return null;
-  if (readString(event, "subtype")) return null;
+  const subtype = readString(event, "subtype");
+  if (subtype && subtype !== "file_share") return null;
 
   const userId = readString(event, "user");
   if (!userId || userId === installation?.botUserId) return null;
@@ -634,7 +635,7 @@ function normalizeAgentEvent(
   if (!channelId || !eventTs) return null;
 
   const rawText = readString(event, "text");
-  const text = eventType === "app_mention"
+  const text = eventType === "app_mention" || eventType === "message.file_share"
     ? stripBotMention(rawText, installation?.botUserId)
     : rawText.trim();
   if (!text) return null;
@@ -642,6 +643,7 @@ function normalizeAgentEvent(
   const threadTs = readString(event, "thread_ts") || eventTs;
   const teamId = readString(payload, "team_id") || installation?.teamId || "";
   const userName = readString(event, "username");
+  const files = readAgentFiles(event);
   return {
     text,
     slackUserId: userId,
@@ -651,18 +653,53 @@ function normalizeAgentEvent(
     threadTs,
     eventTs,
     eventType,
+    ...(files.length > 0 ? { files } : {}),
   };
 }
 
+function readAgentFiles(event: Record<string, unknown>): NonNullable<SlackAgentJobPayload["files"]> {
+  const raw = event["files"];
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    const file = asRecord(item);
+    if (!file) return [];
+    const id = readString(file, "id");
+    if (!id) return [];
+    const out: NonNullable<SlackAgentJobPayload["files"]>[number] = { id };
+    const name = readString(file, "name") || readString(file, "title");
+    if (name) out.name = name;
+    const mimetype = readString(file, "mimetype");
+    if (mimetype) out.mimetype = mimetype;
+    const filetype = readString(file, "filetype");
+    if (filetype) out.filetype = filetype;
+    const size = readNumber(file, "size");
+    if (size !== null) out.size = size;
+    return [out];
+  });
+}
+
 function resolveAgentEventType(
-  event: Record<string, unknown>
+  event: Record<string, unknown>,
+  botUserId?: string
 ): SlackAgentEventType | null {
   const type = readString(event, "type");
   if (type === "app_mention") return "app_mention";
   if (type === "message" && readString(event, "channel_type") === "im") {
     return "message.im";
   }
+  if (
+    type === "message" &&
+    readString(event, "subtype") === "file_share" &&
+    hasBotMention(readString(event, "text"), botUserId)
+  ) {
+    return "message.file_share";
+  }
   return null;
+}
+
+function hasBotMention(text: string, botUserId?: string): boolean {
+  if (botUserId && text.includes(`<@${botUserId}>`)) return true;
+  return /<@[A-Z0-9]+>/u.test(text);
 }
 
 function stripBotMention(text: string, botUserId?: string): string {
@@ -686,4 +723,9 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function readString(obj: Record<string, unknown>, key: string): string {
   const value = obj[key];
   return typeof value === "string" ? value : "";
+}
+
+function readNumber(obj: Record<string, unknown>, key: string): number | null {
+  const value = obj[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }

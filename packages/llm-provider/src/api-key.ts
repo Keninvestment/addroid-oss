@@ -16,6 +16,7 @@ import {
   LLMProviderUnauthenticatedError,
   type LLMAuthKind,
   type LLMBeginOAuthResult,
+  type LLMContentPart,
   type LLMCompletionRequest,
   type LLMCompletionResult,
   type LLMConnectionMeta,
@@ -129,7 +130,7 @@ export class ApiKeyLLMProvider implements LLMProvider {
     const model = req.model ?? record.defaultModel;
     const body: Record<string, unknown> = {
       model,
-      messages: req.messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: req.messages.map((m) => ({ role: m.role, content: toOpenAIMessageContent(m.content) })),
     };
     if (typeof req.maxOutputTokens === "number") body.max_tokens = req.maxOutputTokens;
     if (typeof req.temperature === "number") body.temperature = req.temperature;
@@ -186,11 +187,14 @@ export class ApiKeyLLMProvider implements LLMProvider {
     const model = req.model ?? record.defaultModel;
     const system = req.messages
       .filter((m) => m.role === "system")
-      .map((m) => m.content)
+      .map((m) => contentToPlainText(m.content))
       .join("\n\n");
     const messages = req.messages
       .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
+      .map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: toAnthropicMessageContent(m.content),
+      }));
     const body: Record<string, unknown> = {
       model,
       max_tokens: req.maxOutputTokens ?? 1024,
@@ -309,6 +313,41 @@ function mapFinishReason(raw: string | undefined): LLMCompletionResult["finishRe
     default:
       return "other";
   }
+}
+
+function toOpenAIMessageContent(content: LLMCompletionRequest["messages"][number]["content"]): unknown {
+  if (typeof content === "string") return content;
+  return content.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    const url = part.url ?? (part.dataBase64 ? `data:${part.mimeType};base64,${part.dataBase64}` : null);
+    if (!url) return { type: "text", text: `[image omitted: ${part.sourceRef ?? "no source"}]` };
+    return { type: "image_url", image_url: { url } };
+  });
+}
+
+function toAnthropicMessageContent(content: LLMCompletionRequest["messages"][number]["content"]): unknown {
+  if (typeof content === "string") return content;
+  return content.flatMap((part: LLMContentPart): unknown[] => {
+    if (part.type === "text") return [{ type: "text", text: part.text }];
+    if (!part.dataBase64) {
+      return [{ type: "text", text: `[image omitted: ${part.sourceRef ?? part.url ?? "no base64"}]` }];
+    }
+    return [{
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: part.mimeType,
+        data: part.dataBase64,
+      },
+    }];
+  });
+}
+
+function contentToPlainText(content: LLMCompletionRequest["messages"][number]["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => part.type === "text" ? part.text : `[image: ${part.sourceRef ?? part.url ?? "inline"}]`)
+    .join("\n");
 }
 
 function parseProviderErrorPayload(text: string): { message: string; code?: string } | null {

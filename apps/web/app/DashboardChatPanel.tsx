@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BusyLabel, LoadingDots } from "../components/ui/AsyncFeedback";
 import { useToast } from "../components/ui/Toast";
 
@@ -33,34 +33,77 @@ interface Message {
   executions?: ApiExecution[];
 }
 
-export function DashboardChatPanel() {
+interface DashboardChatPanelProps {
+  title?: string;
+  description?: string;
+  emptyText?: string;
+  badge?: string;
+  examples?: readonly string[];
+  placeholder?: string;
+  contextPrefix?: string;
+  allowAttachments?: boolean;
+  initialInput?: string;
+}
+
+export function DashboardChatPanel({
+  title = "やりたいことを入力",
+  description = "レポート取得、入稿前チェック、アカウント同期、バックアップ、自動実行の設定を文章で依頼できます。",
+  emptyText = "「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「予算チェックを有効にして」などを入力できます。",
+  badge = "安全確認つき",
+  examples = EXAMPLES,
+  placeholder = "例: 日次レポートを取得して",
+  contextPrefix,
+  allowAttachments = false,
+  initialInput,
+}: DashboardChatPanelProps) {
   const toast = useToast();
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialInput ?? "");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [files, setFiles] = useState<File[]>([]);
+  const composingRef = useRef(false);
+  const suppressNextEnterRef = useRef(false);
+  const latestMessageRef = useRef<HTMLDivElement | null>(null);
 
   const suggestions = useMemo(() => {
     const needle = input.trim();
     if (busy || messages.length > 0) return [];
     if (needle.length > 0) return [];
-    return [...EXAMPLES];
-  }, [busy, input, messages.length]);
+    return [...examples];
+  }, [busy, examples, input, messages.length]);
+
+  useEffect(() => {
+    const target = latestMessageRef.current;
+    if (!target) return;
+    const frame = window.requestAnimationFrame(() => {
+      target.scrollIntoView({
+        block: "nearest",
+        inline: "nearest",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [busy, messages.length]);
 
   async function submit(ev?: React.FormEvent) {
     ev?.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
     setInput("");
+    setFiles([]);
     setBusy(true);
+    const fileSummary = files.length > 0 ? `\n添付: ${files.map((f) => f.name).join(", ")}` : "";
     setMessages((prev) => [
       ...prev,
-      { id: makeId(), role: "user", text },
+      { id: makeId(), role: "user", text: `${text}${fileSummary}` },
     ]);
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ input: text }),
+      const res = await sendChatRequest({
+        input: text,
+        contextPrefix,
+        files,
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
       const executions = body.executions ?? [];
@@ -104,21 +147,22 @@ export function DashboardChatPanel() {
     <section className="agent-chat" aria-label="AdDroid agent chat">
       <div className="agent-chat__head">
         <div>
-          <h2>やりたいことを入力</h2>
-          <p>レポート取得、入稿前チェック、アカウント同期、バックアップ、自動実行の設定を文章で依頼できます。</p>
+          <h2>{title}</h2>
+          <p>{description}</p>
         </div>
-        <span className="agent-chat__badge">安全確認つき</span>
+        <span className="agent-chat__badge">{badge}</span>
       </div>
       <div className="agent-chat__messages" aria-busy={busy}>
         {messages.length === 0 ? (
           <div className="agent-chat__empty">
-            「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「予算チェックを有効にして」などを入力できます。
+            {emptyText}
           </div>
         ) : (
           <>
-            {messages.map((message) => (
+            {messages.map((message, index) => (
               <div
                 key={message.id}
+                ref={index === messages.length - 1 && !busy ? latestMessageRef : undefined}
                 className="agent-chat__message"
                 data-role={message.role}
               >
@@ -143,6 +187,7 @@ export function DashboardChatPanel() {
             ))}
             {busy ? (
               <div
+                ref={latestMessageRef}
                 className="agent-chat__message agent-chat__message--typing"
                 data-role="assistant"
                 aria-live="polite"
@@ -174,16 +219,56 @@ export function DashboardChatPanel() {
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            onCompositionStart={() => {
+              composingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              composingRef.current = false;
+              suppressNextEnterRef.current = true;
+              window.setTimeout(() => {
+                suppressNextEnterRef.current = false;
+              }, 0);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
+                if (
+                  composingRef.current ||
+                  suppressNextEnterRef.current ||
+                  isComposingKeyEvent(e.nativeEvent)
+                ) {
+                  e.preventDefault();
+                  suppressNextEnterRef.current = false;
+                  return;
+                }
                 e.preventDefault();
                 void submit();
               }
             }}
-            placeholder="例: 日次レポートを取得して"
+            placeholder={placeholder}
             rows={2}
             disabled={busy}
           />
+          {allowAttachments ? (
+            <div className="agent-chat__attachments">
+              <label>
+                <span>素材・参考画像を添付</span>
+                <input
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  disabled={busy}
+                  onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+                />
+              </label>
+              {files.length > 0 ? (
+                <div className="agent-chat__attachment-list">
+                  {files.map((file) => (
+                    <span key={`${file.name}-${file.size}`}>{file.name}</span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <button
           type="submit"
@@ -196,6 +281,29 @@ export function DashboardChatPanel() {
       </form>
     </section>
   );
+}
+
+function isComposingKeyEvent(event: KeyboardEvent): boolean {
+  return event.isComposing || event.keyCode === 229;
+}
+
+async function sendChatRequest(input: {
+  input: string;
+  contextPrefix?: string;
+  files: File[];
+}): Promise<Response> {
+  if (input.files.length > 0 || input.contextPrefix) {
+    const form = new FormData();
+    form.set("input", input.input);
+    if (input.contextPrefix) form.set("contextPrefix", input.contextPrefix);
+    for (const file of input.files) form.append("files", file);
+    return fetch("/api/chat", { method: "POST", body: form });
+  }
+  return fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: input.input }),
+  });
 }
 
 function makeId(): string {

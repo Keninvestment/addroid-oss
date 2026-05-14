@@ -170,7 +170,7 @@ export default async function CreativesReviewPage() {
       <InlineCode>forbidden_expression</InlineCode> /{" "}
       <InlineCode>brand_tone</InlineCode>) と PR 添付状況をまとめたレビュー。
       生成画像はここから Meta に直接反映されません — 必ず{" "}
-      <InlineCode>improvement_pr</InlineCode> の merge → Apply (PAUSED) →
+      <InlineCode>auto_creative_generation</InlineCode> の merge → Apply (PAUSED) →
       Activate の経路を経由します。
     </>
   );
@@ -215,14 +215,14 @@ export default async function CreativesReviewPage() {
               title="QA を実施した creative はまだありません"
               description={
                 <>
-                  <InlineCode>improvement_pr</InlineCode> が画像を生成し、Creative
+                  <InlineCode>auto_creative_generation</InlineCode> が画像を生成し、Creative
                   QA エージェントが <InlineCode>dimensions</InlineCode> /{" "}
                   <InlineCode>format</InlineCode> /{" "}
                   <InlineCode>quality</InlineCode> /{" "}
                   <InlineCode>forbidden_expression</InlineCode> /{" "}
                   <InlineCode>brand_tone</InlineCode> を判定するとここにレビューが
                   表示されます。画像 Provider 未設定 (任意) のままでも{" "}
-                  <InlineCode>improvement_pr</InlineCode> はテキストプロンプトのみで
+                  <InlineCode>auto_creative_generation</InlineCode> はテキストプロンプトのみで
                   PR を作成し、QA は <InlineCode>skipped</InlineCode> 状態で記録
                   されます (fallback)。
                 </>
@@ -362,8 +362,8 @@ export default async function CreativesReviewPage() {
               title="まだ生成クリエイティブはありません"
               description={
                 <>
-                  <InlineCode>/improvements</InlineCode> から{" "}
-                  <InlineCode>improvement_pr</InlineCode> を起動すると、生成された
+                  <InlineCode>/creatives</InlineCode> から{" "}
+                  <InlineCode>auto_creative_generation</InlineCode> を起動すると、生成された
                   creative の QA 結果と PR 添付状況がここに表示されます。
                 </>
               }

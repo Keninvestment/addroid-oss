@@ -247,8 +247,15 @@ function defaultCompletionResponder(req: LLMCompletionRequest): string {
   const agentJson = agentName ? defaultAgentJson(agentName) : null;
   if (agentJson !== null) return agentJson;
   const last = req.messages[req.messages.length - 1];
-  const summary = last?.content ? last.content.slice(0, 64) : "(empty)";
+  const summary = last?.content ? contentToPlainText(last.content).slice(0, 64) : "(empty)";
   return `[mock:${purpose}] echo: ${summary}`;
+}
+
+function contentToPlainText(content: LLMCompletionRequest["messages"][number]["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => part.type === "text" ? part.text : `[image: ${part.sourceRef ?? part.url ?? part.localPath ?? "inline"}]`)
+    .join("\n");
 }
 
 function defaultAgentJson(agent: string): string | null {

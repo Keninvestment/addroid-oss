@@ -282,12 +282,12 @@ function desiredInitialState(input: OpsChangeProposalInput): "paused" | "active"
 }
 
 function applyBudgetChange(node: Record<string, unknown>, desired: Record<string, unknown>): boolean {
-  const dailyUsd = readNumber(desired.dailyUsd) ?? readNumber(desired.budgetDailyUsd);
-  const lifetimeUsd = readNumber(desired.lifetimeUsd) ?? readNumber(desired.budgetLifetimeUsd);
-  if (dailyUsd === null && lifetimeUsd === null) return false;
+  const dailyBudget = readNumber(desired.dailyBudget);
+  const lifetimeBudget = readNumber(desired.lifetimeBudget);
+  if (dailyBudget === null && lifetimeBudget === null) return false;
   const budget = isRecord(node.budget) ? { ...node.budget } : {};
-  if (dailyUsd !== null) budget.dailyUsd = dailyUsd;
-  if (lifetimeUsd !== null) budget.lifetimeUsd = lifetimeUsd;
+  if (dailyBudget !== null) budget.dailyBudget = dailyBudget;
+  if (lifetimeBudget !== null) budget.lifetimeBudget = lifetimeBudget;
   node.budget = budget;
   return true;
 }

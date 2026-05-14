@@ -109,6 +109,10 @@ const SECRET_KEY_NAMES = new Set([
   "clientsecret",
   "password",
   "secret",
+  "dataBase64",
+  "database64",
+  "data_base64",
+  "bytes",
 ]);
 
 /**

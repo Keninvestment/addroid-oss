@@ -53,7 +53,8 @@ import {
 import type PgBoss from "pg-boss";
 import type { PrismaClient } from "@addroid/db";
 
-const PRESET_NAMES = CRON_PRESETS.map((p) => p.name) as CronPresetName[];
+const USER_MANAGED_PRESETS = CRON_PRESETS.filter((p) => p.name !== "github_poll");
+const PRESET_NAMES = USER_MANAGED_PRESETS.map((p) => p.name) as CronPresetName[];
 
 type ParsedAction =
   | { kind: "help" }
@@ -381,7 +382,7 @@ async function execList(
     lastRunState: string | null;
     nextRunAt: string | null;
   };
-  const items: Item[] = CRON_PRESETS.map((p) => {
+  const items: Item[] = USER_MANAGED_PRESETS.map((p) => {
     const db = dbByName.get(p.name);
     const boss = bossByName.get(p.name);
     return {
@@ -406,16 +407,16 @@ async function execList(
   lines.push("[addroid cron list]");
   lines.push("");
   lines.push(
-    `  ${pad("name", 18)}${pad("cron", 16)}${pad("db", 9)}${pad("pgBoss", 9)}${pad("last", 8)}description`
+    `  ${pad("name", 26)}${pad("cron", 16)}${pad("db", 9)}${pad("pgBoss", 9)}${pad("last", 8)}description`
   );
-  lines.push(`  ${"-".repeat(76)}`);
+  lines.push(`  ${"-".repeat(84)}`);
   for (const it of items) {
     const dbState =
       it.dbEnabled === null ? "(none)" : it.dbEnabled ? "enabled" : "disabled";
     const bossState = it.pgBossScheduled ? "yes" : "no";
     const last = it.lastRunState ?? "-";
     lines.push(
-      `  ${pad(it.name, 18)}${pad(it.cron, 16)}${pad(dbState, 9)}${pad(bossState, 9)}${pad(last, 8)}${it.description}`
+      `  ${pad(it.name, 26)}${pad(it.cron, 16)}${pad(dbState, 9)}${pad(bossState, 9)}${pad(last, 8)}${it.description}`
     );
   }
   lines.push("");
@@ -756,9 +757,9 @@ function printHelp(): void {
       "  addroid cron logs    <name> [--limit N] [--json]",
       "",
       "Presets:",
-      ...CRON_PRESETS.map(
+      ...USER_MANAGED_PRESETS.map(
         (p) =>
-          `  - ${pad(p.name, 18)}default=${pad(p.cron, 16)}${p.enabledByDefault ? "(enabled by default)" : "(disabled by default)"}`
+          `  - ${pad(p.name, 26)}default=${pad(p.cron, 16)}${p.enabledByDefault ? "(enabled by default)" : "(disabled by default)"}`
       ),
       "",
       "Notes:",

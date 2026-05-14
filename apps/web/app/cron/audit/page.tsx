@@ -11,6 +11,8 @@ import { getPaginationState, paginationLabel } from "../../../lib/pagination";
 
 export const dynamic = "force-dynamic";
 
+const INTERNAL_CRON_NAMES = ["github_poll"] as const;
+
 interface SearchParamsInput {
   page?: string | string[];
 }
@@ -36,7 +38,14 @@ export default async function AuditLogPage({
   let warning: string | null = null;
   try {
     const workspace = await ensureWebWorkspace();
-    const where = { workspaceId: workspace.id };
+    const where = {
+      workspaceId: workspace.id,
+      NOT: [
+        { ref: { in: [...INTERNAL_CRON_NAMES] } },
+        { target: { in: INTERNAL_CRON_NAMES.map((name) => `cron_schedule:${name}`) } },
+        { action: { contains: "github_poll" } },
+      ],
+    };
     total = await prisma.auditLog.count({ where });
     const pagination = getPaginationState(resolvedSearchParams, "page", total);
     [rows, latestRows] = await Promise.all([

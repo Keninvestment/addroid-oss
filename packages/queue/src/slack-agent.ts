@@ -2,7 +2,15 @@ import type { SlackCommandBoss } from "./slack-command.js";
 
 export const SLACK_AGENT_JOB_NAME = "slack_agent" as const;
 
-export type SlackAgentEventType = "app_mention" | "message.im";
+export type SlackAgentEventType = "app_mention" | "message.im" | "message.file_share";
+
+export interface SlackAgentFileReference {
+  id: string;
+  name?: string;
+  mimetype?: string;
+  filetype?: string;
+  size?: number;
+}
 
 export interface SlackAgentJobPayload {
   text: string;
@@ -13,6 +21,7 @@ export interface SlackAgentJobPayload {
   threadTs: string;
   eventTs: string;
   eventType: SlackAgentEventType;
+  files?: SlackAgentFileReference[];
   enqueuedAt: string;
 }
 

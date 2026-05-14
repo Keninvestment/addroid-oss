@@ -22,6 +22,7 @@ type CronPreset =
   | "today_report"
   | "budget_guard"
   | "improvement_pr"
+  | "auto_creative_generation"
   | "retention_sweep";
 
 export async function runOpenCommand(args: string[]): Promise<number> {
@@ -242,6 +243,16 @@ function reportPreset(value: string): CronPreset | null {
   if (v === "today" || v === "current" || v === "today_report") return "today_report";
   if (v === "budget" || v === "budget_guard") return "budget_guard";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
+  if (
+    v === "creative" ||
+    v === "creatives" ||
+    v === "creative_generation" ||
+    v === "auto_creative" ||
+    v === "auto_creative_generation" ||
+    v === "自動クリエイティブ生成"
+  ) {
+    return "auto_creative_generation";
+  }
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";
   return null;

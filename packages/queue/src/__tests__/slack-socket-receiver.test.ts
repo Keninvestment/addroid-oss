@@ -571,6 +571,123 @@ test("startSlackSocketReceiver: app_mention events_api を即時 ack して slac
   await handle.stop();
 });
 
+test("startSlackSocketReceiver: file_share の画像 file id を slack_agent payload に残す", async () => {
+  const boss = new CapturingBoss();
+  const { opener, channels } = makeFakeOpener();
+  const handle = await startSlackSocketReceiver({
+    installationLoader: async () => VALID_INSTALLATION(),
+    urlOpener: makeUrlOpener(),
+    channelOpener: opener,
+    boss,
+  });
+  await flush();
+  const ch = channels[0]!;
+  ch.fire.onMessage(helloEnvelope());
+
+  ch.fire.onMessage(
+    JSON.stringify({
+      envelope_id: "env-file",
+      type: "events_api",
+      payload: {
+        type: "event_callback",
+        team_id: "T012ABC",
+        event: {
+          type: "app_mention",
+          subtype: "file_share",
+          user: "U012ABC",
+          channel: "C012ABC",
+          text: "<@U0BOT> この画像を参考にクリエイティブを生成して",
+          ts: "1710000000.000200",
+          files: [
+            {
+              id: "F012IMG",
+              name: "reference.png",
+              mimetype: "image/png",
+              filetype: "png",
+              size: 1234,
+            },
+          ],
+        },
+      },
+    })
+  );
+  await flush();
+
+  assert.equal(boss.sent.length, 1);
+  const payload = boss.sent[0]!.data as SlackAgentJobPayload;
+  assert.equal(payload.text, "この画像を参考にクリエイティブを生成して");
+  assert.deepEqual(payload.files, [
+    {
+      id: "F012IMG",
+      name: "reference.png",
+      mimetype: "image/png",
+      filetype: "png",
+      size: 1234,
+    },
+  ]);
+
+  await handle.stop();
+});
+
+test("startSlackSocketReceiver: message file_share の bot mention も slack_agent payload に残す", async () => {
+  const boss = new CapturingBoss();
+  const { opener, channels } = makeFakeOpener();
+  const handle = await startSlackSocketReceiver({
+    installationLoader: async () => VALID_INSTALLATION(),
+    urlOpener: makeUrlOpener(),
+    channelOpener: opener,
+    boss,
+  });
+  await flush();
+  const ch = channels[0]!;
+  ch.fire.onMessage(helloEnvelope());
+
+  ch.fire.onMessage(
+    JSON.stringify({
+      envelope_id: "env-message-file",
+      type: "events_api",
+      payload: {
+        type: "event_callback",
+        team_id: "T012ABC",
+        event: {
+          type: "message",
+          subtype: "file_share",
+          user: "U012ABC",
+          channel: "C012ABC",
+          text: "<@U0BOT> 添付画像を活用して新しいクリエイティブを生成して",
+          ts: "1710000000.000300",
+          files: [
+            {
+              id: "F012WEBP",
+              name: "reference.webp",
+              mimetype: "image/webp",
+              filetype: "webp",
+              size: 2345,
+            },
+          ],
+        },
+      },
+    })
+  );
+  await flush();
+
+  assert.equal(boss.sent.length, 1);
+  const payload = boss.sent[0]!.data as SlackAgentJobPayload;
+  assert.equal(payload.text, "添付画像を活用して新しいクリエイティブを生成して");
+  assert.equal(payload.eventType, "message.file_share");
+  assert.deepEqual(payload.files, [
+    {
+      id: "F012WEBP",
+      name: "reference.webp",
+      mimetype: "image/webp",
+      filetype: "webp",
+      size: 2345,
+    },
+  ]);
+
+  await handle.stop();
+});
+
 test("startSlackSocketReceiver: 非 JSON / JSON だが object でない値は無視 (throw しない)", async () => {
   const boss = new CapturingBoss();
   const { opener, channels } = makeFakeOpener();

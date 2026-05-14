@@ -141,6 +141,7 @@ export class MockImageProvider implements ImageProvider {
           variationConditions: normalizedConditions,
           purpose: req.purpose ?? null,
           variantCount: normalizedConditions.length,
+          referenceImageCount: req.referenceImages?.length ?? 0,
         },
         qaResult: null,
       },

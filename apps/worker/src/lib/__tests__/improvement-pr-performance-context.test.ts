@@ -19,6 +19,7 @@ test("loadRecentPerformanceSnapshotContext uses yesterday-based 7d window and av
         return rows;
       },
     },
+    creative: { async findMany() { return []; } },
   } as unknown as PrismaClient;
 
   const context = await loadRecentPerformanceSnapshotContext(prisma, {
@@ -57,6 +58,7 @@ test("loadRecentPerformanceSnapshotContext can include today for manual improvem
         ];
       },
     },
+    creative: { async findMany() { return []; } },
   } as unknown as PrismaClient;
 
   const context = await loadRecentPerformanceSnapshotContext(prisma, {
@@ -77,6 +79,72 @@ test("loadRecentPerformanceSnapshotContext can include today for manual improvem
   assert.match(JSON.stringify(queryArgs), /2026-05-11T00:00:00.000Z/);
 });
 
+test("loadRecentPerformanceSnapshotContext grounds snapshot rows via ads_hierarchy when hierarchyId is missing", async () => {
+  const prisma = {
+    performanceSnapshot: {
+      async findMany() {
+        return [
+          {
+            ...row("today-ad", "ad", "2026-05-11", 8_000_000n, 800, 80, 0),
+            nodeKey: "120228334025200756",
+            hierarchyId: null,
+            hierarchy: null,
+          },
+        ];
+      },
+    },
+    adsHierarchyNode: {
+      async findMany() {
+        return [
+          {
+            id: "hier-ad",
+            nodeType: "ad",
+            nodeKey: "120228334025200756",
+            displayName: "新しいトラフィック広告",
+            status: "paused",
+            externalId: "120228334025200756",
+            spec: { raw: { name: "新しいトラフィック広告" } },
+            parent: {
+              id: "hier-adset",
+              nodeType: "adset",
+              nodeKey: "120228334025180756",
+              displayName: "ADS_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算",
+              status: "paused",
+              externalId: "120228334025180756",
+              spec: { raw: { name: "ADS_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算" } },
+              parent: {
+                id: "hier-campaign",
+                nodeType: "campaign",
+                nodeKey: "120228334025190756",
+                displayName: "CP_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算",
+                status: "paused",
+                externalId: "120228334025190756",
+                spec: { raw: { name: "CP_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算" } },
+              },
+            },
+          },
+        ];
+      },
+    },
+    creative: { async findMany() { return []; } },
+  } as unknown as PrismaClient;
+
+  const context = await loadRecentPerformanceSnapshotContext(prisma, {
+    accountId: "acct-1",
+    timeZone: "UTC",
+    now: new Date("2026-05-11T12:00:00.000Z"),
+    includeToday: true,
+  });
+
+  assert.equal(context.creativeContext?.target?.hierarchyId, "hier-ad");
+  assert.equal(context.creativeContext?.target?.displayName, "新しいトラフィック広告");
+  assert.match(context.creativeContext?.notes?.join("\n") ?? "", /SIN熊本店 縦長/);
+  assert.match(
+    context.creativeContext?.target?.creative?.primaryText ?? "",
+    /Existing Meta hierarchy/
+  );
+});
+
 function row(
   id: string,
   nodeType: string,
@@ -89,11 +157,26 @@ function row(
   return {
     id,
     nodeType,
+    nodeKey: `${nodeType}-${id}`,
+    hierarchyId: nodeType === "account" ? null : `hier-${id}`,
     metricDate: new Date(`${metricDate}T00:00:00.000Z`),
     spendMicros,
     impressions,
     clicks,
     conversions,
     createdAt: new Date(`${metricDate}T01:00:00.000Z`),
+    raw: { displayName: `${nodeType} ${id}` },
+    hierarchy:
+      nodeType === "account"
+        ? null
+        : {
+            id: `hier-${id}`,
+            nodeType,
+            nodeKey: `${nodeType}-${id}`,
+            displayName: `${nodeType} ${id}`,
+            status: "active",
+            externalId: `ext-${id}`,
+            spec: {},
+          },
   };
 }

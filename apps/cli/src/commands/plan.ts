@@ -266,8 +266,8 @@ function describeAction(a: PlanAction): string {
   switch (a.kind) {
     case "create_campaign": {
       const parts: string[] = [];
-      if (a.budget.dailyUsd !== undefined) parts.push(`dailyUsd=${a.budget.dailyUsd}`);
-      if (a.budget.lifetimeUsd !== undefined) parts.push(`lifetimeUsd=${a.budget.lifetimeUsd}`);
+      if (a.budget.dailyBudget !== undefined) parts.push(`dailyBudget=${a.budget.dailyBudget}`);
+      if (a.budget.lifetimeBudget !== undefined) parts.push(`lifetimeBudget=${a.budget.lifetimeBudget}`);
       return `+ ${a.kind} account=${a.account} id=${a.campaignId} initialState=${a.initialState} ${parts.join(" ")}`.trimEnd();
     }
     case "update_campaign":

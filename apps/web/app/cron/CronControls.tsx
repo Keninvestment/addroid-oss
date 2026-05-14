@@ -423,8 +423,9 @@ export function CronControls({
               <dd>{description}</dd>
               <dt>注意点</dt>
               <dd>
-                {presetName === "improvement_pr"
-                  ? "改善案がある場合は GitHub に承認待ちの変更が作成される可能性があります。"
+                {presetName === "improvement_pr" ||
+                presetName === "auto_creative_generation"
+                  ? "改善案やクリエイティブ案がある場合は GitHub に承認待ちの変更が作成される可能性があります。"
                   : presetName === "daily_report" ||
                       presetName === "today_report"
                     ? "Meta の広告設定は変更されません。"
@@ -453,6 +454,7 @@ function presetLabel(name: string): string {
     daily_report: "日次レポート",
     today_report: "当日レポート",
     improvement_pr: "改善提案",
+    auto_creative_generation: "自動クリエイティブ生成",
     github_poll: "承認済み変更の確認",
     retention_sweep: "古い履歴の整理",
   };

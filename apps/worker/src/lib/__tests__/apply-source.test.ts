@@ -50,7 +50,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 50
+      dailyBudget: 50
 `;
 
 const HEAD_SHA = "deadbeefcafebabedeadbeefcafebabedeadbeef";

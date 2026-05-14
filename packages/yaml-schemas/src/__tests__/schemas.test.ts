@@ -222,11 +222,87 @@ test("BrandYamlSchema accepts a paused campaign with a daily budget", () => {
         name: "Fall Promo",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 50 },
+        budget: { dailyBudget: 50 },
       },
     ],
   });
   assert.equal(r.success, true);
+});
+
+test("BrandYamlSchema accepts Instagram profile copy values from Meta", () => {
+  const r = BrandYamlSchema.safeParse({
+    version: 1,
+    account: { key: "primary", displayName: "Primary" },
+    campaigns: [
+      {
+        id: "instagram-profile",
+        name: "Instagram Profile",
+        objective: "OUTCOME_TRAFFIC",
+        initialState: "paused",
+        budget: { dailyBudget: 200 },
+        adsets: [
+          {
+            id: "instagram-profile-jp",
+            name: "Instagram Profile JP",
+            initialState: "paused",
+            optimizationGoal: "PROFILE_VISIT",
+            billingEvent: "IMPRESSIONS",
+            targeting: {
+              countries: ["JP"],
+              ageMin: 20,
+              ageMax: 40,
+            },
+            ads: [
+              {
+                id: "instagram-profile-ad",
+                name: "Instagram Profile Ad",
+                creativeRef: "instagram-profile-creative",
+                initialState: "paused",
+              },
+            ],
+          },
+          {
+            id: "instagram-profile-legacy",
+            name: "Instagram Profile Legacy",
+            initialState: "paused",
+            optimizationGoal: "VISIT_INSTAGRAM_PROFILE",
+            billingEvent: "IMPRESSIONS",
+            targeting: {
+              countries: ["JP"],
+            },
+          },
+        ],
+      },
+    ],
+    creatives: [
+      {
+        id: "instagram-profile-creative",
+        name: "Instagram Profile Creative",
+        mediaType: "video",
+        primaryText: "下通り交差点にあるチル空間",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
+        callToActions: ["CALL_NOW"],
+      },
+    ],
+  });
+  assert.equal(r.success, true, JSON.stringify(r));
+});
+
+test("BrandYamlSchema rejects malformed Meta enum tokens", () => {
+  const r = BrandYamlSchema.safeParse({
+    version: 1,
+    account: { key: "primary", displayName: "Primary" },
+    campaigns: [],
+    creatives: [
+      {
+        id: "bad-creative",
+        name: "Bad Creative",
+        mediaType: "image",
+        callToAction: "open link",
+      },
+    ],
+  });
+  assert.equal(r.success, false);
 });
 
 test("BrandYamlSchema rejects an account.key with uppercase", () => {
@@ -248,14 +324,14 @@ test("BrandYamlSchema rejects unknown campaign objective", () => {
         name: "x",
         objective: "WORLD_DOMINATION",
         initialState: "paused",
-        budget: { dailyUsd: 1 },
+        budget: { dailyBudget: 1 },
       },
     ],
   });
   assert.equal(r.success, false);
 });
 
-test("BrandYamlSchema rejects budget without dailyUsd or lifetimeUsd", () => {
+test("BrandYamlSchema rejects budget without dailyBudget or lifetimeBudget", () => {
   const r = BrandYamlSchema.safeParse({
     version: 1,
     account: { key: "primary", displayName: "Primary" },
@@ -282,14 +358,14 @@ test("BrandYamlSchema rejects duplicate campaign ids", () => {
         name: "a",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
       },
       {
         id: "dup",
         name: "b",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
       },
     ],
   });
@@ -331,7 +407,7 @@ test("assertInitialCampaignsArePaused rejects new campaigns marked active", () =
         name: "x",
         objective: "OUTCOME_TRAFFIC",
         initialState: "active",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
       },
     ],
   });
@@ -348,7 +424,7 @@ test("assertInitialCampaignsArePaused allows already-known active campaigns", ()
         name: "x",
         objective: "OUTCOME_TRAFFIC",
         initialState: "active",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
       },
     ],
   });
@@ -363,71 +439,71 @@ test("assertBudgetChangeIsSafe rejects empty next budget", () => {
   assert.throws(() => assertBudgetChangeIsSafe(null, {}), AdsValidationError);
 });
 
-test("assertBudgetChangeIsSafe rejects initial dailyUsd <= 0", () => {
+test("assertBudgetChangeIsSafe rejects initial dailyBudget <= 0", () => {
   assert.throws(
-    () => assertBudgetChangeIsSafe(null, { dailyUsd: 0 }),
+    () => assertBudgetChangeIsSafe(null, { dailyBudget: 0 }),
     AdsValidationError
   );
 });
 
-test("assertBudgetChangeIsSafe accepts a sane initial dailyUsd", () => {
-  assertBudgetChangeIsSafe(null, { dailyUsd: 50 });
+test("assertBudgetChangeIsSafe accepts a sane initial dailyBudget", () => {
+  assertBudgetChangeIsSafe(null, { dailyBudget: 50 });
 });
 
-test("assertBudgetChangeIsSafe rejects dropping dailyUsd to 0 from > 0", () => {
+test("assertBudgetChangeIsSafe rejects dropping dailyBudget to 0 from > 0", () => {
   assert.throws(
-    () => assertBudgetChangeIsSafe({ dailyUsd: 50 }, { dailyUsd: 0 }),
+    () => assertBudgetChangeIsSafe({ dailyBudget: 50 }, { dailyBudget: 0 }),
     AdsValidationError
   );
 });
 
 test("assertBudgetChangeIsSafe rejects increase beyond ratio limit", () => {
-  const before = { dailyUsd: 50 };
+  const before = { dailyBudget: 50 };
   const overLimit = 50 * BUDGET_INCREASE_RATIO_LIMIT + 1;
   assert.throws(
-    () => assertBudgetChangeIsSafe(before, { dailyUsd: overLimit }),
+    () => assertBudgetChangeIsSafe(before, { dailyBudget: overLimit }),
     AdsValidationError
   );
 });
 
 test("assertBudgetChangeIsSafe accepts increase at ratio limit", () => {
-  const before = { dailyUsd: 50 };
+  const before = { dailyBudget: 50 };
   assertBudgetChangeIsSafe(before, {
-    dailyUsd: 50 * BUDGET_INCREASE_RATIO_LIMIT,
+    dailyBudget: 50 * BUDGET_INCREASE_RATIO_LIMIT,
   });
 });
 
-test("assertBudgetChangeIsSafe rejects initial lifetimeUsd <= 0", () => {
+test("assertBudgetChangeIsSafe rejects initial lifetimeBudget <= 0", () => {
   assert.throws(
-    () => assertBudgetChangeIsSafe(null, { lifetimeUsd: 0 }),
+    () => assertBudgetChangeIsSafe(null, { lifetimeBudget: 0 }),
     AdsValidationError
   );
 });
 
-test("assertBudgetChangeIsSafe accepts a sane initial lifetimeUsd", () => {
-  assertBudgetChangeIsSafe(null, { lifetimeUsd: 500 });
+test("assertBudgetChangeIsSafe accepts a sane initial lifetimeBudget", () => {
+  assertBudgetChangeIsSafe(null, { lifetimeBudget: 500 });
 });
 
-test("assertBudgetChangeIsSafe rejects dropping lifetimeUsd to 0 from > 0", () => {
+test("assertBudgetChangeIsSafe rejects dropping lifetimeBudget to 0 from > 0", () => {
   assert.throws(
-    () => assertBudgetChangeIsSafe({ lifetimeUsd: 500 }, { lifetimeUsd: 0 }),
+    () => assertBudgetChangeIsSafe({ lifetimeBudget: 500 }, { lifetimeBudget: 0 }),
     AdsValidationError
   );
 });
 
-test("assertBudgetChangeIsSafe rejects lifetimeUsd increase beyond ratio limit", () => {
-  const before = { lifetimeUsd: 500 };
+test("assertBudgetChangeIsSafe rejects lifetimeBudget increase beyond ratio limit", () => {
+  const before = { lifetimeBudget: 500 };
   const overLimit = 500 * BUDGET_INCREASE_RATIO_LIMIT + 1;
   assert.throws(
-    () => assertBudgetChangeIsSafe(before, { lifetimeUsd: overLimit }),
+    () => assertBudgetChangeIsSafe(before, { lifetimeBudget: overLimit }),
     AdsValidationError
   );
 });
 
-test("assertBudgetChangeIsSafe accepts lifetimeUsd increase at ratio limit", () => {
-  const before = { lifetimeUsd: 500 };
+test("assertBudgetChangeIsSafe accepts lifetimeBudget increase at ratio limit", () => {
+  const before = { lifetimeBudget: 500 };
   assertBudgetChangeIsSafe(before, {
-    lifetimeUsd: 500 * BUDGET_INCREASE_RATIO_LIMIT,
+    lifetimeBudget: 500 * BUDGET_INCREASE_RATIO_LIMIT,
   });
 });
 
@@ -541,7 +617,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: active
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
 `,
   });
   try {
@@ -596,7 +672,7 @@ const BRAND_WITH_CAMPAIGN = (opts: {
   key: string;
   campaignId: string;
   initialState: "paused" | "active";
-  dailyUsd: number;
+  dailyBudget: number;
 }) => `version: 1
 account:
   key: ${opts.key}
@@ -607,7 +683,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: ${opts.initialState}
     budget:
-      dailyUsd: ${opts.dailyUsd}
+      dailyBudget: ${opts.dailyBudget}
 `;
 
 test("loadAndValidateOpsRepo with previous: rejects unsafe budget increase against base", () => {
@@ -618,7 +694,7 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe budget increase again
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 50,
+      dailyBudget: 50,
     }),
   });
   const targetFx = writeFixture({
@@ -628,7 +704,7 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe budget increase again
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 50 * BUDGET_INCREASE_RATIO_LIMIT + 1,
+      dailyBudget: 50 * BUDGET_INCREASE_RATIO_LIMIT + 1,
     }),
   });
   try {
@@ -658,7 +734,7 @@ test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit budget increa
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 50,
+      dailyBudget: 50,
     }),
   });
   const targetFx = writeFixture({
@@ -668,7 +744,7 @@ test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit budget increa
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 50 * BUDGET_INCREASE_RATIO_LIMIT,
+      dailyBudget: 50 * BUDGET_INCREASE_RATIO_LIMIT,
     }),
   });
   try {
@@ -685,7 +761,7 @@ const BRAND_WITH_LIFETIME = (opts: {
   key: string;
   campaignId: string;
   initialState: "paused" | "active";
-  lifetimeUsd: number;
+  lifetimeBudget: number;
 }) => `version: 1
 account:
   key: ${opts.key}
@@ -696,10 +772,10 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: ${opts.initialState}
     budget:
-      lifetimeUsd: ${opts.lifetimeUsd}
+      lifetimeBudget: ${opts.lifetimeBudget}
 `;
 
-test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeUsd increase against base", () => {
+test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeBudget increase against base", () => {
   const baseFx = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT_YAML,
     "workflows/cron.yaml": VALID_CRON_YAML,
@@ -707,7 +783,7 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeUsd increase 
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      lifetimeUsd: 500,
+      lifetimeBudget: 500,
     }),
   });
   const targetFx = writeFixture({
@@ -717,7 +793,7 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeUsd increase 
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      lifetimeUsd: 500 * BUDGET_INCREASE_RATIO_LIMIT + 1,
+      lifetimeBudget: 500 * BUDGET_INCREASE_RATIO_LIMIT + 1,
     }),
   });
   try {
@@ -729,9 +805,9 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeUsd increase 
       r.errors.some(
         (f) =>
           f.pointer === "campaigns[0].budget" &&
-          /lifetimeUsd increase exceeds/.test(f.message)
+          /lifetimeBudget increase exceeds/.test(f.message)
       ),
-      `expected lifetimeUsd-increase rejection, got ${JSON.stringify(r.errors)}`
+      `expected lifetimeBudget-increase rejection, got ${JSON.stringify(r.errors)}`
     );
   } finally {
     baseFx.cleanup();
@@ -739,7 +815,7 @@ test("loadAndValidateOpsRepo with previous: rejects unsafe lifetimeUsd increase 
   }
 });
 
-test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit lifetimeUsd increase", () => {
+test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit lifetimeBudget increase", () => {
   const baseFx = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT_YAML,
     "workflows/cron.yaml": VALID_CRON_YAML,
@@ -747,7 +823,7 @@ test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit lifetimeUsd i
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      lifetimeUsd: 500,
+      lifetimeBudget: 500,
     }),
   });
   const targetFx = writeFixture({
@@ -757,7 +833,7 @@ test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit lifetimeUsd i
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      lifetimeUsd: 500 * BUDGET_INCREASE_RATIO_LIMIT,
+      lifetimeBudget: 500 * BUDGET_INCREASE_RATIO_LIMIT,
     }),
   });
   try {
@@ -770,7 +846,7 @@ test("loadAndValidateOpsRepo with previous: accepts at-ratio-limit lifetimeUsd i
   }
 });
 
-test("loadAndValidateOpsRepo with previous: rejects dailyUsd dropped to 0 against base", () => {
+test("loadAndValidateOpsRepo with previous: rejects dailyBudget dropped to 0 against base", () => {
   const baseFx = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT_YAML,
     "workflows/cron.yaml": VALID_CRON_YAML,
@@ -778,7 +854,7 @@ test("loadAndValidateOpsRepo with previous: rejects dailyUsd dropped to 0 agains
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 50,
+      dailyBudget: 50,
     }),
   });
   const targetFx = writeFixture({
@@ -788,7 +864,7 @@ test("loadAndValidateOpsRepo with previous: rejects dailyUsd dropped to 0 agains
       key: "primary",
       campaignId: "fall-promo",
       initialState: "paused",
-      dailyUsd: 0,
+      dailyBudget: 0,
     }),
   });
   try {
@@ -813,7 +889,7 @@ test("loadAndValidateOpsRepo with previous: allows existing campaign to remain i
       key: "primary",
       campaignId: "running",
       initialState: "paused",
-      dailyUsd: 50,
+      dailyBudget: 50,
     }),
   });
   const targetFx = writeFixture({
@@ -823,7 +899,7 @@ test("loadAndValidateOpsRepo with previous: allows existing campaign to remain i
       key: "primary",
       campaignId: "running",
       initialState: "active",
-      dailyUsd: 50,
+      dailyBudget: 50,
     }),
   });
   try {
@@ -849,7 +925,7 @@ test("loadAndValidateOpsRepo with previous: still rejects newly added active cam
       key: "primary",
       campaignId: "new-launch",
       initialState: "active",
-      dailyUsd: 100,
+      dailyBudget: 100,
     }),
   });
   try {

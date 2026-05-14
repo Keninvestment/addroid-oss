@@ -104,6 +104,7 @@ export {
   type ImageGeneratedAsset,
   type ImageProvider,
   type ImageProviderName,
+  type ImageReferenceInput,
   type ImageVariationCondition,
 } from "./image-provider.js";
 

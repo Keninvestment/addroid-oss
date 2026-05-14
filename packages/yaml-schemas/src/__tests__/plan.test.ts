@@ -68,7 +68,7 @@ test("BrandYamlSchema accepts a hierarchical brand with adsets/ads/creatives/exp
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     guardrails: {
-      maxDailyUsdPerCampaign: 200,
+      maxDailyBudgetPerCampaign: 200,
       allowedCountries: ["JP", "US"],
       bannedInterests: ["alcohol"],
     },
@@ -78,13 +78,13 @@ test("BrandYamlSchema accepts a hierarchical brand with adsets/ads/creatives/exp
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             id: "fall-jp",
             name: "Fall JP",
             initialState: "paused",
-            budget: { dailyUsd: 50 },
+            budget: { dailyBudget: 50 },
             targeting: {
               countries: ["JP"],
               ageMin: 25,
@@ -144,13 +144,13 @@ test("buildExecutionPlan with no previous emits create_* actions for the full hi
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             id: "fall-jp",
             name: "Fall JP",
             initialState: "paused",
-            budget: { dailyUsd: 50 },
+            budget: { dailyBudget: 50 },
             targeting: { countries: ["JP"] },
             ads: [
               {
@@ -197,7 +197,7 @@ test("buildExecutionPlan with no previous emits create_* actions for the full hi
   )!;
   assert.equal(camp.account, "primary");
   assert.equal(camp.campaignId, "fall");
-  assert.equal(camp.budget.dailyUsd, 100);
+  assert.equal(camp.budget.dailyBudget, 100);
   const adset = plan.actions.find(
     (a): a is CreateAdsetAction => a.kind === "create_adset"
   )!;
@@ -225,7 +225,7 @@ test("buildExecutionPlan emits update_campaign when campaign budget changes agai
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 50 },
+        budget: { dailyBudget: 50 },
       },
     ],
   });
@@ -238,7 +238,7 @@ test("buildExecutionPlan emits update_campaign when campaign budget changes agai
         name: "Fall (renamed)",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 80 },
+        budget: { dailyBudget: 80 },
       },
     ],
   });
@@ -261,7 +261,7 @@ test("buildExecutionPlan emits delete_* in dependency-reverse order for a full r
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 50 },
+        budget: { dailyBudget: 50 },
         adsets: [
           {
             id: "fall-jp",
@@ -325,7 +325,7 @@ test("buildExecutionPlan emits delete_* in dependency-reverse order when campaig
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 50 },
+        budget: { dailyBudget: 50 },
         adsets: [
           {
             id: "fall-jp",
@@ -366,25 +366,25 @@ test("buildExecutionPlan emits delete_* in dependency-reverse order when campaig
 
 // ---- buildExecutionPlan: guardrails / structural failures ----------------
 
-test("buildExecutionPlan reports an error when guardrails.maxDailyUsdPerCampaign is exceeded", () => {
+test("buildExecutionPlan reports an error when guardrails.maxDailyBudgetPerCampaign is exceeded", () => {
   const brand = brandFor({
     version: 1,
     account: { key: "primary", displayName: "Primary" },
-    guardrails: { maxDailyUsdPerCampaign: 50 },
+    guardrails: { maxDailyBudgetPerCampaign: 50 },
     campaigns: [
       {
         id: "fall",
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
       },
     ],
   });
   const plan = buildExecutionPlan({ account: "primary", next: brand, previous: null });
   const err = plan.findings.find((f) => f.level === "error");
   assert.ok(err);
-  assert.match(err!.message, /maxDailyUsdPerCampaign/);
+  assert.match(err!.message, /maxDailyBudgetPerCampaign/);
 });
 
 test("buildExecutionPlan reports an error when targeting.countries violates allowedCountries", () => {
@@ -398,7 +398,7 @@ test("buildExecutionPlan reports an error when targeting.countries violates allo
         name: "c1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as1",
@@ -428,7 +428,7 @@ test("buildExecutionPlan reports an error when targeting.interests includes a ba
         name: "c1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as1",
@@ -447,7 +447,7 @@ test("buildExecutionPlan reports an error when targeting.interests includes a ba
   assert.match(err!.message, /bannedInterests/);
 });
 
-test("buildExecutionPlan emits a warning when adset dailyUsd sum exceeds campaign dailyUsd", () => {
+test("buildExecutionPlan emits a warning when adset dailyBudget sum exceeds campaign dailyBudget", () => {
   const brand = brandFor({
     version: 1,
     account: { key: "primary", displayName: "Primary" },
@@ -457,13 +457,13 @@ test("buildExecutionPlan emits a warning when adset dailyUsd sum exceeds campaig
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 60 },
+        budget: { dailyBudget: 60 },
         adsets: [
           {
             id: "as1",
             name: "as1",
             initialState: "paused",
-            budget: { dailyUsd: 40 },
+            budget: { dailyBudget: 40 },
             targeting: { countries: ["JP"] },
             ads: [],
           },
@@ -471,7 +471,7 @@ test("buildExecutionPlan emits a warning when adset dailyUsd sum exceeds campaig
             id: "as2",
             name: "as2",
             initialState: "paused",
-            budget: { dailyUsd: 40 },
+            budget: { dailyBudget: 40 },
             targeting: { countries: ["JP"] },
             ads: [],
           },
@@ -482,7 +482,7 @@ test("buildExecutionPlan emits a warning when adset dailyUsd sum exceeds campaig
   const plan = buildExecutionPlan({ account: "primary", next: brand, previous: null });
   const warn = plan.findings.find((f) => f.level === "warning");
   assert.ok(warn);
-  assert.match(warn!.message, /dailyUsd 合計/);
+  assert.match(warn!.message, /dailyBudget 合計/);
 });
 
 test("buildExecutionPlan flags experiments referencing a non-existent campaign", () => {
@@ -518,7 +518,7 @@ test("buildExecutionPlan flags experiments whose variant weights do not sum to 1
         name: "c1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as1",
@@ -558,7 +558,7 @@ test("buildExecutionPlan flags experiment variants referencing adsets outside th
         name: "c1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as1",
@@ -574,7 +574,7 @@ test("buildExecutionPlan flags experiment variants referencing adsets outside th
         name: "c2",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as2",
@@ -615,7 +615,7 @@ test("buildExecutionPlan flags ad.creativeRef pointing to a non-existent creativ
         name: "c1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 10 },
+        budget: { dailyBudget: 10 },
         adsets: [
           {
             id: "as1",
@@ -653,7 +653,7 @@ test("buildExecutionPlan returns no actions when previous and next are identical
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused" as const,
-        budget: { dailyUsd: 50 },
+        budget: { dailyBudget: 50 },
       },
     ],
   };

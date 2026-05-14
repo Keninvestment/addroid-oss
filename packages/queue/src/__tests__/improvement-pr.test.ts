@@ -14,6 +14,7 @@ import {
   type ImprovementPrAuditOutput,
   type ImprovementPrAuditWriter,
   type ImprovementPrCopyOutput,
+  type ImprovementPrCreativeGenerationContext,
   type ImprovementPrCreativeLinkInput,
   type ImprovementPrCreativeQaOutput,
   type ImprovementPrCreativeRecord,
@@ -175,6 +176,7 @@ function fail<T>(
 class FakePipelineRunner implements ImprovementPrPipelineRunner {
   calls: string[] = [];
   analystInputs: Parameters<ImprovementPrPipelineRunner["runAnalyst"]>[0][] = [];
+  imagePromptInputs: Parameters<ImprovementPrPipelineRunner["runImagePrompt"]>[0][] = [];
   constructor(private readonly cfg: PipelineOverrides = {}) {}
 
   async runAnalyst(
@@ -214,9 +216,10 @@ class FakePipelineRunner implements ImprovementPrPipelineRunner {
     });
   }
   async runImagePrompt(
-    _input: unknown
+    input: Parameters<ImprovementPrPipelineRunner["runImagePrompt"]>[0]
   ): Promise<ImprovementPrAgentRunResult<ImprovementPrImagePromptOutput>> {
     this.calls.push("image_prompt");
+    this.imagePromptInputs.push(input);
     if (this.cfg.failures?.imagePrompt) return fail("image_prompt");
     return ok("image_prompt", {
       variants:
@@ -545,6 +548,45 @@ test("pipeline: runImprovementPrOnce runs all 8 agents, opens PR, writes audit",
   assert.equal(audit.calls[0]!.metadata.dryRunSummary, undefined);
 });
 
+test("pipeline: auto_creative_generation stops after creative QA and does not open PR", async () => {
+  const store = new FakeImprovementPrStore(ACCOUNT);
+  const pipeline = new FakePipelineRunner();
+  const publisher = new FakePublisher();
+  const audit = new FakeAuditWriter();
+  const planValidator = new FakePlanValidator();
+  const summary = await runImprovementPrOnce({
+    workspaceId: "ws-1",
+    mode: "proposal",
+    workflowIntent: "auto_creative_generation",
+    accountKey: "primary",
+    repo: "myorg/ads-config",
+    store,
+    pipeline,
+    publisher,
+    planValidator,
+    audit,
+    cronRunId: "cr-1",
+  });
+  assert.equal(summary.status, "succeeded");
+  assert.deepEqual(pipeline.calls, [
+    "analyst",
+    "strategy",
+    "copy",
+    "image_prompt",
+    "creative_qa",
+  ]);
+  assert.equal(store.creativeCalls.length, 1);
+  assert.deepEqual(summary.creativeIds, ["creative-1"]);
+  assert.equal(publisher.calls.length, 0);
+  assert.equal(planValidator.calls.length, 0);
+  assert.equal(audit.calls.length, 1);
+  assert.equal(audit.calls[0]!.action, "improvement_pr.skipped");
+  assert.equal(
+    audit.calls[0]!.metadata.skippedAt,
+    "auto_creative_generation_complete"
+  );
+});
+
 // ---------------------------------------------------------------------
 // Regression fix — plan validation is the source of dry-run truth
 // ---------------------------------------------------------------------
@@ -562,8 +604,8 @@ test("plan: validator errors land in PR body and audit metadata, PR is still ope
     errors: [
       {
         file: "ads/accounts/primary/campaigns/cmp_1.yaml",
-        message: "dailyUsd must be > 0",
-        pointer: "/campaigns/0/budget/dailyUsd",
+        message: "dailyBudget must be > 0",
+        pointer: "/campaigns/0/budget/dailyBudget",
       },
     ],
     warnings: [],
@@ -587,7 +629,7 @@ test("plan: validator errors land in PR body and audit metadata, PR is still ope
   assert.equal(publisher.calls.length, 1);
   assert.match(publisher.calls[0]!.prBody, /status: `error`/);
   assert.match(publisher.calls[0]!.prBody, /errors=1/);
-  assert.match(publisher.calls[0]!.prBody, /dailyUsd must be > 0/);
+  assert.match(publisher.calls[0]!.prBody, /dailyBudget must be > 0/);
   const planMeta = audit.calls[0]!.metadata.planValidation as {
     ok: boolean;
     risk: string;
@@ -923,6 +965,62 @@ test("creatives: image_prompt prompts + rationale + creative_qa result are persi
   assert.deepEqual(
     audit.calls[0]!.metadata.creativeIds,
     ["creative-1", "creative-2"]
+  );
+});
+
+test("creatives: creative generation context is passed to image_prompt and links creatives to the target node", async () => {
+  const creativeContext: ImprovementPrCreativeGenerationContext = {
+    strategy: "adapt_winner_to_underperformer",
+    target: {
+      hierarchyId: "hier-ad-weak",
+      hierarchy: "ad",
+      nodeKey: "ad-weak",
+      displayName: "Weak CPA ad",
+      status: "active",
+      externalId: "111",
+      current: { spend: 1200, impressions: 1000, clicks: 20, conversions: 0, ctr: 2, cpc: 60, cpa: 0 },
+      rationale: "adaptation target: spend with no conversions",
+      creative: { headline: "Old hook", primaryText: "Old body", callToAction: "LEARN_MORE" },
+    },
+    references: [
+      {
+        hierarchyId: "hier-ad-win",
+        hierarchy: "ad",
+        nodeKey: "ad-win",
+        displayName: "Winning ad",
+        status: "active",
+        externalId: "222",
+        current: { spend: 800, impressions: 2000, clicks: 80, conversions: 8, ctr: 4, cpc: 10, cpa: 100 },
+        rationale: "winner seed: high CTR and conversions",
+        creative: { headline: "Winning hook", primaryText: "Winning body", callToAction: "SIGN_UP" },
+      },
+    ],
+    brandProfile: { brandName: "Primary Brand", tone: "clear and practical" },
+  };
+  const store = new FakeImprovementPrStore(ACCOUNT);
+  const pipeline = new FakePipelineRunner();
+  const publisher = new FakePublisher();
+  const audit = new FakeAuditWriter();
+  const planValidator = new FakePlanValidator();
+
+  const summary = await runImprovementPrOnce({
+    workspaceId: "ws-1",
+    mode: "proposal",
+    accountKey: "primary",
+    creativeContext,
+    store,
+    pipeline,
+    publisher,
+    planValidator,
+    audit,
+  });
+
+  assert.equal(summary.status, "succeeded");
+  assert.equal(pipeline.imagePromptInputs[0]!.creativeContext, creativeContext);
+  assert.equal(store.creativeCalls[0]!.hierarchyId, "hier-ad-weak");
+  assert.equal(
+    (audit.calls[0]!.metadata.creativeContext as Record<string, unknown>).strategy,
+    "adapt_winner_to_underperformer"
   );
 });
 

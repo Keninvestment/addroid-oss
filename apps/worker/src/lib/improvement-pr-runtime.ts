@@ -70,6 +70,7 @@ import type {
   ImprovementPrCreativeQaOutput,
   ImprovementPrFileChange,
   ImprovementPrGithubPublisher,
+  ImprovementPrPerformanceMetrics,
   ImprovementPrPipelineRunner,
   ImprovementPrPlanValidationResult,
   ImprovementPrPlanValidator,
@@ -77,6 +78,10 @@ import type {
   ImprovementPrPullRequestRequest,
   ImprovementPrStore,
 } from "@addroid/queue";
+import {
+  addLandingPageBriefToCreativeContext,
+  landingPageUrlForPrompt,
+} from "./creative-landing-page-context.js";
 import { runPlanForRoot } from "./plan-runtime.js";
 
 // ---------------------------------------------------------------------
@@ -157,6 +162,12 @@ export function createPrismaImprovementPrStore(
         styleNotes: data.prompt.styleNotes,
         rationale: data.rationale,
         variantIndex: data.variantIndex,
+        adText: data.adText ?? null,
+        metaTextRecommendations: {
+          primaryText: 125,
+          headline: 40,
+          description: 30,
+        },
         qa: {
           aiRunId: data.qa.aiRunId,
           recommendation: data.qa.recommendation,
@@ -397,11 +408,21 @@ export function createImprovementPrPipelineRunner(
     },
 
     async runStrategy(input) {
+      const recentKpis =
+        input.creativeContext?.target?.current ??
+        input.creativeContext?.references[0]?.current;
       const agentInput: StrategyAgentInput = {
         accountId: input.accountId,
         objective: "conversion",
-        audienceSummary: input.accountDisplayName,
+        audienceSummary:
+          input.creativeContext?.target?.displayName ??
+          input.creativeContext?.references[0]?.displayName ??
+          input.accountDisplayName,
         currency: input.currency,
+        ...(recentKpis ? { recentKpis: metricsToRecord(recentKpis) } : {}),
+        ...(input.creativeContext?.notes
+          ? { constraints: input.creativeContext.notes }
+          : {}),
       };
       try {
         const result = await runStrategyAgent(ctxBase(), agentInput);
@@ -423,9 +444,24 @@ export function createImprovementPrPipelineRunner(
     async runCopy(input) {
       const agentInput: CopyAgentInput = {
         accountId: input.accountId,
-        audienceSummary: input.audienceFocus,
-        brandTone: "operator-grade",
-        productOffer: input.recommendedApproach,
+        audienceSummary: [
+          input.audienceFocus,
+          input.creativeContext?.target
+            ? `target=${input.creativeContext.target.displayName}`
+            : null,
+          input.creativeContext?.references[0]
+            ? `winning reference=${input.creativeContext.references[0].displayName}`
+            : null,
+        ].filter(Boolean).join(" / "),
+        brandTone: input.creativeContext?.brandProfile?.tone ?? "operator-grade",
+        productOffer: [
+          input.recommendedApproach,
+          input.creativeContext?.target?.creative?.headline,
+          input.creativeContext?.references[0]?.creative?.headline,
+        ].filter(Boolean).join(" / "),
+        ...(input.creativeContext?.brandProfile?.forbiddenTerms
+          ? { forbiddenKeywords: input.creativeContext.brandProfile.forbiddenTerms }
+          : {}),
       };
       try {
         const result = await runCopyAgent(ctxBase(), agentInput);
@@ -445,6 +481,20 @@ export function createImprovementPrPipelineRunner(
     },
 
     async runImagePrompt(input) {
+      const creativeContext = await addLandingPageBriefToCreativeContext(
+        opts.provider,
+        input.creativeContext ?? null
+      );
+      const performance: ImagePromptAgentInput["performance"] = {
+        periodLabel: `${input.analysisWindow.periodStart}..${input.analysisWindow.periodEnd}`,
+        recentKpis:
+          metricsToRecord(
+            creativeContext?.target?.current ??
+            input.analysisWindow.current
+          ),
+        analystCommentary: input.analystCommentary,
+      };
+      const target = creativeContext?.target;
       const agentInput: ImagePromptAgentInput = {
         accountId: input.accountId,
         audienceSummary: input.audienceFocus,
@@ -452,8 +502,59 @@ export function createImprovementPrPipelineRunner(
           headline: input.primaryHeadline,
           primaryText: input.primaryText,
         },
-        brandStyle: "operator-grade",
+        brandStyle: creativeContext?.brandProfile?.tone ?? "operator-grade",
         aspectRatio: "1:1",
+        performance,
+        brandProfile: creativeContext?.brandProfile ?? {
+          brandName: input.accountDisplayName,
+        },
+        improvementContext: {
+          strategySummary: [
+            input.strategy.recommendedApproach,
+            input.strategy.audienceFocus,
+          ].filter(Boolean).join(" / "),
+          rationale: input.strategy.rationale,
+          notes: creativeContext?.notes ?? [],
+        },
+        ...(target
+          ? {
+              targetContext: {
+                hierarchy: target.hierarchy,
+                nodeKey: target.nodeKey,
+                displayName: target.displayName,
+                status: target.status ?? null,
+                current: metricsToRecord(target.current),
+                ...(target.prior ? { prior: metricsToRecord(target.prior) } : {}),
+                rationale: target.rationale,
+                currentCreative: sanitizeCreativeForPrompt(target.creative ?? null),
+              },
+            }
+          : {}),
+        ...(creativeContext
+          ? {
+              referenceCreatives: creativeContext.references.map((r) => ({
+                hierarchy: r.hierarchy,
+                nodeKey: r.nodeKey,
+                displayName: r.displayName,
+                current: metricsToRecord(r.current),
+                rationale: r.rationale,
+                creative: sanitizeCreativeForPrompt(r.creative ?? null),
+              })),
+              creativeStrategy: creativeContext.strategy,
+            }
+          : {}),
+        variantCount: 3,
+        dimensionPresets: [
+          { key: "feed_square", width: 1080, height: 1080, format: "png" },
+          { key: "feed_portrait", width: 1080, height: 1350, format: "png" },
+          { key: "story_reels", width: 1080, height: 1920, format: "png" },
+        ],
+        policyConstraints: [
+          ...(creativeContext?.brandProfile?.forbiddenTerms ?? []).map(
+            (term) => `forbidden:${term}`
+          ),
+          "no_trademarked_logos",
+        ],
       };
       try {
         const result = await runImagePromptAgent(ctxBase(), agentInput);
@@ -674,6 +775,29 @@ function failedAiRun(args: FailedAiRunArgs): {
     finishedAt: startedAt,
   });
   return { aiRunInput, output: null, error: message };
+}
+
+function metricsToRecord(
+  metrics: ImprovementPrPerformanceMetrics
+): Record<string, number> {
+  const out: Record<string, number> = {
+    spend: metrics.spend,
+    impressions: metrics.impressions,
+    clicks: metrics.clicks,
+    conversions: metrics.conversions,
+  };
+  if (typeof metrics.ctr === "number") out.ctr = metrics.ctr;
+  if (typeof metrics.cpc === "number") out.cpc = metrics.cpc;
+  if (typeof metrics.cpa === "number") out.cpa = metrics.cpa;
+  return out;
+}
+
+function sanitizeCreativeForPrompt<T extends { linkUrl?: string | null } | null>(creative: T): T {
+  if (!creative) return creative;
+  return {
+    ...creative,
+    linkUrl: landingPageUrlForPrompt(creative.linkUrl),
+  };
 }
 
 /**

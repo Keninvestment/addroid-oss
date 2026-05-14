@@ -206,6 +206,7 @@ export function buildAgentSystemPrompt(
     "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
     "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD for explicit calendar dates and metricDateRelative for relative dates. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks.",
     "You are allowed to inspect read-only data freely. When the user wants a one-time production mutation such as pause, activate, budget change, targeting change, create, update, or delete, never mutate Meta directly; use propose_ops_change to create a GitOps PR for human review.",
+    "When the user asks only to generate new creative ideas/images for the /creatives library, use generate_creatives and do not ask about campaign/adset placement, CTA, optimizationGoal, billingEvent, or unsupported Meta delivery settings. If the user provides a landing page or destination URL for creative generation, pass it as linkUrl or destinationUrl; the generator may ask the LLM to inspect that URL and include the page context. When the user wants to submit or create a PR from existing /creatives item(s) or Creative ID(s), use promote_creative_submission so the stored image and stored Meta ad text are reused. If multiple Creative IDs are already selected, pass all selected IDs as creativeIds and ask only for the campaign/adset/new-campaign submission settings, not which creative to use. When the user wants to generate, upload, or submit ad creative as an ad/campaign/adset or asks for a PR without an existing Creative ID, use propose_creative_submission only for settings Meta Ads CLI 2026/04/29 can apply. Choose one of three placement levels: existing adset requires campaignId + adsetId; new adset under an existing campaign requires campaignId + adsetName + optimizationGoal + billingEvent; new campaign requires campaignName + adsetName + objective + optimizationGoal + billingEvent and dailyBudget or lifetimeBudget. Budget and bid amounts are account-currency major units; for a JPY account, 500円/日は dailyBudget:500. Targeting supported by apply is countries only. Do not pass age, city/radius, placements, devices, Advantage audience, custom audiences, exclusions, flexible targeting, PROFILE_VISIT, VISIT_INSTAGRAM_PROFILE, or VIEW_INSTAGRAM_PROFILE; explain to the user that those source settings cannot be reflected by the current CLI and ask whether to proceed with supported alternatives such as LINK_CLICKS and OPEN_LINK. For Meta CLI coverage, collect or infer pageId, body/title/link/description/CTA, instagramActorId, DCO arrays, supported optimizationGoal, supported billingEvent, bid, schedule, pixel/custom event, ad tracking specs, and countries when relevant. If images are attached as references for generation, pass them as referenceImagePaths and set generateImage:true for propose_creative_submission, or pass them as referenceImagePaths for generate_creatives. Use localMediaPaths only when the attached files themselves should be the final ad media. Ask concise clarification questions before calling propose_creative_submission or promote_creative_submission if placement, pageId, optimization/billing, budget, destination link, country targeting, or required copy is missing.",
     surface === "scheduled-agent"
       ? "When the saved task asks for conditional ad operations, inspect current performance data first. If a production mutation is needed, create a GitOps PR unless the saved task carries an explicit auto-execute policy that allows a narrow safe operation."
       : "When the user asks for recurring or conditional production ad automation, use propose_automation_rule, not create_scheduled_agent_task. Ask concise clarification questions if schedule, lookback window, decision timing, target scope, action, approval mode, or limits are ambiguous. The automation rule PR is the approval request; after merge, the rule schedule is registered internally.",
@@ -404,6 +405,33 @@ function resolveTool(
         args: [],
         toolArgs: tool.args,
         display: "create GitOps proposal PR",
+        why: tool.why,
+      };
+    case "propose_creative_submission":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "create creative submission PR",
+        why: tool.why,
+      };
+    case "generate_creatives":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "generate creative variants",
+        why: tool.why,
+      };
+    case "promote_creative_submission":
+      return {
+        tool: name,
+        command: null,
+        args: [],
+        toolArgs: tool.args,
+        display: "promote creative to submission PR",
         why: tool.why,
       };
     case "propose_automation_rule":

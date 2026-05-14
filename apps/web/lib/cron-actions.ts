@@ -37,10 +37,12 @@ import { createCronOpsStore } from "../../worker/src/lib/prisma-stores";
 
 export const WEB_CRON_ACTOR = "user:web-ui" as const;
 
-const PRESET_NAMES: readonly string[] = CRON_PRESETS.map((p) => p.name);
+const USER_MANAGED_PRESET_NAMES: readonly string[] = CRON_PRESETS.filter(
+  (p) => p.name !== "github_poll"
+).map((p) => p.name);
 
 export function isCronPresetName(name: string): name is CronPresetName {
-  return PRESET_NAMES.includes(name);
+  return USER_MANAGED_PRESET_NAMES.includes(name);
 }
 
 interface PreparedContext {

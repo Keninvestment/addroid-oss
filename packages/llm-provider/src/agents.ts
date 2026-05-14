@@ -364,6 +364,8 @@ export interface CopyAgentInput {
 export interface CopyAgentVariant {
   headline: string;
   primaryText: string;
+  /** Meta link description. Keep short; callers may fall back when omitted. */
+  description?: string | null;
   cta: string;
 }
 
@@ -381,8 +383,8 @@ export const COPY_AGENT_SYSTEM_PROMPT = [
   "Your output is reviewed by the creative_qa agent and lands in a GitHub PR — never applied to Meta directly.",
   "",
   "Respond with a single JSON object using exactly these fields:",
-  "  primary:    { headline: string, primaryText: string, cta: string }",
-  "  alternates: { headline: string, primaryText: string, cta: string }[] (1-3 items)",
+  "  primary:    { headline: string, primaryText: string, description: string, cta: string }",
+  "  alternates: { headline: string, primaryText: string, description: string, cta: string }[] (1-3 items)",
   "  rationale:  string (1-2 sentences)",
   "  decision:   'propose' | 'skip'",
   "  confidence: number in [0, 1]",
@@ -403,6 +405,7 @@ function parseCopyVariant(value: unknown, label: string): CopyAgentVariant {
   return {
     headline: requireString(obj, "headline"),
     primaryText: requireString(obj, "primaryText"),
+    description: typeof obj.description === "string" ? obj.description : null,
     cta: requireString(obj, "cta"),
   };
 }
@@ -526,6 +529,8 @@ export interface ImagePromptAgentInput {
     strategySummary?: string;
     /** improvement_pr の rationale (1-2 文)。 */
     rationale?: string;
+    /** Creative context notes. May include visual analysis of winning reference images. */
+    notes?: string[];
     /** media_buyer の改善提案 (生 `MediaBuyerProposal` の subset)。 */
     mediaBuyerProposals?: Array<{
       hierarchy: "account" | "campaign" | "adset" | "ad";
@@ -535,6 +540,51 @@ export interface ImagePromptAgentInput {
       rationale: string;
     }>;
   };
+
+  /**
+   * 実際に改善したい広告階層ノード。低調広告を直接 refresh する場合も、
+   * 勝ち広告を横展開する場合も、最終的に生成 asset がどこへ紐付くかを示す。
+   */
+  targetContext?: {
+    hierarchy: "account" | "campaign" | "adset" | "ad";
+    nodeKey: string;
+    displayName: string;
+    status?: string | null;
+    current?: Record<string, number>;
+    prior?: Record<string, number>;
+    rationale?: string;
+    currentCreative?: {
+      key?: string | null;
+      displayName?: string | null;
+      headline?: string | null;
+      primaryText?: string | null;
+      callToAction?: string | null;
+      linkUrl?: string | null;
+    } | null;
+  };
+
+  /**
+   * 実務上よく使う「良い広告を参考に派生を作る」ための seed 群。
+   * 画像生成では reference の訴求構造・トーン・offer framing を優先し、固有名詞や
+   * 未許諾ロゴをそのまま複製しない。
+   */
+  referenceCreatives?: Array<{
+    hierarchy: "account" | "campaign" | "adset" | "ad";
+    nodeKey: string;
+    displayName: string;
+    current?: Record<string, number>;
+    rationale?: string;
+    creative?: {
+      key?: string | null;
+      displayName?: string | null;
+      headline?: string | null;
+      primaryText?: string | null;
+      callToAction?: string | null;
+      linkUrl?: string | null;
+    } | null;
+  }>;
+
+  creativeStrategy?: "scale_winner" | "adapt_winner_to_underperformer" | "refresh_underperformer";
 
   /**
    * 生成したい variant 数 (1-6)。LLM 側で variants 配列の長さの目安として使う。
@@ -620,11 +670,19 @@ export const IMAGE_PROMPT_AGENT_SYSTEM_PROMPT = [
   "  policyConstraints     string[]",
   "  performance           { periodLabel, recentKpis, analystCommentary, snapshotIds }",
   "  brandProfile          { brandName, tone, palette, typography, guidelines, forbiddenTerms }",
-  "  improvementContext    { strategySummary, rationale, mediaBuyerProposals }",
+  "  improvementContext    { strategySummary, rationale, notes, mediaBuyerProposals }",
+  "  targetContext         { hierarchy, nodeKey, displayName, status, current, prior, rationale, currentCreative }",
+  "  referenceCreatives    { hierarchy, nodeKey, displayName, current, rationale, creative }[]",
+  "  creativeStrategy      'scale_winner' | 'adapt_winner_to_underperformer' | 'refresh_underperformer'",
   "  variantCount          number (1-6, default 3)",
   "  dimensionPresets      { key, width, height, format? }[]",
   "",
   "Use performance.recentKpis and improvementContext to motivate the creative direction (e.g. low CTR ⇒ stronger first-frame contrast).",
+  "When improvementContext.notes contains reference image visual analysis, use it to decide composition, style, subject treatment, and what to vary before writing prompts.",
+  "The generated subject matter MUST be grounded in targetContext, referenceCreatives, and improvementContext.notes. Do not replace a real account with a generic storefront, dashboard, SaaS UI, lifestyle scene, or unrelated business motif just because the copy is abstract.",
+  "If targetContext and referenceCreatives are both missing or too sparse to identify the account's actual ad/campaign context, set decision='skip' instead of inventing imagery.",
+  "Prefer referenceCreatives as positive seeds when present: preserve the winning message structure and visual logic, then adapt it to targetContext.",
+  "Do not invent unrelated industries, products, locations, or accounts. If brandProfile/target/reference context is sparse, keep the prompt product-neutral and account-specific rather than adding arbitrary subject matter.",
   "Honor brandProfile.tone / palette / typography. Treat brandProfile.forbiddenTerms and policyConstraints as hard constraints.",
   "If dimensionPresets is supplied, every variant MUST set variantKey to one of the provided keys.",
   "If dimensionPresets is omitted, you MAY omit width/height/format/variantKey — defaults are derived from aspectRatio.",

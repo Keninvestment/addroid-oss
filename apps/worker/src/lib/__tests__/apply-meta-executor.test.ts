@@ -160,7 +160,7 @@ function createCampaignAction(): CreateCampaignAction {
     name: "Fall",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 50 },
+    budget: { dailyBudget: 50 },
   };
 }
 
@@ -248,6 +248,24 @@ test("CliApplyExecutor.executeAction: success uses MetaCliRunner.run and toExecu
   assert.equal(spawnedEnv.AD_ACCOUNT_ID, "primary");
   assert.equal(spawnedEnv.META_ACCESS_TOKEN, undefined);
   assert.equal(spawnedEnv.META_PRIMARY_ACCESS_TOKEN, undefined);
+});
+
+test("CliApplyExecutor.executeAction: converts budgets using the ad account currency minor unit", async () => {
+  const log: SpawnLog[] = [];
+  const runner = makeRunner([{ stdout: "ok\n", stderr: "", exitCode: 0 }], log);
+  const executor = new CliApplyExecutor({
+    runner,
+    resolveAdAccountCurrency: async () => "JPY",
+  });
+  const result = await executor.executeAction({
+    action: createCampaignAction(),
+    context: ctx(),
+    attempt: 0,
+  });
+
+  assert.equal(result.status, "success");
+  const args = log[0]!.args;
+  assert.equal(args[args.indexOf("--daily-budget") + 1], "50");
 });
 
 // regression fix: create_* success は CLI stdout から external_id を抽出して

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@addroid/db";
 import {
   buildSlackInstallationMetadata,
+  SLACK_BOT_SCOPES,
   getCryptoBoundary,
   openSocketModeConnection,
   postSlackMessage,
@@ -127,7 +128,7 @@ export async function POST(request: Request) {
         },
       },
       update: {
-        scopes: ["bot", "socket_mode"],
+        scopes: [...SLACK_BOT_SCOPES, "socket_mode"],
         accessTokenCiphertext: crypto.encrypt(normalized.botToken),
         refreshTokenCiphertext: crypto.encrypt(normalized.appToken),
         expiresAt: null,
@@ -137,7 +138,7 @@ export async function POST(request: Request) {
       create: {
         provider: "slack",
         accountIdentifier: authTest.team_id,
-        scopes: ["bot", "socket_mode"],
+        scopes: [...SLACK_BOT_SCOPES, "socket_mode"],
         accessTokenCiphertext: crypto.encrypt(normalized.botToken),
         refreshTokenCiphertext: crypto.encrypt(normalized.appToken),
         expiresAt: null,

@@ -57,7 +57,7 @@ async function connectedMockProvider(opts?: {
     tokenStore: store,
     completionResponder: (req) => {
       const last = req.messages[req.messages.length - 1];
-      const userPayload = last ? JSON.parse(last.content) : {};
+      const userPayload = last ? JSON.parse(messageContentText(last.content)) : {};
       return opts?.responder ? opts.responder(userPayload) : JSON.stringify({ ok: true });
     },
     ...(opts?.failure ? { failureMode: opts.failure } : {}),
@@ -85,6 +85,12 @@ test("extractJsonFromLlmContent strips ```json fences", () => {
   assert.deepEqual(out, { a: 1 });
 });
 
+function messageContentText(content: string | Array<{ type: string; text?: string }>): string {
+  return typeof content === "string"
+    ? content
+    : content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
+}
+
 test("extractJsonFromLlmContent recovers when prose surrounds JSON", () => {
   const out = extractJsonFromLlmContent("here you go: {\"a\":2}\nThanks!") as { a: number };
   assert.equal(out.a, 2);
@@ -110,7 +116,7 @@ test("buildStrategyAgentPrompt embeds the strategy system prompt + user JSON", (
   assert.equal(prompt[0]!.role, "system");
   assert.equal(prompt[0]!.content, STRATEGY_AGENT_SYSTEM_PROMPT);
   assert.equal(prompt[1]!.role, "user");
-  assert.deepEqual(JSON.parse(prompt[1]!.content), input);
+  assert.deepEqual(JSON.parse(messageContentText(prompt[1]!.content)), input);
 });
 
 test("runStrategyAgent: succeeds, builds ai_run with provider/model/usage/cost", async () => {
@@ -355,7 +361,7 @@ test("buildImagePromptAgentPrompt embeds the structured input as the user payloa
     ],
   };
   const prompt = buildImagePromptAgentPrompt(input);
-  const userPayload = JSON.parse(prompt[1]!.content);
+  const userPayload = JSON.parse(messageContentText(prompt[1]!.content));
   assert.equal(userPayload.accountId, "act_42");
   assert.equal(userPayload.performance.recentKpis.ctr, 0.012);
   assert.equal(userPayload.brandProfile.tone, "concise, technical");

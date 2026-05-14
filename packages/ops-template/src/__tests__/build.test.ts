@@ -76,18 +76,22 @@ test("buildOpsTemplate substitutes the README workspace heading", () => {
   assert.equal(readme!.content.includes("{{"), false);
 });
 
-test("buildOpsTemplate emits the cron preset list as-is", () => {
+test("buildOpsTemplate emits the user-managed cron preset list", () => {
   const files = buildOpsTemplate(SAMPLE_INPUT);
   const cron = files.find((f) => f.path === "workflows/cron.yaml");
   assert.ok(cron);
-  for (const name of ["github_poll", "daily_report", "today_report", "improvement_pr"]) {
+  for (const name of [
+    "daily_report",
+    "today_report",
+    "improvement_pr",
+    "auto_creative_generation",
+  ]) {
     assert.ok(
       cron!.content.includes(`name: ${name}`),
       `cron.yaml should contain preset '${name}'`
     );
   }
-  // github_poll はデフォルトで enabled。それ以外は disabled。
-  assert.match(cron!.content, /name: github_poll[\s\S]*?enabled: true/);
+  assert.equal(cron!.content.includes("name: github_poll"), false);
 });
 
 test("buildOpsTemplate emits the validate workflow on PR paths", () => {

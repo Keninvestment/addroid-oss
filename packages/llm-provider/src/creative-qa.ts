@@ -111,6 +111,8 @@ export const CREATIVE_QA_FALLBACK_TEXT_ONLY = "fallback_text_only" as const;
  *     stories) の aspect ratio をホワイトリスト + 短辺最低/長辺最大で枠取り。
  *   - format: PNG/JPEG のみを許可 (Provider 抽象が返す 2 形式)。
  *   - quality: 単一ピクセル PNG / 30MB 超過を弾く Meta 互換のサイズレンジ。
+ *     Codex 生成の 1080px PNG は 1.5MB を自然に超えることがあるため、
+ *     default では独自の推奨上限 warning を置かず、Meta 互換の hard max のみを見る。
  *   - forbiddenExpression: 業界共通の確証広告表現 (絶対保証 / miracle cure 等)。
  *     workspace 固有の禁止語は workspace_settings から追加で重ねる想定。
  *   - brandTone: 攻撃的/扇情的トーンを fail で防ぐ最小セット。
@@ -130,7 +132,6 @@ export const DEFAULT_CREATIVE_QA_POLICY: CreativeQaPolicy = {
   },
   quality: {
     minByteSize: 64,
-    recommendedMaxByteSize: 1_500_000,
     maxByteSize: 30_000_000,
   },
   forbiddenExpression: {

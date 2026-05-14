@@ -146,6 +146,39 @@ export const AGENT_TOOL_MANIFEST = [
       "Use this for any production mutation intent. For 'CV0 campaign を停止', first inspect read-only data, then create a PR with intent:'pause' and campaign targets. Human merge is required.",
   },
   {
+    name: "propose_creative_submission",
+    description:
+      "広告クリエイティブを生成またはローカル素材から取り込み、キャンペーン作成・広告セット作成・広告作成のいずれかの階層で ops repo PR を作成する。Meta には直接反映しない。",
+    args:
+      "{accountKey?:string,creativeName?:string,adName?:string,prompt?:string,headline?:string,primaryText?:string,pageId?:string,title?:string,body?:string,linkUrl?:string,description?:string,instagramActorId?:string,callToAction?:'APPLY_NOW'|'BOOK_TRAVEL'|'BUY_NOW'|'CONTACT_US'|'DOWNLOAD'|'GET_OFFER'|'GET_QUOTE'|'LEARN_MORE'|'NO_BUTTON'|'OPEN_LINK'|'SHOP_NOW'|'SIGN_UP'|'SUBSCRIBE'|'WATCH_MORE',callToActions?:string[],mediaType?:'image'|'video'|'carousel'|'text',localMediaPaths?:string[],referenceImagePaths?:string[],images?:string[],videos?:string[],titles?:string[],bodies?:string[],descriptions?:string[],generateImage?:boolean,campaignId?:string,adsetId?:string,campaignName?:string,adsetName?:string,objective?:'OUTCOME_AWARENESS'|'OUTCOME_TRAFFIC'|'OUTCOME_ENGAGEMENT'|'OUTCOME_LEADS'|'OUTCOME_APP_PROMOTION'|'OUTCOME_SALES',dailyBudget?:number,lifetimeBudget?:number,adsetBudgetSharing?:boolean,optimizationGoal?:'APP_INSTALLS'|'CONVERSATIONS'|'EVENT_RESPONSES'|'IMPRESSIONS'|'LANDING_PAGE_VIEWS'|'LEAD_GENERATION'|'LINK_CLICKS'|'OFFSITE_CONVERSIONS'|'PAGE_LIKES'|'POST_ENGAGEMENT'|'REACH'|'THRUPLAY'|'VALUE',billingEvent?:'APP_INSTALLS'|'CLICKS'|'IMPRESSIONS'|'LINK_CLICKS'|'PAGE_LIKES'|'POST_ENGAGEMENT'|'THRUPLAY',bidAmount?:number,startTime?:string,endTime?:string,pixelId?:string,customEventType?:string,adPixelId?:string,trackingSpecs?:object,countries?:string[],rationale?:string,urgency?:'low'|'normal'|'high'}",
+    effects: ["gitops-pr"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this when the user asks to create/upload/submit Meta ad creative. Create PRs only within Meta Ads CLI 2026/04/29 apply coverage. Three placement modes are supported: ad creation in an existing adset needs campaignId+adsetId; adset creation in an existing campaign needs campaignId+adsetName+optimizationGoal+billingEvent; campaign creation needs campaignName+adsetName+objective+optimizationGoal+billingEvent and dailyBudget or lifetimeBudget. Budget and bid amounts are account-currency major units; for a JPY account, 500円/日は dailyBudget:500. Targeting supported by apply is countries only. Do not pass age, city/radius, placements, devices, Advantage audience, custom audiences, exclusions, flexible targeting, PROFILE_VISIT, VISIT_INSTAGRAM_PROFILE, or VIEW_INSTAGRAM_PROFILE; tell the user those source settings cannot be reflected by the current CLI and ask whether to proceed with supported alternatives such as LINK_CLICKS and OPEN_LINK. Meta creative options include pageId, body/title/link/description/CTA, instagramActorId, image/video files, and DCO arrays. Ask concise clarification questions for missing placement, pageId, optimizationGoal/billingEvent, budget, destination link, country targeting, or copy before calling the tool. Use referenceImagePaths when attached/local images should guide new image generation; use localMediaPaths only when the files themselves should be submitted as final ad media. Human PR merge is required.",
+  },
+  {
+    name: "generate_creatives",
+    description:
+      "参考画像や既存の勝ちクリエイティブ文脈を使って、新しい画像クリエイティブ案を生成し、/creatives のライブラリに保存する。PR作成やMeta反映はしない。",
+    args:
+      "{accountKey?:string,prompt:string,creativeName?:string,linkUrl?:string,destinationUrl?:string,referenceImagePaths?:string[],variantCount?:number}",
+    effects: ["local-write"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this for requests like '画像を参考に新しいクリエイティブを生成して' or '既存のアクティブ広告も参考にして案を作って' when the user did not ask to submit/create an ad, create a campaign/adset, or open a PR. If the user provides a landing/destination URL, pass it as linkUrl or destinationUrl so the creative generator can ask the LLM to inspect it. Preserve attached images in referenceImagePaths. Do not ask about unsupported Meta delivery settings because this tool does not submit to Meta.",
+  },
+  {
+    name: "promote_creative_submission",
+    description:
+      "/creatives に保存済みの生成クリエイティブを、画像と広告テキスト込みで ops repo の入稿PRに回す。Meta には直接反映しない。",
+    args:
+      "{creativeId?:string,creativeIds?:string[],creativeName?:string,adName?:string,pageId?:string,title?:string,body?:string,linkUrl?:string,description?:string,instagramActorId?:string,callToAction?:'APPLY_NOW'|'BOOK_TRAVEL'|'BUY_NOW'|'CONTACT_US'|'DOWNLOAD'|'GET_OFFER'|'GET_QUOTE'|'LEARN_MORE'|'NO_BUTTON'|'OPEN_LINK'|'SHOP_NOW'|'SIGN_UP'|'SUBSCRIBE'|'WATCH_MORE',campaignId?:string,adsetId?:string,campaignName?:string,adsetName?:string,objective?:'OUTCOME_AWARENESS'|'OUTCOME_TRAFFIC'|'OUTCOME_ENGAGEMENT'|'OUTCOME_LEADS'|'OUTCOME_APP_PROMOTION'|'OUTCOME_SALES',dailyBudget?:number,lifetimeBudget?:number,adsetBudgetSharing?:boolean,optimizationGoal?:'APP_INSTALLS'|'CONVERSATIONS'|'EVENT_RESPONSES'|'IMPRESSIONS'|'LANDING_PAGE_VIEWS'|'LEAD_GENERATION'|'LINK_CLICKS'|'OFFSITE_CONVERSIONS'|'PAGE_LIKES'|'POST_ENGAGEMENT'|'REACH'|'THRUPLAY'|'VALUE',billingEvent?:'APP_INSTALLS'|'CLICKS'|'IMPRESSIONS'|'LINK_CLICKS'|'PAGE_LIKES'|'POST_ENGAGEMENT'|'THRUPLAY',bidAmount?:number,startTime?:string,endTime?:string,pixelId?:string,customEventType?:string,adPixelId?:string,trackingSpecs?:object,countries?:string[],rationale?:string,urgency?:'low'|'normal'|'high'}",
+    effects: ["gitops-pr"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this when the user asks to submit, PR, or入稿 creatives that already exist in /creatives, or gives Creative ID(s) from the creative library. If multiple Creative IDs are already selected, pass all of them as creativeIds and ask only for missing placement/submission settings, not which creative to use. It reuses the stored image and stored Meta ad text; do not call generate_creatives again. Ask for missing creativeId/creativeIds, placement, pageId, destination link, optimizationGoal/billingEvent, budget, or country targeting before calling the tool. Human PR merge is required.",
+  },
+  {
     name: "propose_automation_rule",
     description:
       "自然言語の継続監視・自動運用依頼を安全評価可能なルール変更 PR として作成する。直接Metaには反映しない。",

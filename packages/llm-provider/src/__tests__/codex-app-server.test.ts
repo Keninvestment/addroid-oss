@@ -86,6 +86,35 @@ test("CodexAppServerLLMProvider.complete runs a turn through app-server", async 
   assert.ok(calls.some((c) => c.method === "turn/start"));
 });
 
+test("CodexAppServerLLMProvider.complete forwards local image input to app-server", async () => {
+  const { rpc, calls } = makeRpc({ account: { email: "owner@example.test" } });
+  const provider = new CodexAppServerLLMProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:1", child: null, rpc }),
+  });
+  await provider.complete({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "この参照画像を読んでください。" },
+          {
+            type: "image",
+            mimeType: "image/png",
+            localPath: "/tmp/addroid-reference.png",
+            sourceRef: "storage://wins/ref.png",
+          },
+        ],
+      },
+    ],
+  });
+  const turnStart = calls.find((c) => c.method === "turn/start");
+  assert.ok(turnStart);
+  const params = turnStart.params as { input?: Array<Record<string, unknown>> };
+  assert.ok(params.input?.some((item) =>
+    item.type === "localImage" && item.path === "/tmp/addroid-reference.png"
+  ));
+});
+
 test("CodexAppServerLLMProvider.complete requires an app-server account", async () => {
   const { rpc } = makeRpc({ account: null });
   const provider = new CodexAppServerLLMProvider({

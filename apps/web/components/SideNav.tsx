@@ -33,7 +33,8 @@ const groups: NavGroup[] = [
     label: "改善",
     items: [
       { href: "/improvements", label: "改善提案" },
-      { href: "/creatives", label: "クリエイティブ" },
+      { href: "/creatives", label: "クリエイティブ生成" },
+      { href: "/creatives/submit", label: "クリエイティブ入稿" },
     ],
   },
   {

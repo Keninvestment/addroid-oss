@@ -997,14 +997,14 @@ function statusToBadge(raw: string): StatusState {
 function extractBudgetLabel(spec: unknown): string | null {
   if (!spec || typeof spec !== "object") return null;
   const s = spec as Record<string, unknown>;
-  if (typeof s.dailyBudgetUsd === "number") {
-    return `$${s.dailyBudgetUsd.toFixed(2)} / day`;
+  if (typeof s.dailyBudget === "number") {
+    return `${s.dailyBudget} / day`;
   }
-  if (typeof s.lifetimeBudgetUsd === "number") {
-    return `$${s.lifetimeBudgetUsd.toFixed(2)} (lifetime)`;
+  if (typeof s.lifetimeBudget === "number") {
+    return `${s.lifetimeBudget} (lifetime)`;
   }
-  if (typeof s.daily_budget_usd === "number") {
-    return `$${(s.daily_budget_usd as number).toFixed(2)} / day`;
+  if (typeof s.daily_budget === "number") {
+    return `${s.daily_budget} / day`;
   }
   return null;
 }

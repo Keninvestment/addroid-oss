@@ -35,12 +35,14 @@
 import {
   DEFAULT_CREATIVE_QA_POLICY,
   generateAndQaCreative,
+  imagePromptVariantsToVariationConditions,
   persistCreativeAssets,
   type AiRunCreateInputData,
   type CreativeQaPolicy,
   type CreativeStorageAdapter,
   type ImageProvider,
   type ImagePromptVariant,
+  type ImageReferenceInput,
   type ImageVariationCondition,
   type PersistCreativeAssetsResult,
   type PersistedCreativeAsset,
@@ -271,6 +273,14 @@ export interface ImprovementPrCreativeRecord {
   prompt: ImprovementPrCreativePromptVariant;
   /** image_prompt 全体の rationale (バリアント間で共通)。 */
   rationale: string;
+  /** Meta広告プレビュー用の本文 / 見出し / 説明 / CTA。 */
+  adText?: {
+    primaryText: string;
+    headline: string;
+    description: string;
+    callToAction: string;
+    rationale?: string | null;
+  } | null;
   /** 紐付く creative_qa ai_run の id + 評価結果。 */
   qa: {
     aiRunId: string;
@@ -438,6 +448,55 @@ export interface ImprovementPrAnalysisWindow {
   prior?: ImprovementPrPerformanceMetrics;
 }
 
+export interface ImprovementPrCreativeNodeContext {
+  hierarchyId: string | null;
+  hierarchy: "account" | "campaign" | "adset" | "ad";
+  nodeKey: string;
+  displayName: string;
+  status?: string | null;
+  externalId?: string | null;
+  current: ImprovementPrPerformanceMetrics;
+  prior?: ImprovementPrPerformanceMetrics;
+  rationale: string;
+  spec?: Record<string, unknown> | null;
+  creative?: {
+    key?: string | null;
+    displayName?: string | null;
+    mediaType?: string | null;
+    headline?: string | null;
+    primaryText?: string | null;
+    callToAction?: string | null;
+    linkUrl?: string | null;
+    pageId?: string | null;
+    instagramActorId?: string | null;
+    storageRef?: string | null;
+    provider?: string | null;
+    model?: string | null;
+    images?: string[];
+  } | null;
+}
+
+export interface ImprovementPrBrandProfileContext {
+  brandName?: string;
+  tone?: string;
+  palette?: string[];
+  typography?: string;
+  guidelines?: string;
+  forbiddenTerms?: string[];
+}
+
+export interface ImprovementPrCreativeGenerationContext {
+  /**
+   * 実務では勝ち広告を seed にして派生案を作ることが多いため、既定は
+   * `scale_winner`。低調ノードが明確にある場合は target と reference を分ける。
+   */
+  strategy: "scale_winner" | "adapt_winner_to_underperformer" | "refresh_underperformer";
+  target: ImprovementPrCreativeNodeContext | null;
+  references: ImprovementPrCreativeNodeContext[];
+  brandProfile?: ImprovementPrBrandProfileContext | null;
+  notes?: string[];
+}
+
 export interface ImprovementPrAnalystOutput {
   commentary: string;
   deltas: Record<string, string>;
@@ -461,6 +520,7 @@ export interface ImprovementPrCopyVariant {
   headline: string;
   primaryText: string;
   cta: string;
+  description?: string | null;
 }
 
 export interface ImprovementPrCopyOutput {
@@ -473,6 +533,11 @@ export interface ImprovementPrImagePromptVariant {
   prompt: string;
   negativePrompt: string;
   styleNotes: string;
+  variantKey?: string;
+  width?: number;
+  height?: number;
+  format?: "png" | "jpeg";
+  aspectRatio?: string;
 }
 
 export interface ImprovementPrImagePromptOutput {
@@ -554,18 +619,26 @@ export interface ImprovementPrPipelineRunner {
     currency: string;
     analystCommentary: string;
     riskTolerance: ImprovementPrRiskTolerance;
+    creativeContext?: ImprovementPrCreativeGenerationContext | null;
   }): Promise<ImprovementPrAgentRunResult<ImprovementPrStrategyOutput>>;
   runCopy(input: {
     accountId: string;
     accountDisplayName: string;
     audienceFocus: string;
     recommendedApproach: string;
+    creativeContext?: ImprovementPrCreativeGenerationContext | null;
   }): Promise<ImprovementPrAgentRunResult<ImprovementPrCopyOutput>>;
   runImagePrompt(input: {
     accountId: string;
+    accountDisplayName: string;
+    currency: string;
     audienceFocus: string;
     primaryHeadline: string;
     primaryText: string;
+    analystCommentary: string;
+    strategy: ImprovementPrStrategyOutput;
+    analysisWindow: ImprovementPrAnalysisWindow;
+    creativeContext?: ImprovementPrCreativeGenerationContext | null;
   }): Promise<ImprovementPrAgentRunResult<ImprovementPrImagePromptOutput>>;
   runCreativeQa(input: {
     copy: ImprovementPrCopyOutput;
@@ -592,6 +665,7 @@ export interface ImprovementPrPipelineRunner {
     currentDailyBudget: number;
     riskTolerance: ImprovementPrRiskTolerance;
     analystSummary: string;
+    creativeContext?: ImprovementPrCreativeGenerationContext | null;
   }): Promise<ImprovementPrAgentRunResult<ImprovementPrMediaBuyerOutput> & {
     decision: ImprovementPrDecision | null;
   }>;
@@ -721,6 +795,11 @@ export interface ImprovementPrSummary {
 export interface RunImprovementPrOptions {
   workspaceId: string;
   mode: ImprovementPrExecutionMode;
+  /**
+   * `auto_creative_generation` は creative 作成と QA 記録までで止める。
+   * Meta 変更や GitHub PR 作成は行わず、creatives ライブラリに候補を残す。
+   */
+  workflowIntent?: "improvement_proposal" | "auto_creative_generation";
   accountKey: string;
   /** 紐付く performance_snapshots の id (analyst が直近で生成したもの)。 */
   snapshotIds?: string[];
@@ -731,6 +810,11 @@ export interface RunImprovementPrOptions {
    * production cron は前日までの直近 7 日を渡す。
    */
   analysisWindow?: ImprovementPrAnalysisWindow;
+  /**
+   * 生成クリエイティブの実務文脈。production worker は performance_snapshots と
+   * ads_hierarchy から「参照する勝ち広告」と「改善対象ノード」を組み立てて渡す。
+   */
+  creativeContext?: ImprovementPrCreativeGenerationContext | null;
   riskTolerance?: ImprovementPrRiskTolerance;
   /** ops repo "owner/name". 未設定だと PR 経路は無効化される。 */
   repo?: string;
@@ -761,6 +845,8 @@ export interface RunImprovementPrOptions {
    * UI design plan principle 27 のとおり benign idle として扱う (PR 自体は成立する)。
    */
   imageProvider?: ImageProvider | null;
+  /** Optional visual reference images for image-capable providers. */
+  referenceImages?: ImageReferenceInput[];
   /**
    * regression fix: 生成 asset の永続化先 (LocalDisk Storage Adapter)。
    * `imageProvider` が注入されている場合のみ参照される。注入されていなければ
@@ -846,6 +932,7 @@ async function runPipelineMode(
   const safeCategories = opts.safeCategories ?? [];
   const analysisWindow =
     opts.analysisWindow ?? defaultImprovementPrAnalysisWindow(opts.now?.() ?? new Date());
+  const creativeContext = opts.creativeContext ?? null;
 
   // ── 1) analyst ────────────────────────────────────────────────────────
   const analyst = await pipeline.runAnalyst({
@@ -877,6 +964,7 @@ async function runPipelineMode(
     currency: account.currency,
     analystCommentary: analyst.output.commentary,
     riskTolerance: opts.riskTolerance ?? "balanced",
+    creativeContext,
   });
   const strategyRow = await opts.store.createAiRun(strategy.aiRunInput);
   aiRunIds.push(strategyRow.id);
@@ -898,6 +986,7 @@ async function runPipelineMode(
     accountDisplayName: account.displayName,
     audienceFocus: strategy.output.audienceFocus,
     recommendedApproach: strategy.output.recommendedApproach,
+    creativeContext,
   });
   const copyRow = await opts.store.createAiRun(copy.aiRunInput);
   aiRunIds.push(copyRow.id);
@@ -916,9 +1005,15 @@ async function runPipelineMode(
   // ── 4) image_prompt ───────────────────────────────────────────────────
   const imagePrompt = await pipeline.runImagePrompt({
     accountId: accountIdForAi,
+    accountDisplayName: account.displayName,
+    currency: account.currency,
     audienceFocus: strategy.output.audienceFocus,
     primaryHeadline: copy.output.primary.headline,
     primaryText: copy.output.primary.primaryText,
+    analystCommentary: analyst.output.commentary,
+    strategy: strategy.output,
+    analysisWindow,
+    creativeContext,
   });
   const imageRow = await opts.store.createAiRun(imagePrompt.aiRunInput);
   aiRunIds.push(imageRow.id);
@@ -981,6 +1076,7 @@ async function runPipelineMode(
   // バイナリ生成しても破棄されるだけなので skip する (= unnecessary cost を避ける)。
   const imageGen = await runImageGenerationHop({
     imageProvider: opts.imageProvider ?? null,
+    referenceImages: opts.referenceImages ?? [],
     creativeStorage: opts.creativeStorage ?? null,
     accountKey: account.key,
     variants: imagePrompt.output.variants,
@@ -1032,12 +1128,9 @@ async function runPipelineMode(
     // 直に使える)。
     const created = await opts.store.createCreative({
       accountId: account.id,
-      // regression fix: image_prompt agent は account-level に走り特定 hierarchy
-      // node を targeting しないため null を渡す。schema は `String?` で許容しており、
-      // フィールドを経由するだけでも acceptance ("links generated assets to ...
-      // campaign/ad where applicable") のデータ経路は完成する (後続 task で agent が
-      // node を解決すればここに id が入る)。
-      hierarchyId: null,
+      // 生成対象ノードが解決できる場合は Creative.hierarchyId に保持する。
+      // これにより UI と audit から「どの広告/広告セット改善か」を逆引きできる。
+      hierarchyId: creativeContext?.target?.hierarchyId ?? null,
       key: creativeKey,
       displayName,
       mediaType: "image",
@@ -1045,6 +1138,7 @@ async function runPipelineMode(
       variantIndex: i,
       prompt: promptVariant,
       rationale: imagePrompt.output.rationale,
+      adText: creativeAdTextForVariant(copy.output, i),
       qa: {
         aiRunId: qaRow.id,
         recommendation: creativeQa.output.recommendation,
@@ -1134,6 +1228,42 @@ async function runPipelineMode(
     )
     .map((a) => a.creativeDbId);
 
+  if (opts.workflowIntent === "auto_creative_generation") {
+    await auditWriter.recordImprovementPrAudit({
+      workspaceId: opts.workspaceId,
+      accountKey: opts.accountKey,
+      accountId: account.id,
+      cronRunId,
+      action: "improvement_pr.skipped",
+      pullRequest: null,
+      aiRunIds,
+      auditDecision: null,
+      classification: null,
+      dangerousCategories: [],
+      metadata: {
+        skippedAt: "auto_creative_generation_complete",
+        recommendation: creativeQa.output.recommendation,
+        issues: creativeQa.output.issues,
+        creativeContext: creativeGenerationContextToMetadata(creativeContext),
+        creativeIds,
+        linkableCreativeIds,
+        blockedCreativeIds,
+      },
+      summary: "auto_creative_generation completed; PR not opened",
+    });
+    return buildSummary({
+      status: creativeIds.length > 0 ? "succeeded" : "skipped_no_proposal",
+      opts,
+      account,
+      aiRunIds,
+      creativeIds,
+      mediaBuyerDecision: null,
+      proposalCount: 0,
+      pullRequest: null,
+      audit: null,
+    });
+  }
+
   if (creativeQa.output.recommendation !== "approve") {
     // QA が approve しない場合は提案 skip。failure ではなく skipped として扱う。
     await auditWriter.recordImprovementPrAudit({
@@ -1151,6 +1281,7 @@ async function runPipelineMode(
         skippedAt: "creative_qa",
         recommendation: creativeQa.output.recommendation,
         issues: creativeQa.output.issues,
+        creativeContext: creativeGenerationContextToMetadata(creativeContext),
         creativeIds,
       },
       summary: `creative_qa recommended ${creativeQa.output.recommendation}; PR not opened`,
@@ -1177,6 +1308,7 @@ async function runPipelineMode(
     currentDailyBudget: opts.currentDailyBudget ?? 0,
     riskTolerance: opts.riskTolerance ?? "balanced",
     analystSummary: analyst.output.commentary,
+    creativeContext,
   });
   const mediaBuyerRow = await opts.store.createAiRun(mediaBuyer.aiRunInput);
   aiRunIds.push(mediaBuyerRow.id);
@@ -1214,6 +1346,7 @@ async function runPipelineMode(
         proposals: mediaBuyer.output.proposals,
         mediaBuyerRationale: mediaBuyer.output.rationale,
         budgetImpact: mediaBuyer.output.budgetImpact,
+        creativeContext: creativeGenerationContextToMetadata(creativeContext),
         creativeIds,
       },
       summary: `media_buyer decision=${mediaBuyer.decision}; PR not opened`,
@@ -1414,6 +1547,7 @@ async function runPipelineMode(
         mediaBuyerRationale: mediaBuyer.output.rationale,
         fileCount: gitops.output.files.length,
         budgetImpact: mediaBuyer.output.budgetImpact,
+        creativeContext: creativeGenerationContextToMetadata(creativeContext),
         planValidation: planValidationToMetadata(planValidation),
         snapshotIds: opts.snapshotIds ?? [],
         mode: opts.mode,
@@ -1458,6 +1592,7 @@ async function runPipelineMode(
     budgetImpact: mediaBuyer.output.budgetImpact,
     planValidation,
     snapshotIds: opts.snapshotIds ?? [],
+    creativeContext,
     // regression fix: PR body の "## 生成クリエイティブ" も deterministic QA
     // 通過分のみを載せる (qa_failed は audit metadata の blockedCreativeIds で別軸記録)。
     creatives: attachableCreativeAttachments,
@@ -1501,6 +1636,7 @@ async function runPipelineMode(
         proposals: mediaBuyer.output.proposals,
         mediaBuyerRationale: mediaBuyer.output.rationale,
         budgetImpact: mediaBuyer.output.budgetImpact,
+        creativeContext: creativeGenerationContextToMetadata(creativeContext),
         aiClassification: audit.output.classification,
         aiDecision: audit.decision,
         aiDangerousCategories: audit.output.dangerousCategories,
@@ -1573,6 +1709,7 @@ async function runPipelineMode(
       // 添付ファイル数を audit metadata にも記録する。
       attachedCreativeFileCount: creativeAttachmentFiles.length,
       budgetImpact: mediaBuyer.output.budgetImpact,
+      creativeContext: creativeGenerationContextToMetadata(creativeContext),
       // regression fix: media_buyer の LLM-authored dryRunSummary は ai_runs に
       // 既に保存されている。audit metadata には実 plan/dry-run 経路を通した
       // 結果のみを残し、PR body と一致させる。
@@ -1614,6 +1751,49 @@ async function runPipelineMode(
       dangerousCategories: finalDangerousCategories,
     },
   });
+}
+
+function creativeAdTextForVariant(
+  copy: ImprovementPrCopyOutput,
+  variantIndex: number
+): NonNullable<ImprovementPrCreativeRecord["adText"]> {
+  const source =
+    variantIndex === 0 ? copy.primary : copy.alternates[variantIndex - 1] ?? copy.primary;
+  return {
+    primaryText: truncateMetaText(source.primaryText, 125),
+    headline: truncateMetaText(source.headline, 40),
+    description: truncateMetaText(source.description ?? "詳しくはこちら", 30),
+    callToAction: normalizeCopyCta(source.cta),
+    rationale: copy.rationale,
+  };
+}
+
+function normalizeCopyCta(value: string): string {
+  const raw = value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const aliases: Record<string, string> = {
+    LEARN_MORE: "LEARN_MORE",
+    LEARN: "LEARN_MORE",
+    MORE: "LEARN_MORE",
+    SIGN_UP: "SIGN_UP",
+    SHOP_NOW: "SHOP_NOW",
+    BUY_NOW: "BUY_NOW",
+    CONTACT_US: "CONTACT_US",
+    DOWNLOAD: "DOWNLOAD",
+    APPLY_NOW: "APPLY_NOW",
+    GET_QUOTE: "GET_QUOTE",
+    SUBSCRIBE: "SUBSCRIBE",
+  };
+  return aliases[raw] ?? "LEARN_MORE";
+}
+
+function truncateMetaText(value: string, maxChars: number): string {
+  const chars = Array.from(value.trim().replace(/\s+/g, " "));
+  if (chars.length <= maxChars) return chars.join("");
+  return `${chars.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
 }
 
 interface FailPipelineArgs {
@@ -1730,6 +1910,7 @@ function composePrBody(input: {
   budgetImpact: ImprovementPrBudgetImpact;
   planValidation: ImprovementPrPlanValidationResult;
   snapshotIds: string[];
+  creativeContext: ImprovementPrCreativeGenerationContext | null;
   creatives: ImprovementPrCreativeAttachment[];
 }): string {
   const dangerLine =
@@ -1744,6 +1925,7 @@ function composePrBody(input: {
     input.policyReasons.length > 0
       ? input.policyReasons.map((r) => `- ${r}`).join("\n")
       : "- (no deterministic policy reasons)";
+  const creativeContextLines = formatCreativeContextForPrBody(input.creativeContext);
   return [
     "## AI rationale",
     input.aiRationale,
@@ -1764,15 +1946,50 @@ function composePrBody(input: {
     `- after: \`${input.budgetImpact.afterCurrency}\``,
     `- ${input.budgetImpact.notes}`,
     "",
-    "## Dry-run",
-    formatPlanValidationForPrBody(input.planValidation),
-    "",
-    "## 生成クリエイティブ",
+	    "## Dry-run",
+	    formatPlanValidationForPrBody(input.planValidation),
+	    "",
+	    "## Creative context",
+	    creativeContextLines,
+	    "",
+	    "## 生成クリエイティブ",
     formatCreativesForPrBody(input.creatives),
     "",
     "## Snapshots",
     snapshotLine,
-  ].join("\n");
+	  ].join("\n");
+	}
+
+function formatCreativeContextForPrBody(
+  context: ImprovementPrCreativeGenerationContext | null
+): string {
+  if (!context) {
+    return "- 文脈情報なし。アカウント単位の最小プロンプトで生成しました。";
+  }
+  const lines: string[] = [];
+  lines.push(`- strategy: \`${context.strategy}\``);
+  if (context.target) {
+    lines.push(
+      `- target: \`${context.target.hierarchy}\` ${oneLine(context.target.displayName)} (\`${context.target.nodeKey}\`)`
+    );
+    lines.push(`- target rationale: ${oneLine(context.target.rationale)}`);
+  } else {
+    lines.push("- target: (no underperforming node selected)");
+  }
+  if (context.references.length > 0) {
+    lines.push("- references:");
+    for (const ref of context.references.slice(0, 3)) {
+      lines.push(
+        `  - \`${ref.hierarchy}\` ${oneLine(ref.displayName)} (\`${ref.nodeKey}\`): ${oneLine(ref.rationale)}`
+      );
+    }
+  } else {
+    lines.push("- references: (none)");
+  }
+  if (context.brandProfile?.brandName) {
+    lines.push(`- brand: ${oneLine(context.brandProfile.brandName)}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -2159,12 +2376,43 @@ function planValidationToMetadata(
   };
 }
 
+function creativeGenerationContextToMetadata(
+  context: ImprovementPrCreativeGenerationContext | null
+): Record<string, unknown> | null {
+  if (!context) return null;
+  return {
+    strategy: context.strategy,
+    target: context.target ? creativeNodeContextToMetadata(context.target) : null,
+    references: context.references.map(creativeNodeContextToMetadata),
+    brandProfile: context.brandProfile ?? null,
+    notes: context.notes ?? [],
+  };
+}
+
+function creativeNodeContextToMetadata(
+  node: ImprovementPrCreativeNodeContext
+): Record<string, unknown> {
+  return {
+    hierarchyId: node.hierarchyId,
+    hierarchy: node.hierarchy,
+    nodeKey: node.nodeKey,
+    displayName: node.displayName,
+    status: node.status ?? null,
+    externalId: node.externalId ?? null,
+    current: node.current,
+    prior: node.prior ?? null,
+    rationale: node.rationale,
+    creative: node.creative ?? null,
+  };
+}
+
 // ---------------------------------------------------------------------
 // regression fix — image-Provider hop helper
 // ---------------------------------------------------------------------
 
 interface RunImageGenerationHopInput {
   imageProvider: ImageProvider | null;
+  referenceImages: ImageReferenceInput[];
   creativeStorage: CreativeStorageAdapter | null;
   accountKey: string;
   variants: ImprovementPrImagePromptVariant[];
@@ -2246,25 +2494,40 @@ async function runImageGenerationHop(
     };
   }
 
-  // image_prompt variants を ImageProvider のリクエスト shape に展開する。
-  // `variantKey` は `variant-<index>` 採番で安定にして persistCreativeAssets の
-  // asset_id 派生 (sha256(creativeId|variantKey)) に渡す。
-  const variationConditions: ImageVariationCondition[] = input.variants.map(
-    (_, i) => ({
-      width: 1080,
-      height: 1080,
-      format: "png",
-      variantKey: `variant-${i}`,
-    })
-  );
-  const promptVariants: ImagePromptVariant[] = input.variants.map((v, i) => ({
-    variantKey: `variant-${i}`,
-    prompt: v.prompt,
-    negativePrompt: v.negativePrompt,
-    styleNotes: v.styleNotes,
-    width: 1080,
-    height: 1080,
-  }));
+  let variationConditions: ImageVariationCondition[];
+  try {
+    const variantsForGeneration = input.variants.map((v, i) => ({
+      ...v,
+      variantKey: v.variantKey ?? `variant-${i}`,
+    }));
+    variationConditions = imagePromptVariantsToVariationConditions(
+      variantsForGeneration,
+      { aspectRatio: "1:1", defaultFormat: "png" }
+    );
+  } catch {
+    return {
+      fallback: true,
+      providerName: null,
+      model: null,
+      parameters: null,
+      baseStorageRef: null,
+      perVariant: baseEmpty,
+      providerError: "image prompt variation conditions were invalid",
+    };
+  }
+  const promptVariants: ImagePromptVariant[] = input.variants.map((v, i) => {
+    const condition = variationConditions[i]!;
+    return {
+      variantKey: condition.variantKey,
+      prompt: v.prompt,
+      negativePrompt: v.negativePrompt,
+      styleNotes: v.styleNotes,
+      width: condition.width,
+      height: condition.height,
+      format: condition.format,
+      aspectRatio: v.aspectRatio,
+    };
+  });
 
   const result = await generateAndQaCreative({
     provider: input.imageProvider,
@@ -2272,6 +2535,7 @@ async function runImageGenerationHop(
       prompt: input.variants[0]?.prompt ?? "",
       variationConditions,
       purpose: "workflow:improvement_pr",
+      referenceImages: input.referenceImages,
     },
     variants: promptVariants,
     policy: input.qaPolicy,
@@ -2327,7 +2591,7 @@ async function runImageGenerationHop(
   for (const a of persisted.assets) assetByKey.set(a.variantKey, a);
 
   const perVariant: PerVariantOutcome[] = input.variants.map((_, i) => {
-    const variantKey = `variant-${i}`;
+    const variantKey = variationConditions[i]?.variantKey ?? `variant-${i}`;
     const asset = assetByKey.get(variantKey) ?? null;
     let status: ImprovementPrCreativeStatus | null = null;
     if (asset) {

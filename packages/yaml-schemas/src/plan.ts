@@ -50,7 +50,8 @@ export interface CreateCampaignAction extends ActionBase {
   name: string;
   objective: string;
   initialState: "paused" | "active";
-  budget: { dailyUsd?: number; lifetimeUsd?: number };
+  budget: { dailyBudget?: number; lifetimeBudget?: number };
+  adsetBudgetSharing?: boolean;
 }
 
 export interface UpdateCampaignAction extends ActionBase {
@@ -70,7 +71,14 @@ export interface CreateAdsetAction extends ActionBase {
   adsetId: string;
   name: string;
   initialState: "paused" | "active";
-  budget?: { dailyUsd?: number; lifetimeUsd?: number };
+  budget?: { dailyBudget?: number; lifetimeBudget?: number };
+  optimizationGoal?: string;
+  billingEvent?: string;
+  bidAmount?: number;
+  startTime?: string;
+  endTime?: string;
+  pixelId?: string;
+  customEventType?: string;
   targeting: NormalizedTargeting;
 }
 
@@ -95,6 +103,8 @@ export interface CreateAdAction extends ActionBase {
   name: string;
   creativeRef: string;
   initialState: "paused" | "active";
+  pixelId?: string;
+  trackingSpecs?: Record<string, unknown>;
 }
 
 export interface UpdateAdAction extends ActionBase {
@@ -120,6 +130,18 @@ export interface CreateCreativeAction extends ActionBase {
   headline?: string;
   primaryText?: string;
   callToAction?: string;
+  pageId?: string;
+  title?: string;
+  body?: string;
+  linkUrl?: string;
+  description?: string;
+  instagramActorId?: string;
+  images?: string[];
+  videos?: string[];
+  titles?: string[];
+  bodies?: string[];
+  descriptions?: string[];
+  callToActions?: string[];
   storageKey?: string;
 }
 
@@ -410,6 +432,7 @@ function toCreateCampaign(account: string, c: Campaign): CreateCampaignAction {
     objective: c.objective,
     initialState: c.initialState,
     budget: budgetToPlain(c.budget),
+    ...(c.adsetBudgetSharing !== undefined ? { adsetBudgetSharing: c.adsetBudgetSharing } : {}),
   };
 }
 
@@ -424,14 +447,26 @@ function toCreateCreative(account: string, c: Creative): CreateCreativeAction {
   if (c.headline !== undefined) out.headline = c.headline;
   if (c.primaryText !== undefined) out.primaryText = c.primaryText;
   if (c.callToAction !== undefined) out.callToAction = c.callToAction;
+  if (c.pageId !== undefined) out.pageId = c.pageId;
+  if (c.title !== undefined) out.title = c.title;
+  if (c.body !== undefined) out.body = c.body;
+  if (c.linkUrl !== undefined) out.linkUrl = c.linkUrl;
+  if (c.description !== undefined) out.description = c.description;
+  if (c.instagramActorId !== undefined) out.instagramActorId = c.instagramActorId;
+  if (c.images !== undefined) out.images = [...c.images];
+  if (c.videos !== undefined) out.videos = [...c.videos];
+  if (c.titles !== undefined) out.titles = [...c.titles];
+  if (c.bodies !== undefined) out.bodies = [...c.bodies];
+  if (c.descriptions !== undefined) out.descriptions = [...c.descriptions];
+  if (c.callToActions !== undefined) out.callToActions = [...c.callToActions];
   if (c.storageKey !== undefined) out.storageKey = c.storageKey;
   return out;
 }
 
-function budgetToPlain(b: Budget): { dailyUsd?: number; lifetimeUsd?: number } {
-  const out: { dailyUsd?: number; lifetimeUsd?: number } = {};
-  if (b.dailyUsd !== undefined) out.dailyUsd = b.dailyUsd;
-  if (b.lifetimeUsd !== undefined) out.lifetimeUsd = b.lifetimeUsd;
+function budgetToPlain(b: Budget): { dailyBudget?: number; lifetimeBudget?: number } {
+  const out: { dailyBudget?: number; lifetimeBudget?: number } = {};
+  if (b.dailyBudget !== undefined) out.dailyBudget = b.dailyBudget;
+  if (b.lifetimeBudget !== undefined) out.lifetimeBudget = b.lifetimeBudget;
   return out;
 }
 
@@ -457,12 +492,18 @@ function diffCampaign(prev: Campaign, next: Campaign): Record<string, FieldChang
       to: next.initialState,
     };
   if (
-    prev.budget.dailyUsd !== next.budget.dailyUsd ||
-    prev.budget.lifetimeUsd !== next.budget.lifetimeUsd
+    prev.budget.dailyBudget !== next.budget.dailyBudget ||
+    prev.budget.lifetimeBudget !== next.budget.lifetimeBudget
   ) {
     changes.budget = {
       from: budgetToPlain(prev.budget),
       to: budgetToPlain(next.budget),
+    };
+  }
+  if ((prev.adsetBudgetSharing ?? null) !== (next.adsetBudgetSharing ?? null)) {
+    changes.adsetBudgetSharing = {
+      from: prev.adsetBudgetSharing ?? null,
+      to: next.adsetBudgetSharing ?? null,
     };
   }
   return changes;
@@ -479,10 +520,23 @@ function diffAdset(prev: Adset, next: Adset): Record<string, FieldChange> {
   const prevBudget = prev.budget ? budgetToPlain(prev.budget) : null;
   const nextBudget = next.budget ? budgetToPlain(next.budget) : null;
   if (
-    (prevBudget?.dailyUsd ?? null) !== (nextBudget?.dailyUsd ?? null) ||
-    (prevBudget?.lifetimeUsd ?? null) !== (nextBudget?.lifetimeUsd ?? null)
+    (prevBudget?.dailyBudget ?? null) !== (nextBudget?.dailyBudget ?? null) ||
+    (prevBudget?.lifetimeBudget ?? null) !== (nextBudget?.lifetimeBudget ?? null)
   ) {
     changes.budget = { from: prevBudget, to: nextBudget };
+  }
+  for (const key of [
+    "optimizationGoal",
+    "billingEvent",
+    "bidAmount",
+    "startTime",
+    "endTime",
+    "pixelId",
+    "customEventType",
+  ] as const) {
+    if ((prev[key] ?? null) !== (next[key] ?? null)) {
+      changes[key] = { from: prev[key] ?? null, to: next[key] ?? null };
+    }
   }
   const prevTargeting = targetingToPlain(prev.targeting);
   const nextTargeting = targetingToPlain(next.targeting);
@@ -502,6 +556,16 @@ function diffAd(prev: Ad, next: Ad): Record<string, FieldChange> {
       from: prev.initialState,
       to: next.initialState,
     };
+  if ((prev.pixelId ?? null) !== (next.pixelId ?? null))
+    changes.pixelId = { from: prev.pixelId ?? null, to: next.pixelId ?? null };
+  const prevTrackingSpecs = JSON.stringify(prev.trackingSpecs ?? null);
+  const nextTrackingSpecs = JSON.stringify(next.trackingSpecs ?? null);
+  if (prevTrackingSpecs !== nextTrackingSpecs) {
+    changes.trackingSpecs = {
+      from: prev.trackingSpecs ?? null,
+      to: next.trackingSpecs ?? null,
+    };
+  }
   return changes;
 }
 
@@ -522,6 +586,32 @@ function diffCreative(prev: Creative, next: Creative): Record<string, FieldChang
       from: prev.callToAction ?? null,
       to: next.callToAction ?? null,
     };
+  for (const key of [
+    "pageId",
+    "title",
+    "body",
+    "linkUrl",
+    "description",
+    "instagramActorId",
+  ] as const) {
+    if ((prev[key] ?? null) !== (next[key] ?? null)) {
+      changes[key] = { from: prev[key] ?? null, to: next[key] ?? null };
+    }
+  }
+  for (const key of [
+    "images",
+    "videos",
+    "titles",
+    "bodies",
+    "descriptions",
+    "callToActions",
+  ] as const) {
+    const prevValue = JSON.stringify(prev[key] ?? null);
+    const nextValue = JSON.stringify(next[key] ?? null);
+    if (prevValue !== nextValue) {
+      changes[key] = { from: prev[key] ?? null, to: next[key] ?? null };
+    }
+  }
   if ((prev.storageKey ?? null) !== (next.storageKey ?? null))
     changes.storageKey = {
       from: prev.storageKey ?? null,
@@ -615,6 +705,13 @@ function diffAdsets(args: DiffAdsetsArgs): void {
         ...(adset.budget !== undefined
           ? { budget: budgetToPlain(adset.budget) }
           : {}),
+        ...(adset.optimizationGoal !== undefined ? { optimizationGoal: adset.optimizationGoal } : {}),
+        ...(adset.billingEvent !== undefined ? { billingEvent: adset.billingEvent } : {}),
+        ...(adset.bidAmount !== undefined ? { bidAmount: adset.bidAmount } : {}),
+        ...(adset.startTime !== undefined ? { startTime: adset.startTime } : {}),
+        ...(adset.endTime !== undefined ? { endTime: adset.endTime } : {}),
+        ...(adset.pixelId !== undefined ? { pixelId: adset.pixelId } : {}),
+        ...(adset.customEventType !== undefined ? { customEventType: adset.customEventType } : {}),
         targeting: targetingToPlain(adset.targeting),
       });
     } else {
@@ -710,6 +807,8 @@ function diffAds(args: DiffAdsArgs): void {
         name: ad.name,
         creativeRef: ad.creativeRef,
         initialState: ad.initialState,
+        ...(ad.pixelId !== undefined ? { pixelId: ad.pixelId } : {}),
+        ...(ad.trackingSpecs !== undefined ? { trackingSpecs: ad.trackingSpecs } : {}),
       });
     } else {
       const changes = diffAd(prev, ad);
@@ -785,43 +884,43 @@ function collectGuardrailFindings(brand: BrandYaml, findings: PlanFinding[]): vo
   const g: Guardrails | undefined = brand.guardrails;
   for (let i = 0; i < brand.campaigns.length; i += 1) {
     const c = brand.campaigns[i]!;
-    if (g?.maxDailyUsdPerCampaign !== undefined && c.budget.dailyUsd !== undefined) {
-      if (c.budget.dailyUsd > g.maxDailyUsdPerCampaign) {
+    if (g?.maxDailyBudgetPerCampaign !== undefined && c.budget.dailyBudget !== undefined) {
+      if (c.budget.dailyBudget > g.maxDailyBudgetPerCampaign) {
         findings.push({
           level: "error",
-          pointer: `campaigns[${i}].budget.dailyUsd`,
-          message: `campaign "${c.id}" の dailyUsd ${c.budget.dailyUsd} は guardrails.maxDailyUsdPerCampaign (${g.maxDailyUsdPerCampaign}) を超えています`,
+          pointer: `campaigns[${i}].budget.dailyBudget`,
+          message: `campaign "${c.id}" の dailyBudget ${c.budget.dailyBudget} は guardrails.maxDailyBudgetPerCampaign (${g.maxDailyBudgetPerCampaign}) を超えています`,
         });
       }
     }
     if (
-      g?.maxLifetimeUsdPerCampaign !== undefined &&
-      c.budget.lifetimeUsd !== undefined
+      g?.maxLifetimeBudgetPerCampaign !== undefined &&
+      c.budget.lifetimeBudget !== undefined
     ) {
-      if (c.budget.lifetimeUsd > g.maxLifetimeUsdPerCampaign) {
+      if (c.budget.lifetimeBudget > g.maxLifetimeBudgetPerCampaign) {
         findings.push({
           level: "error",
-          pointer: `campaigns[${i}].budget.lifetimeUsd`,
-          message: `campaign "${c.id}" の lifetimeUsd ${c.budget.lifetimeUsd} は guardrails.maxLifetimeUsdPerCampaign (${g.maxLifetimeUsdPerCampaign}) を超えています`,
+          pointer: `campaigns[${i}].budget.lifetimeBudget`,
+          message: `campaign "${c.id}" の lifetimeBudget ${c.budget.lifetimeBudget} は guardrails.maxLifetimeBudgetPerCampaign (${g.maxLifetimeBudgetPerCampaign}) を超えています`,
         });
       }
     }
     // Adset budgets > campaign budgets は warning (Meta 側が許容するケースもあるため)。
-    if (c.budget.dailyUsd !== undefined) {
+    if (c.budget.dailyBudget !== undefined) {
       let adsetSum = 0;
       let allHaveDaily = c.adsets.length > 0;
       for (const a of c.adsets) {
-        if (a.budget?.dailyUsd === undefined) {
+        if (a.budget?.dailyBudget === undefined) {
           allHaveDaily = false;
           break;
         }
-        adsetSum += a.budget.dailyUsd;
+        adsetSum += a.budget.dailyBudget;
       }
-      if (allHaveDaily && adsetSum > c.budget.dailyUsd) {
+      if (allHaveDaily && adsetSum > c.budget.dailyBudget) {
         findings.push({
           level: "warning",
           pointer: `campaigns[${i}].adsets`,
-          message: `adset dailyUsd 合計 ${adsetSum} が campaign "${c.id}" の dailyUsd ${c.budget.dailyUsd} を超えています`,
+          message: `adset dailyBudget 合計 ${adsetSum} が campaign "${c.id}" の dailyBudget ${c.budget.dailyBudget} を超えています`,
         });
       }
     }

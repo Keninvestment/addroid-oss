@@ -4,6 +4,7 @@
 // 「いま web/worker は動いているのか」「直近の依存診断結果は何か」を 1 画面で示す。
 
 import { resolveAddroidPaths, readAddroidConfig } from "@addroid/config";
+import net from "node:net";
 import { isProcessAlive, readUpState } from "../lib/processes.js";
 import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
 
@@ -57,11 +58,19 @@ export async function runStatus(args: string[]): Promise<number> {
   } else {
     const parentAlive = isProcessAlive(state.parentPid);
     const webFailed = state.webStatus === "failed";
+    const webReachable = parentAlive && !webFailed
+      ? await canConnectToWeb(state.webUrl)
+      : false;
+    const webUnreachable = parentAlive && !webFailed && !webReachable;
     lines.push(`  mode          : ${state.mode}`);
     lines.push(`  started at    : ${state.startedAt}`);
     lines.push(
       `  web URL       : ${state.webUrl}${
-        webFailed ? "  [web-failed — worker のみ稼働中]" : ""
+        webFailed
+          ? "  [web-failed — worker のみ稼働中]"
+          : webUnreachable
+            ? "  [web-unreachable]"
+            : ""
       }`
     );
     lines.push(
@@ -70,13 +79,17 @@ export async function runStatus(args: string[]): Promise<number> {
     if (state.mode === "shared") {
       const webLabel = webFailed
         ? `worker only (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
-        : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
+        : webUnreachable
+          ? `in parent process [web-unreachable]`
+          : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web/worker    : ${webLabel}`);
     } else {
       const workerAlive = isProcessAlive(state.workerPid);
       const webLabel = webFailed
         ? `not running (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
-        : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
+        : webUnreachable
+          ? `in parent process [web-unreachable]`
+          : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web           : ${webLabel}`);
       lines.push(
         `  worker pid    : ${state.workerPid ?? "(none)"} ${
@@ -96,6 +109,32 @@ export async function runStatus(args: string[]): Promise<number> {
   lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
+}
+
+async function canConnectToWeb(rawUrl: string): Promise<boolean> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  if (!Number.isInteger(port) || port <= 0) return false;
+  const host = url.hostname;
+  return await new Promise<boolean>((resolve) => {
+    const socket = net.createConnection({ host, port });
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(500);
+    socket.once("connect", () => finish(true));
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
 }
 
 async function readLatestDoctor(): Promise<DoctorRow | null> {

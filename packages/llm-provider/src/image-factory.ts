@@ -84,6 +84,14 @@ export function selectImageProvider(
       optional: false,
     };
   }
+  if (explicit === "codex" || (!explicit && opts.preferCodex)) {
+    return {
+      provider: new CodexAppServerImageProvider(opts.codex ?? {}),
+      choice: "codex",
+      reason: explicit === "codex" ? "ADDROID_IMAGE_PROVIDER=codex" : "Codex LLM/OAuth selected; using Codex app-server image provider",
+      optional: false,
+    };
+  }
   if (explicit === "openai" || opts.openaiCredentialAvailable) {
     if (opts.tokenStore && opts.crypto && opts.openaiCredentialAvailable !== false) {
       return {
@@ -107,14 +115,6 @@ export function selectImageProvider(
       choice: "stub",
       reason: "OpenAI image provider requested but encrypted token store / crypto boundary is not configured",
       optional: true,
-    };
-  }
-  if (explicit === "codex" || opts.preferCodex) {
-    return {
-      provider: new CodexAppServerImageProvider(opts.codex ?? {}),
-      choice: "codex",
-      reason: explicit === "codex" ? "ADDROID_IMAGE_PROVIDER=codex" : "Codex LLM/OAuth selected; using Codex app-server image provider",
-      optional: false,
     };
   }
   return {

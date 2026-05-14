@@ -5,7 +5,8 @@
 //
 // the current implementation の重要な制約 (再掲):
 //   - github_poll は default で enabled。merged PR 検知は本契約で動作する想定。
-//   - daily_report / today_report / improvement_pr は「定義のみ存在し未起動」を維持する。
+//   - daily_report / today_report / improvement_pr / auto_creative_generation は
+//     「定義のみ存在し未起動」を維持する。
 //   - daily_report は前日分を毎朝、today_report は当日分を毎時取得する。
 //   - 自然言語カスタム cron と承認済み automation rule は CRON_PRESETS ではなく
 //     delayed job として 1 回分ずつ予約する。
@@ -42,7 +43,15 @@ export const CRON_PRESETS = [
   {
     name: "improvement_pr",
     cron: "0 10 * * 1",
-    description: "前日までの直近 7 日の実績から AI 改善提案 PR を週次で作成",
+    description:
+      "前日までの直近 7 日の実績から予算、停止候補、追加入稿などの改善提案を毎週月曜10時に生成し、必要に応じてPR化",
+    enabledByDefault: false,
+  },
+  {
+    name: "auto_creative_generation",
+    cron: "0 9 * * *",
+    description:
+      "直近実績と既存クリエイティブをもとに自動クリエイティブ生成を毎朝9時に実行する",
     enabledByDefault: false,
   },
   {

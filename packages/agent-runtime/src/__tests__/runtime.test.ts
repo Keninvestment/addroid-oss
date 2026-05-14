@@ -149,7 +149,7 @@ test("runAgentTurn keeps nested proposal args and rejects direct activation on c
             intent: "pause",
             accountKey: "act_123",
             targets: [{ level: "campaign", id: "cmp_1" }],
-            desiredChanges: { initialState: "PAUSED", budget: { dailyUsd: 10 } },
+            desiredChanges: { initialState: "PAUSED", budget: { dailyBudget: 10 } },
             rationale: "CV0のため",
           },
         },
@@ -179,9 +179,133 @@ test("runAgentTurn keeps nested proposal args and rejects direct activation on c
   assert.deepEqual(proposal.toolArgs.targets, [{ level: "campaign", id: "cmp_1" }]);
   assert.deepEqual(proposal.toolArgs.desiredChanges, {
     initialState: "PAUSED",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   assert.equal(result.toolResults[1]?.status, "unsupported");
+});
+
+test("runAgentTurn resolves creative submission as a GitOps PR tool", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "入稿PRを作成します。",
+      tools: [
+        {
+          name: "propose_creative_submission",
+          args: {
+            accountKey: "act_123",
+            creativeName: "spring-sale",
+            adName: "春セール広告",
+            headline: "春だけの特典",
+            primaryText: "新商品を今すぐ確認できます。",
+            campaignId: "cmp_1",
+            adsetId: "as_1",
+            localMediaPaths: ["/tmp/spring.png"],
+          },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "この画像でMeta広告に入稿して",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "cli-chat",
+  });
+  const tool = result.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "propose_creative_submission");
+  assert.equal(tool.command, null);
+  assert.deepEqual(tool.toolArgs.localMediaPaths, ["/tmp/spring.png"]);
+});
+
+test("runAgentTurn resolves creative generation as a library-only tool on chat surfaces", async () => {
+  for (const surface of ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"] as const) {
+    const provider = new StaticProvider(
+      JSON.stringify({
+        message: "生成します。",
+        tools: [
+          {
+            name: "generate_creatives",
+            args: {
+              accountKey: "act_123",
+              prompt: "添付画像と既存広告を参考に新しいクリエイティブを生成",
+              referenceImagePaths: ["/tmp/ref.png"],
+            },
+          },
+        ],
+      })
+    );
+    const result = await runAgentTurn({
+      input: "この画像を参考に新しいクリエイティブを生成して",
+      provider,
+      agentContext: {
+        content: "test agent context",
+        webUrl: "http://127.0.0.1:3000",
+        loadedDocs: ["test"],
+      },
+      purpose: "test",
+      surface,
+    });
+    const tool = result.toolResults[0];
+    assert.equal(tool?.status, "ready");
+    if (tool?.status !== "ready") throw new Error(`expected ready tool for ${surface}`);
+    assert.equal(tool.tool, "generate_creatives");
+    assert.equal(tool.command, null);
+    assert.deepEqual(tool.toolArgs.referenceImagePaths, ["/tmp/ref.png"]);
+  }
+});
+
+test("runAgentTurn keeps creative submission args for new adset placement", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "広告セット作成PRを作成します。",
+      tools: [
+        {
+          name: "propose_creative_submission",
+          args: {
+            accountKey: "act_123",
+            creativeName: "summer-sale",
+            adName: "夏セール広告",
+            headline: "夏の特典",
+            primaryText: "新しい広告セットで配信します。",
+            campaignId: "cmp_1",
+            adsetName: "JP 25-44",
+            countries: ["JP"],
+            callToAction: "OPEN_LINK",
+            optimizationGoal: "LINK_CLICKS",
+            billingEvent: "IMPRESSIONS",
+          },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "既存キャンペーン cmp_1 の下に新しい広告セットを作って入稿して",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "slack-chat",
+  });
+  const tool = result.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "propose_creative_submission");
+  assert.equal(tool.toolArgs.campaignId, "cmp_1");
+  assert.equal(tool.toolArgs.adsetName, "JP 25-44");
+  assert.deepEqual(tool.toolArgs.countries, ["JP"]);
+  assert.equal(tool.toolArgs.callToAction, "OPEN_LINK");
+  assert.equal(tool.toolArgs.optimizationGoal, "LINK_CLICKS");
+  assert.equal(tool.toolArgs.billingEvent, "IMPRESSIONS");
 });
 
 test("buildAgentLoopInput includes prior tool results for multi-step reasoning", () => {

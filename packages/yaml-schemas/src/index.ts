@@ -174,6 +174,7 @@ export const CronEntrySchema = z
       "today_report",
       "budget_guard",
       "improvement_pr",
+      "auto_creative_generation",
       "retention_sweep",
     ]),
     cron: CronExpressionSchema,
@@ -206,25 +207,25 @@ export type CronYaml = z.infer<typeof CronYamlSchema>;
 
 // ---- brand.yaml (Ads YAML 入口) -----------------------------------------
 
-// the current implementation での budget は USD 単位の整数 (cents は導入しない)。
+// the current implementation での budget は広告アカウント通貨の major unit 整数。
 // 予算暴走を構造的に防ぐため、上限は schema 段階で抑える。
-export const BUDGET_HARD_CAP_USD = 10_000; // 1 日/1 案件あたりの絶対上限
+export const BUDGET_HARD_CAP_MAJOR = 10_000; // 1 日/1 案件あたりの絶対上限
 export const BUDGET_INCREASE_RATIO_LIMIT = 2; // 既存比 2 倍を超える増額は unsafe
 
 const BudgetSchema = z
   .object({
-    dailyUsd: z.number().int().nonnegative().max(BUDGET_HARD_CAP_USD).optional(),
-    lifetimeUsd: z
+    dailyBudget: z.number().int().nonnegative().max(BUDGET_HARD_CAP_MAJOR).optional(),
+    lifetimeBudget: z
       .number()
       .int()
       .nonnegative()
-      .max(BUDGET_HARD_CAP_USD * 365)
+      .max(BUDGET_HARD_CAP_MAJOR * 365)
       .optional(),
   })
   .strict()
   .refine(
-    (b) => b.dailyUsd !== undefined || b.lifetimeUsd !== undefined,
-    "budget は dailyUsd か lifetimeUsd の少なくとも一方を指定してください"
+    (b) => b.dailyBudget !== undefined || b.lifetimeBudget !== undefined,
+    "budget は dailyBudget か lifetimeBudget の少なくとも一方を指定してください"
   );
 
 export type Budget = z.infer<typeof BudgetSchema>;
@@ -237,6 +238,38 @@ export const CampaignObjectiveSchema = z.enum([
   "OUTCOME_APP_PROMOTION",
   "OUTCOME_SALES",
 ]);
+
+const MetaEnumTokenSchema = z
+  .string()
+  .min(1)
+  .regex(/^[A-Z][A-Z0-9_]*$/, "Meta enum は大文字英数字とアンダースコアで指定してください");
+
+export const AdsetOptimizationGoalSchema = MetaEnumTokenSchema;
+
+export const AdsetBillingEventSchema = MetaEnumTokenSchema;
+
+export const MetaCustomEventTypeSchema = z.enum([
+  "ADD_PAYMENT_INFO",
+  "ADD_TO_CART",
+  "ADD_TO_WISHLIST",
+  "COMPLETE_REGISTRATION",
+  "CONTACT",
+  "CONTENT_VIEW",
+  "CUSTOMIZE_PRODUCT",
+  "DONATE",
+  "FIND_LOCATION",
+  "INITIATED_CHECKOUT",
+  "LEAD",
+  "OTHER",
+  "PURCHASE",
+  "SCHEDULE",
+  "SEARCH",
+  "START_TRIAL",
+  "SUBMIT_APPLICATION",
+  "SUBSCRIBE",
+]);
+
+export const CreativeCallToActionSchema = MetaEnumTokenSchema;
 
 // the current implementation: adset / ad / creative / targeting / guardrails / experiments を Ads YAML
 // に取り込み、buildExecutionPlan で Meta 実行 plan に変換できるようにする。
@@ -284,6 +317,8 @@ export const AdSchema = z
       .min(1)
       .regex(ID_REGEX, "creativeRef は creatives[].id を参照する小文字英数字"),
     initialState: z.enum(["paused", "active"]).default("paused"),
+    pixelId: z.string().min(1).optional(),
+    trackingSpecs: z.record(z.unknown()).optional(),
   })
   .strict();
 
@@ -299,6 +334,13 @@ export const AdsetSchema = z
     initialState: z.enum(["paused", "active"]).default("paused"),
     /** adset 単位で予算を切り直す場合のみ。未指定なら親 campaign 予算で配信。 */
     budget: BudgetSchema.optional(),
+    optimizationGoal: AdsetOptimizationGoalSchema.optional(),
+    billingEvent: AdsetBillingEventSchema.optional(),
+    bidAmount: z.number().int().nonnegative().max(BUDGET_HARD_CAP_MAJOR).optional(),
+    startTime: z.string().min(1).optional(),
+    endTime: z.string().min(1).optional(),
+    pixelId: z.string().min(1).optional(),
+    customEventType: MetaCustomEventTypeSchema.optional(),
     targeting: TargetingSchema.default({
       countries: [],
       interests: [],
@@ -334,19 +376,19 @@ export const CreativeSchema = z
     mediaType: z.enum(["image", "video", "carousel", "text"]),
     headline: z.string().min(1).optional(),
     primaryText: z.string().min(1).optional(),
-    callToAction: z
-      .enum([
-        "LEARN_MORE",
-        "SHOP_NOW",
-        "SIGN_UP",
-        "DOWNLOAD",
-        "BOOK_TRAVEL",
-        "CONTACT_US",
-        "SUBSCRIBE",
-        "APPLY_NOW",
-        "GET_QUOTE",
-      ])
-      .optional(),
+    callToAction: CreativeCallToActionSchema.optional(),
+    pageId: z.string().min(1).optional(),
+    title: z.string().min(1).optional(),
+    body: z.string().min(1).optional(),
+    linkUrl: z.string().url().optional(),
+    description: z.string().min(1).optional(),
+    instagramActorId: z.string().min(1).optional(),
+    images: z.array(z.string().min(1)).max(10).optional(),
+    videos: z.array(z.string().min(1)).max(10).optional(),
+    titles: z.array(z.string().min(1)).max(5).optional(),
+    bodies: z.array(z.string().min(1)).max(5).optional(),
+    descriptions: z.array(z.string().min(1)).max(5).optional(),
+    callToActions: z.array(CreativeCallToActionSchema).max(5).optional(),
     /** ローカル storage に保存された素材の相対パス。the current implementation では参照のみ。 */
     storageKey: z.string().min(1).optional(),
   })
@@ -356,10 +398,10 @@ export type Creative = z.infer<typeof CreativeSchema>;
 
 export const GuardrailsSchema = z
   .object({
-    /** 1 キャンペーンあたり許容する dailyUsd の上限 (これを超える plan は plan error)。 */
-    maxDailyUsdPerCampaign: z.number().int().positive().optional(),
-    /** 同 lifetimeUsd の上限。 */
-    maxLifetimeUsdPerCampaign: z.number().int().positive().optional(),
+    /** 1 キャンペーンあたり許容する dailyBudget の上限 (これを超える plan は plan error)。 */
+    maxDailyBudgetPerCampaign: z.number().int().positive().optional(),
+    /** 同 lifetimeBudget の上限。 */
+    maxLifetimeBudgetPerCampaign: z.number().int().positive().optional(),
     /** Targeting で許容する国コード。空配列なら制限なし。 */
     allowedCountries: z
       .array(z.string().regex(/^[A-Z]{2}$/, "country は ISO 3166-1 alpha-2"))
@@ -432,6 +474,7 @@ export const CampaignSchema = z
      */
     initialState: z.enum(["paused", "active"]).default("paused"),
     budget: BudgetSchema,
+    adsetBudgetSharing: z.boolean().optional(),
     adsets: z.array(AdsetSchema).default([]),
   })
   .strict()
@@ -571,54 +614,54 @@ export function assertInitialCampaignsArePaused(
 }
 
 /**
- * 安全でない予算変更を弾く。dailyUsd / lifetimeUsd の双方を対称に扱う。
+ * 安全でない予算変更を弾く。dailyBudget / lifetimeBudget の双方を対称に扱う。
  *  - 新規キャンペーン (previous=null): 絶対上限のみ schema で済んでいるため、ここでは
- *    宣言された予算フィールド (dailyUsd / lifetimeUsd) が `> 0` であることのみ確認する
+ *    宣言された予算フィールド (dailyBudget / lifetimeBudget) が `> 0` であることのみ確認する
  *    (= 完全 0 で active 化していないか)。
- *  - 既存キャンペーン: dailyUsd / lifetimeUsd のいずれかを `BUDGET_INCREASE_RATIO_LIMIT`
+ *  - 既存キャンペーン: dailyBudget / lifetimeBudget のいずれかを `BUDGET_INCREASE_RATIO_LIMIT`
  *    倍より増やす変更を unsafe とする。
- *  - 既存キャンペーン: dailyUsd / lifetimeUsd を 0 に落とす変更も unsafe
+ *  - 既存キャンペーン: dailyBudget / lifetimeBudget を 0 に落とす変更も unsafe
  *    (停止は initialState 経由で表現すべき)。
  */
 export function assertBudgetChangeIsSafe(
   previous: Budget | null,
   next: Budget
 ): void {
-  if (next.dailyUsd === undefined && next.lifetimeUsd === undefined) {
+  if (next.dailyBudget === undefined && next.lifetimeBudget === undefined) {
     throw new AdsValidationError(
-      "budget must declare dailyUsd or lifetimeUsd",
+      "budget must declare dailyBudget or lifetimeBudget",
       ["budget=empty"]
     );
   }
   if (previous === null) {
-    if (next.dailyUsd !== undefined && next.dailyUsd <= 0) {
+    if (next.dailyBudget !== undefined && next.dailyBudget <= 0) {
       throw new AdsValidationError(
-        "initial dailyUsd must be > 0",
-        [`dailyUsd=${next.dailyUsd}`]
+        "initial dailyBudget must be > 0",
+        [`dailyBudget=${next.dailyBudget}`]
       );
     }
-    if (next.lifetimeUsd !== undefined && next.lifetimeUsd <= 0) {
+    if (next.lifetimeBudget !== undefined && next.lifetimeBudget <= 0) {
       throw new AdsValidationError(
-        "initial lifetimeUsd must be > 0",
-        [`lifetimeUsd=${next.lifetimeUsd}`]
+        "initial lifetimeBudget must be > 0",
+        [`lifetimeBudget=${next.lifetimeBudget}`]
       );
     }
     return;
   }
   assertBudgetFieldChangeIsSafe(
-    "dailyUsd",
-    previous.dailyUsd,
-    next.dailyUsd
+    "dailyBudget",
+    previous.dailyBudget,
+    next.dailyBudget
   );
   assertBudgetFieldChangeIsSafe(
-    "lifetimeUsd",
-    previous.lifetimeUsd,
-    next.lifetimeUsd
+    "lifetimeBudget",
+    previous.lifetimeBudget,
+    next.lifetimeBudget
   );
 }
 
 function assertBudgetFieldChangeIsSafe(
-  field: "dailyUsd" | "lifetimeUsd",
+  field: "dailyBudget" | "lifetimeBudget",
   previousValue: number | undefined,
   nextValue: number | undefined
 ): void {

@@ -164,7 +164,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 50
+      dailyBudget: 50
 `,
   });
   try {
@@ -179,7 +179,7 @@ campaigns:
     assert.equal(parsed.actions[0].account, "primary");
     assert.equal(parsed.actions[0].campaignId, "fall-promo");
     assert.equal(parsed.actions[0].initialState, "paused");
-    assert.equal(parsed.actions[0].budget.dailyUsd, 50);
+    assert.equal(parsed.actions[0].budget.dailyBudget, 50);
   } finally {
     cleanup();
   }
@@ -199,7 +199,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: active
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
 `,
   });
   try {
@@ -215,7 +215,7 @@ campaigns:
 
 // ---- --base flag (previous / base state comparison) --------------------
 
-const BRAND_WITH_DAILY = (key: string, campaignId: string, dailyUsd: number) => `version: 1
+const BRAND_WITH_DAILY = (key: string, campaignId: string, dailyBudget: number) => `version: 1
 account:
   key: ${key}
   displayName: "${key} account"
@@ -225,7 +225,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: ${dailyUsd}
+      dailyBudget: ${dailyBudget}
 `;
 
 test("validate --base rejects unsafe budget increase against base", async () => {
@@ -297,7 +297,7 @@ test("plan --dry-run --base rejects unsafe budget increase against base", async 
   }
 });
 
-const BRAND_WITH_LIFETIME = (key: string, campaignId: string, lifetimeUsd: number) => `version: 1
+const BRAND_WITH_LIFETIME = (key: string, campaignId: string, lifetimeBudget: number) => `version: 1
 account:
   key: ${key}
   displayName: "${key} account"
@@ -307,10 +307,10 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      lifetimeUsd: ${lifetimeUsd}
+      lifetimeBudget: ${lifetimeBudget}
 `;
 
-test("validate --base rejects unsafe lifetimeUsd increase against base", async () => {
+test("validate --base rejects unsafe lifetimeBudget increase against base", async () => {
   const base = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
@@ -326,14 +326,14 @@ test("validate --base rejects unsafe lifetimeUsd increase against base", async (
       runValidate(["--root", target.dir, "--base", base.dir])
     );
     assert.equal(code, 1);
-    assert.match(out.stdout, /lifetimeUsd increase exceeds/);
+    assert.match(out.stdout, /lifetimeBudget increase exceeds/);
   } finally {
     base.cleanup();
     target.cleanup();
   }
 });
 
-test("plan --dry-run --base rejects unsafe lifetimeUsd increase against base", async () => {
+test("plan --dry-run --base rejects unsafe lifetimeBudget increase against base", async () => {
   const base = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
@@ -350,7 +350,7 @@ test("plan --dry-run --base rejects unsafe lifetimeUsd increase against base", a
     );
     assert.equal(code, 1);
     assert.match(out.stdout, /validate に失敗したため plan を中断/);
-    assert.match(out.stdout, /lifetimeUsd increase exceeds/);
+    assert.match(out.stdout, /lifetimeBudget increase exceeds/);
   } finally {
     base.cleanup();
     target.cleanup();
@@ -395,13 +395,13 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
     adsets:
       - id: fall-jp
         name: "Fall JP"
         initialState: paused
         budget:
-          dailyUsd: 50
+          dailyBudget: 50
         targeting:
           countries: [JP]
           ageMin: 25
@@ -458,7 +458,7 @@ experiments:
   }
 });
 
-test("plan --dry-run fails when guardrails.maxDailyUsdPerCampaign is exceeded", async () => {
+test("plan --dry-run fails when guardrails.maxDailyBudgetPerCampaign is exceeded", async () => {
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
@@ -467,14 +467,14 @@ account:
   key: primary
   displayName: "Primary"
 guardrails:
-  maxDailyUsdPerCampaign: 50
+  maxDailyBudgetPerCampaign: 50
 campaigns:
   - id: fall
     name: Fall
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
 `,
   });
   try {
@@ -482,7 +482,7 @@ campaigns:
       runPlan(["--root", dir, "--dry-run"])
     );
     assert.equal(code, 1);
-    assert.match(out.stdout, /maxDailyUsdPerCampaign/);
+    assert.match(out.stdout, /maxDailyBudgetPerCampaign/);
   } finally {
     cleanup();
   }
@@ -501,7 +501,7 @@ campaigns:
     name: A
     objective: OUTCOME_TRAFFIC
     initialState: paused
-    budget: { dailyUsd: 10 }
+    budget: { dailyBudget: 10 }
 `,
     "ads/accounts/secondary/brand.yaml": `version: 1
 account:
@@ -512,7 +512,7 @@ campaigns:
     name: B
     objective: OUTCOME_TRAFFIC
     initialState: paused
-    budget: { dailyUsd: 20 }
+    budget: { dailyBudget: 20 }
 `,
   });
   try {

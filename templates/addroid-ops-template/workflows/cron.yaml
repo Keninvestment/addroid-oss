@@ -1,10 +1,8 @@
 version: 1
 # AdDroid に登録する cron プリセット。
-# the current implementation では github_poll のみ enabled: true、それ以外は後続タスクで切り替えます。
+# GitHub PR のポーリングは AdDroid の内部必須ジョブとしてコード側で登録されます。
+# このファイルにはユーザーが有効化・停止・頻度変更できる標準 cron だけを載せます。
 schedules:
-  - name: github_poll
-    cron: "*/2 * * * *"
-    enabled: true
   - name: daily_report
     cron: "0 9 * * *"
     enabled: false
@@ -13,4 +11,7 @@ schedules:
     enabled: false
   - name: improvement_pr
     cron: "0 10 * * 1"
+    enabled: false
+  - name: auto_creative_generation
+    cron: "0 9 * * *"
     enabled: false

@@ -12,7 +12,7 @@
 #     `url:` フィールドを持ちません。
 #   - Interactivity も Socket Mode 経由のため `request_url` を持ちません。
 #   - bot scopes は最小集合のみ: chat:write, commands, app_mentions:read,
-#     im:history, channels:read, users:read。
+#     im:history, files:read, channels:read, users:read。
 #   - サブコマンド: report / budget / improve / status / accounts / activate <act_id>
 #     いずれも 3 秒以内 ack → pg-boss にキュー → response_url で返信の契約。
 #
@@ -48,6 +48,7 @@ oauth_config:
       - commands
       - app_mentions:read
       - im:history
+      - files:read
       - channels:read
       - users:read
 settings:

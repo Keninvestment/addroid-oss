@@ -106,7 +106,7 @@ function fakeFetchOk(response: {
   const fetch: SlackFetch = async (url, init) => {
     calls.push({
       url,
-      body: init.body,
+      body: init.body ?? "",
       auth: init.headers.Authorization ?? "",
     });
     return {

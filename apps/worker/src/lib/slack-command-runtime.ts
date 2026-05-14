@@ -55,13 +55,17 @@ import type {
   CreativeQaPolicy,
   CreativeStorageAdapter,
   ImageProvider,
+  LLMProvider,
 } from "@addroid/llm-provider";
 import type { PrismaClient } from "@addroid/db";
 import type { MetaAdapter } from "@addroid/meta-adapter";
 import { executeActivate } from "./activate-runtime.js";
 import { type LoadedBudgetGuardPolicy, buildBudgetGuardSpendContext } from "./budget-guard-runtime.js";
 import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performance-context.js";
+import { loadCreativeReferenceImages } from "./creative-reference-images.js";
+import { addCreativeImageUnderstanding } from "./creative-image-understanding.js";
 import { refreshLatestInsightsForManualImprovementPr } from "./improvement-pr-insights-refresh.js";
+import { formatImprovementReportForUser } from "./improvement-report-format.js";
 
 // ---------------------------------------------------------------------
 // Public API
@@ -104,8 +108,9 @@ export interface SlackCommandHandlersDeps {
    * improvement_pr も、cron 経路と同じ image_prompt → 実画像生成 → Creative QA
    * → LocalDisk Storage Adapter 永続化のパスを通る。Provider 未設定 / 失敗時は
    * prompt-only fallback (UI design plan principle 27)。
-   */
+  */
   improvementPrImageProvider?: ImageProvider | null;
+  improvementPrLlmProvider?: LLMProvider | null;
   improvementPrCreativeStorage?: CreativeStorageAdapter | null;
   /**
    * regression fix: cron 経路と同じ非空 Creative QA policy を `/adops improve`
@@ -235,6 +240,20 @@ function summarizeMessage(text: string): string {
   // Slack 通知の text 欄は 1 行サマリに使うため、末尾の空白と過剰な改行を畳む。
   // sanitize は postSlackResponse でもう一度かかるが、本層でも実施する (二重防御)。
   return sanitizeText(text.trim().replace(/\s+/g, " ")).slice(0, 600);
+}
+
+function isReadableCreativeStorage(
+  value: CreativeStorageAdapter | null | undefined
+): value is CreativeStorageAdapter & {
+  read(key: string): Promise<Buffer>;
+  readText(key: string): Promise<string>;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { read?: unknown }).read === "function" &&
+    typeof (value as { readText?: unknown }).readText === "function"
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -604,6 +623,17 @@ async function handleImprove(
               includeToday: true,
             }
           );
+          const referenceImages = isReadableCreativeStorage(deps.improvementPrCreativeStorage)
+            ? await loadCreativeReferenceImages(
+                deps.improvementPrCreativeStorage,
+                performanceContext.creativeContext
+              )
+            : [];
+          const creativeContextWithVision = await addCreativeImageUnderstanding(
+            deps.improvementPrLlmProvider ?? null,
+            performanceContext.creativeContext,
+            referenceImages
+          );
           return runImprovementPrOnce({
             workspaceId: deps.workspaceId,
             mode: effectiveMode,
@@ -612,6 +642,8 @@ async function handleImprove(
             baseRef: repo.baseRef,
             snapshotIds: performanceContext.snapshotIds,
             analysisWindow: performanceContext.analysisWindow,
+            creativeContext: creativeContextWithVision,
+            referenceImages,
             store: deps.improvementPrStore,
             pipeline: deps.improvementPrPipeline,
             publisher: deps.improvementPrPublisher,
@@ -642,25 +674,55 @@ async function handleImprove(
     const failedTotal = aiFailed + prFailed;
     const state: SlashHandlerOutcome["state"] =
       failedTotal > 0 ? "failed" : "succeeded";
-    const lines = [
-      `improvement_pr: processed ${summaries.length} ad_accounts`,
-      `succeeded=${succeeded} skipped_no_proposal=${skipped} auto_blocked=${autoBlocked} ai_failed=${aiFailed} pr_failed=${prFailed}`,
-    ];
-    const opened = summaries
-      .filter((s) => s.pullRequest)
-      .slice(0, 3)
-      .map(
-        (s) =>
-          `• ${s.accountKey}: PR #${s.pullRequest!.prNumber} ${s.pullRequest!.htmlUrl}`
-      );
-    if (opened.length > 0) {
-      lines.push("opened:");
-      lines.push(...opened);
-    }
     const url = deepLink(deps, "/improvements");
+    const text = formatImprovementReportForUser(
+      {
+        state,
+        startedAt: new Date(),
+        durationMs: null,
+        errorMessage: null,
+        output: {
+          accountsProcessed: summaries.length,
+          succeeded,
+          skipped_no_proposal: skipped,
+          auto_blocked: autoBlocked,
+          ai_failed: aiFailed,
+          pr_failed: prFailed,
+        },
+      },
+      summaries.map((s) => ({
+        level: s.status.endsWith("_failed") ? "error" : "info",
+        message: `improvement_pr account ${s.accountKey}`,
+        payload: {
+          accountKey: s.accountKey,
+          status: s.status,
+          decision: s.decision,
+          proposalCount: s.proposalCount,
+          errorMessage: s.errorMessage,
+        },
+      })),
+      summaries.map((s) => ({
+        action: s.pullRequest
+          ? "improvement_pr.opened"
+          : s.status.endsWith("_failed")
+            ? "improvement_pr.failed"
+            : "improvement_pr.skipped",
+        ref: s.pullRequest?.htmlUrl ?? null,
+        metadata: {
+          accountKey: s.accountKey,
+          summary: s.errorMessage ?? null,
+          classification: s.classification,
+          auditDecision: s.auditDecision,
+          prNumber: s.pullRequest?.prNumber ?? null,
+          htmlUrl: s.pullRequest?.htmlUrl ?? null,
+          proposals: [],
+        },
+      })),
+      deepLink(deps, "") ?? deps.webBaseUrl ?? ""
+    );
     const out: SlashHandlerOutcome = {
       state,
-      text: summarizeMessage(lines.join("\n")),
+      text: sanitizeText(text).slice(0, 3000),
       metadata: {
         accountsProcessed: summaries.length,
         succeeded,

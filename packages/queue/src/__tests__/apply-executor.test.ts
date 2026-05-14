@@ -53,7 +53,7 @@ function brand(initialState: "paused" | "active" = "paused"): BrandYaml {
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState,
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],
@@ -78,7 +78,7 @@ test("enforcePausedOnPlanAction rewrites create_campaign initialState=active to 
     name: "C1",
     objective: "OUTCOME_TRAFFIC",
     initialState: "active",
-    budget: { dailyUsd: 50 },
+    budget: { dailyBudget: 50 },
   });
   assert.equal(r.rewritten, true);
   assert.equal((r.action as { initialState: string }).initialState, "paused");
@@ -92,7 +92,7 @@ test("enforcePausedOnPlanAction leaves already-paused create unchanged", () => {
     name: "C1",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused" as const,
-    budget: { dailyUsd: 50 },
+    budget: { dailyBudget: 50 },
   };
   const r = enforcePausedOnPlanAction(action);
   assert.equal(r.rewritten, false);
@@ -307,7 +307,7 @@ test("runExecuteApply: plan with error finding fails before executor runs", asyn
         name: "C1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             id: "as1",
@@ -376,7 +376,7 @@ test("runExecuteApply: auth_error aborts apply and emits oauth.meta.reauth_requi
         name: "C1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
       {
@@ -384,7 +384,7 @@ test("runExecuteApply: auth_error aborts apply and emits oauth.meta.reauth_requi
         name: "C2",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],
@@ -447,7 +447,7 @@ test("runExecuteApply: api_error aborts apply and emits meta.api_error audit dri
         name: "C1",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
       {
@@ -455,7 +455,7 @@ test("runExecuteApply: api_error aborts apply and emits meta.api_error audit dri
         name: "C2",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],
@@ -1156,7 +1156,7 @@ test("runExecuteApply: persists campaign/adset/ad PAUSED hierarchy nodes with ex
         name: "Fall Campaign",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             id: "as-jp",
@@ -1275,7 +1275,7 @@ test("runExecuteApply: update_* actions update existing nodes without insert def
         name: "Old Name",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [adset],
       },
     ],
@@ -1293,11 +1293,11 @@ test("runExecuteApply: update_* actions update existing nodes without insert def
         name: "New Name",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             ...adset,
-            budget: { dailyUsd: 50 },
+            budget: { dailyBudget: 50 },
             ads: [{ ...adset.ads[0]!, creativeRef: "cr-2" }],
           },
         ],
@@ -1559,7 +1559,7 @@ test("runExecuteApply: update_* success WITHOUT externalId still persists hierar
         name: "Fall Old",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],
@@ -1575,7 +1575,7 @@ test("runExecuteApply: update_* success WITHOUT externalId still persists hierar
         name: "Fall New",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],
@@ -1734,7 +1734,7 @@ test("runExecuteApply: apply.executed audit metadata carries external_id and hie
         name: "Fall",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [
           {
             id: "as-jp",
@@ -1887,7 +1887,7 @@ test("runExecuteApply: apply.failed audit metadata identifies the failing action
         name: "Ok",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
       {
@@ -1895,7 +1895,7 @@ test("runExecuteApply: apply.failed audit metadata identifies the failing action
         name: "Fail",
         objective: "OUTCOME_TRAFFIC",
         initialState: "paused",
-        budget: { dailyUsd: 100 },
+        budget: { dailyBudget: 100 },
         adsets: [],
       },
     ],

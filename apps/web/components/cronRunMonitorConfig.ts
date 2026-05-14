@@ -8,6 +8,7 @@ export function cronRunMonitorConfigForPreset(presetName: string): {
 } {
   switch (presetName) {
     case "improvement_pr":
+    case "auto_creative_generation":
       return { pollIntervalMs: 5000, timeoutMs: 20 * MINUTE_MS };
     case "daily_report":
     case "today_report":

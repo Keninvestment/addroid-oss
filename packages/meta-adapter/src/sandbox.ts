@@ -62,8 +62,8 @@ export type SandboxVerb = "create" | "update" | "delete";
 export type MetaObjectStatus = "PAUSED" | "ACTIVE" | "ARCHIVED" | "DELETED";
 
 export interface SandboxBudget {
-  dailyUsd?: number;
-  lifetimeUsd?: number;
+  dailyBudget?: number;
+  lifetimeBudget?: number;
 }
 
 export interface SandboxCampaign {

@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { SLACK_BOT_SCOPES } from "@addroid/config";
 import { runAuthCommand } from "../commands/auth.js";
 
 interface Captured {
@@ -56,6 +57,13 @@ async function withEnv<T>(
       else process.env[k] = prev[k];
     }
   }
+}
+
+function parseCapturedJson<T>(stdout: string): T {
+  const marker = '{\n  "ok"';
+  const start = stdout.lastIndexOf(marker);
+  assert.notEqual(start, -1, `JSON output was not found in stdout: ${stdout}`);
+  return JSON.parse(stdout.slice(start)) as T;
 }
 
 const VALID = {
@@ -196,12 +204,12 @@ test("auth github は client id 未設定なら GitHub CLI の token を暗号�
       )
   );
   assert.equal(code, 0, out.stdout + out.stderr);
-  const parsed = JSON.parse(out.stdout.slice(out.stdout.indexOf("{"))) as {
+  const parsed = parseCapturedJson<{
     ok: boolean;
     provider: string;
     accountIdentifier: string;
     bootstrap: { status: string; reason: string };
-  };
+  }>(out.stdout);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.provider, "github");
   assert.equal(parsed.accountIdentifier, "octocat");
@@ -246,12 +254,12 @@ test("auth github mock は token を保存し bootstrap をスキップできる
       )
   );
   assert.equal(code, 0);
-  const parsed = JSON.parse(out.stdout) as {
+  const parsed = parseCapturedJson<{
     ok: boolean;
     provider: string;
     accountIdentifier: string;
     bootstrap: { status: string; reason: string };
-  };
+  }>(out.stdout);
   assert.equal(parsed.ok, true);
   assert.equal(parsed.provider, "github");
   assert.equal(parsed.accountIdentifier, "addroid-mock-user");
@@ -538,7 +546,7 @@ test("auth slack は 3 つすべて成功で oauth_tokens に upsert し 0 を�
       };
       const slackFetch = async (
         url: string,
-        init: { method: string; headers: Record<string, string>; body: string }
+        init: { method: string; headers: Record<string, string>; body?: string }
       ) => {
         if (url.endsWith("/auth.test")) {
           return {
@@ -565,7 +573,7 @@ test("auth slack は 3 つすべて成功で oauth_tokens に upsert し 0 を�
           };
         }
         if (url.endsWith("/chat.postMessage")) {
-          assert.match(init.body, new RegExp(VALID.channel));
+          assert.match(init.body ?? "", new RegExp(VALID.channel));
           return {
             ok: true,
             status: 200,
@@ -604,11 +612,13 @@ test("auth slack は 3 つすべて成功で oauth_tokens に upsert し 0 を�
       const args = upsertArgs[0]! as {
         where: { provider_accountIdentifier: { provider: string; accountIdentifier: string } };
         update: {
+          scopes: string[];
           accessTokenCiphertext: string;
           refreshTokenCiphertext: string;
           metadata: Record<string, unknown>;
         };
         create: {
+          scopes: string[];
           accessTokenCiphertext: string;
           refreshTokenCiphertext: string;
           metadata: Record<string, unknown>;
@@ -622,6 +632,8 @@ test("auth slack は 3 つすべて成功で oauth_tokens に upsert し 0 を�
       // ciphertext は v1 形式プレフィクスを持つ。
       assert.match(args.create.accessTokenCiphertext, /^v1\.aes256gcm\./);
       assert.match(args.create.refreshTokenCiphertext, /^v1\.aes256gcm\./);
+      assert.deepEqual(args.create.scopes, [...SLACK_BOT_SCOPES, "socket_mode"]);
+      assert.deepEqual(args.update.scopes, args.create.scopes);
       // metadata に team / channel / 直近 socket mode 時刻が入る。
       assert.equal(args.create.metadata["teamId"], "T012ABC");
       assert.equal(
@@ -636,7 +648,7 @@ test("auth slack は 3 つすべて成功で oauth_tokens に upsert し 0 を�
       assert.ok(!out.stdout.includes(VALID.xoxb));
       assert.ok(!out.stdout.includes(VALID.xapp));
       // JSON が parse 可能で ok:true を返している。
-      const parsed = JSON.parse(out.stdout);
+      const parsed = parseCapturedJson<Record<string, unknown>>(out.stdout);
       assert.equal(parsed.ok, true);
       assert.equal(parsed.teamId, "T012ABC");
       assert.ok(parsed.testMessageOkAt);

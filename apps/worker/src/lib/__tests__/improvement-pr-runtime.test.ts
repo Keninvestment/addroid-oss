@@ -47,7 +47,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 50
+      dailyBudget: 50
 `;
 
 test("plan validator returns available=false when rootDir is null", async () => {
@@ -76,8 +76,8 @@ test("plan validator applies gitops update and runs runPlanForRoot ok", async ()
   });
   try {
     const validator = createImprovementPrPlanValidator({ rootDir: dir });
-    // gitops outputs a diff that lowers dailyUsd from 50 to 40.
-    const newBrand = BASE_BRAND.replace("dailyUsd: 50", "dailyUsd: 40");
+    // gitops outputs a diff that lowers dailyBudget from 50 to 40.
+    const newBrand = BASE_BRAND.replace("dailyBudget: 50", "dailyBudget: 40");
     const out = await validator.validate({
       accountKey: "primary",
       files: [
@@ -101,7 +101,7 @@ test("plan validator applies gitops update and runs runPlanForRoot ok", async ()
       path.join(dir, "ads/accounts/primary/brand.yaml"),
       "utf8"
     );
-    assert.match(stillOriginal, /dailyUsd: 50/);
+    assert.match(stillOriginal, /dailyBudget: 50/);
   } finally {
     cleanup();
   }

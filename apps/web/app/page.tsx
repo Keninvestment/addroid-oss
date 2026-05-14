@@ -145,7 +145,25 @@ export default async function DashboardPage() {
 
       <div className="page-body">
         <div className="col-span-12">
-          <DashboardChatPanel />
+          <DashboardChatPanel
+            emptyText="「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「参考画像を添付してクリエイティブを生成」などを入力できます。"
+            examples={[
+              "日次レポートを取得して",
+              "入稿前チェックを実行して",
+              "Meta広告アカウントを同期して",
+              "参考画像を添付して、既存広告に近いトーンの新しいクリエイティブを生成して",
+              "広告アカウントの状態を確認して",
+              "毎朝9時に日次レポートを送る設定にして",
+            ]}
+            contextPrefix={[
+              "この画面は Web UI ダッシュボードの汎用チャットです。",
+              "ユーザーが添付画像や既存広告を参考にして新しいクリエイティブ案だけを生成したい場合は、generate_creatives の referenceImagePaths を使ってください。/creatives の Creative ID を指定して入稿PRに回す場合は promote_creative_submission を使ってください。広告作成、入稿、キャンペーン/広告セット作成、PR作成を明示していない限り propose_creative_submission は使わないでください。",
+              "遷移先URLが依頼文にある場合は generate_creatives / propose_creative_submission / promote_creative_submission の linkUrl または destinationUrl に入れてください。",
+              "添付画像そのものを最終広告素材として入稿したい依頼でのみ localMediaPaths を使ってください。",
+              "Meta へ直接変更せず、広告作成やクリエイティブ入稿は必ず GitOps PR と dry-run の経路を使ってください。",
+            ].join("\n")}
+            allowAttachments
+          />
         </div>
 
         <div className="col-span-6">
@@ -439,6 +457,7 @@ function workflowLabel(name: string): string {
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
+    auto_creative_generation: "自動クリエイティブ生成",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",
   };

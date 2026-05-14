@@ -900,6 +900,30 @@ test("DEFAULT_CREATIVE_QA_POLICY: a clean 1080x1080 mock-style asset with safe v
   assert.equal(result.overall, "qa_passed");
 });
 
+test("DEFAULT_CREATIVE_QA_POLICY: Codex-sized PNG below Meta max does not warn only for byte size", () => {
+  const safeVariant: ImagePromptVariant = {
+    prompt: "warm lounge ad creative with glass detail",
+    styleNotes: "clean, calm, premium",
+    negativePrompt: "",
+    variantKey: "v0",
+  };
+  const result = evaluateCreativeQa(
+    {
+      asset: makePngAsset({
+        variantKey: "v0",
+        width: 1080,
+        height: 1080,
+        bytes: Uint8Array.from([...PNG_SIG, ...new Array(2_450_000).fill(0)]),
+      }),
+      variant: safeVariant,
+    },
+    DEFAULT_CREATIVE_QA_POLICY
+  );
+
+  assert.equal(result.overall, "qa_passed");
+  assert.equal(result.checks.find((c) => c.kind === "quality")?.outcome, "pass");
+});
+
 test("DEFAULT_CREATIVE_QA_POLICY: a wrong-dimension asset is blocked from attachment", () => {
   // gate review finding: "wrong-size provider output is not blocked under the
   // production empty policy". DEFAULT_CREATIVE_QA_POLICY 適用時は dimensions

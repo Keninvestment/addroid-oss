@@ -124,12 +124,29 @@ export interface CreativeSpecQa {
   rationale: string | null;
 }
 
+export interface CreativeSpecAdText {
+  primaryText: string | null;
+  headline: string | null;
+  description: string | null;
+  callToAction: string | null;
+  rationale: string | null;
+}
+
+export interface CreativeSpecTextRecommendations {
+  primaryText: number | null;
+  headline: number | null;
+  description: number | null;
+}
+
 export interface CreativeSpec {
   prompt: string | null;
   negativePrompt: string | null;
   styleNotes: string | null;
   rationale: string | null;
   variantIndex: number | null;
+  adText: CreativeSpecAdText | null;
+  textVariants: CreativeSpecAdText[];
+  metaTextRecommendations: CreativeSpecTextRecommendations | null;
   qa: CreativeSpecQa | null;
 }
 
@@ -143,6 +160,17 @@ function readStr(v: unknown): string | null {
 
 function readNum(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function parseAdText(v: unknown): CreativeSpecAdText | null {
+  if (!isRecord(v)) return null;
+  return {
+    primaryText: readStr(v.primaryText),
+    headline: readStr(v.headline),
+    description: readStr(v.description),
+    callToAction: readStr(v.callToAction),
+    rationale: readStr(v.rationale),
+  };
 }
 
 export function parseCreativeSpec(spec: unknown): CreativeSpec {
@@ -165,12 +193,36 @@ export function parseCreativeSpec(spec: unknown): CreativeSpec {
       rationale: readStr(r.qa.rationale),
     };
   }
+  const adText =
+    parseAdText(r.adText) ??
+    (readStr(r.primaryText) || readStr(r.headline) || readStr(r.description) || readStr(r.callToAction)
+      ? {
+          primaryText: readStr(r.primaryText),
+          headline: readStr(r.headline),
+          description: readStr(r.description),
+          callToAction: readStr(r.callToAction),
+          rationale: readStr(r.rationale),
+        }
+      : null);
+  const textVariants = Array.isArray(r.textVariants)
+    ? r.textVariants.map(parseAdText).filter((v): v is CreativeSpecAdText => v !== null)
+    : [];
+  const recommendations = isRecord(r.metaTextRecommendations)
+    ? {
+        primaryText: readNum(r.metaTextRecommendations.primaryText),
+        headline: readNum(r.metaTextRecommendations.headline),
+        description: readNum(r.metaTextRecommendations.description),
+      }
+    : null;
   return {
     prompt: readStr(r.prompt),
     negativePrompt: readStr(r.negativePrompt),
     styleNotes: readStr(r.styleNotes),
     rationale: readStr(r.rationale),
     variantIndex: readNum(r.variantIndex),
+    adText,
+    textVariants,
+    metaTextRecommendations: recommendations,
     qa,
   };
 }

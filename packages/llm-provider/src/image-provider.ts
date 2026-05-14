@@ -51,6 +51,16 @@ export interface ImageVariationCondition {
   variantKey?: string;
 }
 
+export interface ImageReferenceInput {
+  /** Reference image bytes. Never expose external signed URLs past adapter boundary. */
+  bytes: Uint8Array;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  filename?: string;
+  sourceRef?: string;
+  /** Local path when the storage backend can safely expose one to local providers. */
+  localPath?: string;
+}
+
 export interface ImageGenerateRequest {
   /** 生成プロンプト本文 (Image Prompt Agent の出力)。 */
   prompt: string;
@@ -63,6 +73,11 @@ export interface ImageGenerateRequest {
    * Provider には送らず、ai_runs / 監査ログに残す。
    */
   purpose?: string;
+  /**
+   * Optional positive visual references. Providers that support image edits /
+   * image-conditioned generation should use these; others may ignore them.
+   */
+  referenceImages?: ImageReferenceInput[];
 }
 
 /**
@@ -104,6 +119,8 @@ export interface ImageGenerateResponseParameters {
   purpose: string | null;
   /** Variant 数 (= variationConditions.length)。冗長コピー。 */
   variantCount: number;
+  /** Reference image count actually passed to the provider. */
+  referenceImageCount?: number;
 }
 
 /**
@@ -270,6 +287,45 @@ export function validateImageGenerateRequest(
         providerName,
         `variationConditions[${i}].format must be 'png' or 'jpeg' if provided, got ${String(v.format)}`
       );
+    }
+  }
+  if (req.referenceImages !== undefined) {
+    if (!Array.isArray(req.referenceImages)) {
+      throw new ImageProviderInvalidRequestError(
+        providerName,
+        "referenceImages must be an array when provided"
+      );
+    }
+    if (req.referenceImages.length > 16) {
+      throw new ImageProviderInvalidRequestError(
+        providerName,
+        "referenceImages must contain at most 16 images"
+      );
+    }
+    for (let i = 0; i < req.referenceImages.length; i += 1) {
+      const ref = req.referenceImages[i]!;
+      if (!(ref.bytes instanceof Uint8Array) || ref.bytes.byteLength === 0) {
+        throw new ImageProviderInvalidRequestError(
+          providerName,
+          `referenceImages[${i}].bytes must be a non-empty Uint8Array`
+        );
+      }
+      if (ref.bytes.byteLength > 50 * 1024 * 1024) {
+        throw new ImageProviderInvalidRequestError(
+          providerName,
+          `referenceImages[${i}] exceeds 50MB`
+        );
+      }
+      if (
+        ref.mimeType !== "image/png" &&
+        ref.mimeType !== "image/jpeg" &&
+        ref.mimeType !== "image/webp"
+      ) {
+        throw new ImageProviderInvalidRequestError(
+          providerName,
+          `referenceImages[${i}].mimeType is not supported: ${String(ref.mimeType)}`
+        );
+      }
     }
   }
 }

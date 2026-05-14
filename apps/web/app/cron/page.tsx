@@ -109,7 +109,13 @@ export default async function CronSchedulesPage() {
 
   const dbByName = new Map(registered.map((r) => [r.name, r]));
   const userVisiblePresets = CRON_PRESETS.filter((preset) =>
-    ["github_poll", "daily_report", "today_report", "budget_guard", "improvement_pr"].includes(preset.name)
+    [
+      "daily_report",
+      "today_report",
+      "budget_guard",
+      "improvement_pr",
+      "auto_creative_generation",
+    ].includes(preset.name)
   );
   const rows: Row[] = userVisiblePresets.map((preset) => {
     const name = preset.name;
@@ -130,7 +136,7 @@ export default async function CronSchedulesPage() {
     <>
       <PageHeader
         title="自動実行"
-        subtitle="日次レポート、予算チェック、改善提案などを定期的に実行します。文章で新しい依頼も保存できます。"
+        subtitle="日次レポート、予算チェック、改善提案、自動クリエイティブ生成などを定期的に実行します。文章で新しい依頼も保存できます。"
         actions={
           <div style={{ display: "flex", gap: "var(--space-2)" }}>
             <Link href="/cron/runs" className="btn btn--ghost btn--sm">
@@ -306,6 +312,7 @@ function presetLabel(name: string): string {
     budget_guard: "予算チェック",
     automation_rules: "自動運用ルール",
     improvement_pr: "改善提案",
+    auto_creative_generation: "自動クリエイティブ生成",
     github_poll: "承認済み変更の確認",
     retention_cleanup: "古い履歴の整理",
   };

@@ -7,7 +7,7 @@
 //
 // the current implementation の制約:
 //   - GitHub Webhook を使わず、merged PR は github_poll cron で検知する。
-//   - daily_report / today_report / improvement_pr は登録のみで未起動。
+//   - daily_report / today_report / improvement_pr / auto_creative_generation は登録のみで未起動。
 //   - 自然言語カスタム cron は preset cron ではなく scheduled_task_run job で動く。
 
 export {
@@ -369,10 +369,13 @@ export {
   type ImprovementPrAuditOutput,
   type ImprovementPrAuditWriter,
   type ImprovementPrBudgetImpact,
+  type ImprovementPrBrandProfileContext,
   type ImprovementPrCopyOutput,
   type ImprovementPrCopyVariant,
   type ImprovementPrCreativeAttachment,
+  type ImprovementPrCreativeGenerationContext,
   type ImprovementPrCreativeLinkInput,
+  type ImprovementPrCreativeNodeContext,
   type ImprovementPrCreativePromptVariant,
   type ImprovementPrCreativeQaAssetCheck,
   type ImprovementPrCreativeQaIssue,

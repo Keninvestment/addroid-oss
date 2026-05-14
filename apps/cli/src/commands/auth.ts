@@ -37,6 +37,7 @@ import {
   resolveWebBinding,
   postSlackMessage,
   redactSecretTail,
+  SLACK_BOT_SCOPES,
   SlackApiError,
   SlackTokenValidationError,
   validateSlackInputs,
@@ -1987,6 +1988,7 @@ async function runAuthSlack(
     socketModeOkAt: socketOkAt,
     testMessageOkAt,
   });
+  const slackScopes = [...SLACK_BOT_SCOPES, "socket_mode"];
 
   const accessTokenCiphertext = crypto.encrypt(normalized.botToken);
   const refreshTokenCiphertext = crypto.encrypt(normalized.appToken);
@@ -2012,7 +2014,7 @@ async function runAuthSlack(
         },
       },
       update: {
-        scopes: [],
+        scopes: slackScopes,
         accessTokenCiphertext,
         refreshTokenCiphertext,
         connectedAt: socketOkAt,
@@ -2021,7 +2023,7 @@ async function runAuthSlack(
       create: {
         provider: "slack",
         accountIdentifier: authTest.team_id,
-        scopes: [],
+        scopes: slackScopes,
         accessTokenCiphertext,
         refreshTokenCiphertext,
         connectedAt: socketOkAt,

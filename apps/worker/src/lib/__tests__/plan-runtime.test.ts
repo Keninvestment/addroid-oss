@@ -79,7 +79,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 50
+      dailyBudget: 50
 `,
   });
   try {
@@ -118,7 +118,7 @@ campaigns:
     objective: OUTCOME_TRAFFIC
     initialState: active
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
 `,
   });
   try {
@@ -146,14 +146,14 @@ account:
   key: primary
   displayName: "Primary"
 guardrails:
-  maxDailyUsdPerCampaign: 50
+  maxDailyBudgetPerCampaign: 50
 campaigns:
   - id: fall
     name: Fall
     objective: OUTCOME_TRAFFIC
     initialState: paused
     budget:
-      dailyUsd: 100
+      dailyBudget: 100
 `,
   });
   try {
@@ -162,7 +162,7 @@ campaigns:
     assert.equal(out.risk, "error");
     assert.ok(
       out.validationErrors.some((e) =>
-        e.message.includes("maxDailyUsdPerCampaign")
+        e.message.includes("maxDailyBudgetPerCampaign")
       )
     );
     assert.equal(out.perAccount.length, 1);
@@ -188,7 +188,7 @@ campaigns:
     name: A
     objective: OUTCOME_TRAFFIC
     initialState: paused
-    budget: { dailyUsd: 10 }
+    budget: { dailyBudget: 10 }
 `,
     "ads/accounts/secondary/brand.yaml": `version: 1
 account:
@@ -199,7 +199,7 @@ campaigns:
     name: B
     objective: OUTCOME_TRAFFIC
     initialState: paused
-    budget: { dailyUsd: 20 }
+    budget: { dailyBudget: 20 }
 `,
   });
   try {
@@ -227,7 +227,7 @@ campaigns:
     name: Fall Promo
     objective: OUTCOME_TRAFFIC
     initialState: paused
-    budget: { dailyUsd: 50 }
+    budget: { dailyBudget: 50 }
 `,
   });
   try {
@@ -273,7 +273,7 @@ campaigns:
     name: Launch
     objective: OUTCOME_TRAFFIC
     initialState: active
-    budget: { dailyUsd: 100 }
+    budget: { dailyBudget: 100 }
 `,
   });
   try {

@@ -67,13 +67,13 @@ test("MockMetaSandbox runs the full create→activate→insights flow", () => {
     name: "Spring promo",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 50 },
+    budget: { dailyBudget: 50 },
   });
   assert.equal(campaign.status, "success");
   const campaignRow = sb.getCampaign(campaign.externalId);
   assert.ok(campaignRow);
   assert.equal(campaignRow!.status, "PAUSED");
-  assert.equal(campaignRow!.budget.dailyUsd, 50);
+  assert.equal(campaignRow!.budget.dailyBudget, 50);
 
   // 3) adset を campaign の下に作る
   const adset = sb.applyAction({
@@ -83,7 +83,7 @@ test("MockMetaSandbox runs the full create→activate→insights flow", () => {
     adsetId: "as-001",
     name: "JP 25-34",
     initialState: "paused",
-    budget: { dailyUsd: 25 },
+    budget: { dailyBudget: 25 },
     targeting: {
       countries: ["JP"],
       ageMin: 25,
@@ -180,7 +180,7 @@ test("MockMetaSandbox rejects ad whose creative ref is unknown", () => {
     name: "C",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   sb.applyAction({
     kind: "create_adset",
@@ -216,7 +216,7 @@ test("MockMetaSandbox rejects duplicate create on the same id", () => {
     name: "C",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused" as const,
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   };
   sb.applyAction(action);
   const err = expectSandboxError(() => sb.applyAction(action));
@@ -232,7 +232,7 @@ test("MockMetaSandbox.activate is idempotent on ACTIVE and rejects unknown ids",
     name: "C",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   const externalId = deriveExternalId({
     resource: "campaigns",
@@ -261,7 +261,7 @@ test("MockMetaSandbox update applies FieldChange.to into the live row", () => {
     name: "Initial",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   const result = sb.applyAction({
     kind: "update_campaign",
@@ -269,14 +269,14 @@ test("MockMetaSandbox update applies FieldChange.to into the live row", () => {
     campaignId: "cmp-001",
     changes: {
       name: { from: "Initial", to: "Updated" },
-      "budget.dailyUsd": { from: 10, to: 25 },
+      "budget.dailyBudget": { from: 10, to: 25 },
     },
   });
   assert.equal(result.status, "success");
   const row = sb.getCampaign(result.externalId);
   assert.ok(row);
   assert.equal(row!.name, "Updated");
-  assert.equal(row!.budget.dailyUsd, 25);
+  assert.equal(row!.budget.dailyBudget, 25);
 });
 
 test("MockMetaSandbox.delete is blocked while children still reference the row", () => {
@@ -288,7 +288,7 @@ test("MockMetaSandbox.delete is blocked while children still reference the row",
     name: "C",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   sb.applyAction({
     kind: "create_adset",
@@ -371,7 +371,7 @@ test("MockMetaSandbox.reset clears all state across accounts", () => {
     name: "C",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   sb.applyAction({
     kind: "create_campaign",
@@ -380,7 +380,7 @@ test("MockMetaSandbox.reset clears all state across accounts", () => {
     name: "C2",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   assert.equal(sb.listCampaigns().length, 2);
   sb.reset();
@@ -410,7 +410,7 @@ test("MockMetaSandbox account scoping: identical ids in different accounts do no
     name: "Team A",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   const b = sb.applyAction({
     kind: "create_campaign",
@@ -419,7 +419,7 @@ test("MockMetaSandbox account scoping: identical ids in different accounts do no
     name: "Team B",
     objective: "OUTCOME_TRAFFIC",
     initialState: "paused",
-    budget: { dailyUsd: 10 },
+    budget: { dailyBudget: 10 },
   });
   assert.notEqual(a.externalId, b.externalId);
   assert.equal(sb.getCampaign(a.externalId)?.name, "Team A");

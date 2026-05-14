@@ -30,11 +30,13 @@ export const SLACK_API_BASE_URL = "https://slack.com/api";
  */
 export type SlackFetch = (
   url: string,
-  init: { method: "POST"; headers: Record<string, string>; body: string }
+  init: { method: string; headers: Record<string, string>; body?: string }
 ) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
+  headers?: { get(name: string): string | null };
 }>;
 
 export interface SlackAuthInputs {
@@ -554,6 +556,149 @@ export async function postSlackMessage(
     },
     fetchImpl
   );
+}
+
+export interface SlackFileInfo {
+  id: string;
+  name?: string;
+  title?: string;
+  mimetype?: string;
+  filetype?: string;
+  size?: number;
+  url_private?: string;
+  url_private_download?: string;
+}
+
+export interface SlackFilesInfoResponse {
+  ok: true;
+  file: SlackFileInfo;
+}
+
+export async function getSlackFileInfo(
+  botToken: string,
+  fileId: string,
+  fetchImpl: SlackFetch = (globalThis as { fetch?: SlackFetch }).fetch as SlackFetch
+): Promise<SlackFileInfo> {
+  if (typeof fetchImpl !== "function") {
+    throw new SlackApiError(
+      "files.info",
+      0,
+      null,
+      "fetch が利用できません (Node 22+ で実行してください)"
+    );
+  }
+  const url = `${SLACK_API_BASE_URL}/files.info?${new URLSearchParams({ file: fileId }).toString()}`;
+  const res = await fetchImpl(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${botToken}` },
+  });
+  if (!res.ok) {
+    throw new SlackApiError(
+      "files.info",
+      res.status,
+      null,
+      `Slack files.info が HTTP ${res.status} を返しました`
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = await res.json();
+  } catch (err) {
+    throw new SlackApiError(
+      "files.info",
+      res.status,
+      null,
+      `Slack files.info の応答 JSON をパースできませんでした: ${(err as Error).message}`
+    );
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new SlackApiError(
+      "files.info",
+      res.status,
+      null,
+      "Slack files.info の応答が不正です (object でない)"
+    );
+  }
+  const response = parsed as Record<string, unknown>;
+  if (response["ok"] !== true) {
+    const slackError =
+      typeof response["error"] === "string" ? response["error"] : null;
+    const detail = slackResponseMetadataMessages(response);
+    throw new SlackApiError(
+      "files.info",
+      res.status,
+      slackError,
+      slackError
+        ? `Slack files.info が ok=false を返しました (${slackError}${detail ? `: ${detail}` : ""})`
+        : `Slack files.info が ok=false を返しました${detail ? `: ${detail}` : ""}`
+    );
+  }
+  const file = response["file"];
+  if (!file || typeof file !== "object" || Array.isArray(file)) {
+    throw new SlackApiError(
+      "files.info",
+      res.status,
+      null,
+      "Slack files.info の応答が不正です (file object がありません)"
+    );
+  }
+  return file as unknown as SlackFileInfo;
+}
+
+function slackResponseMetadataMessages(obj: Record<string, unknown>): string | null {
+  const metadata = obj["response_metadata"];
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const messages = (metadata as Record<string, unknown>)["messages"];
+  if (!Array.isArray(messages)) return null;
+  const text = messages.filter((v): v is string => typeof v === "string").join("; ");
+  return text || null;
+}
+
+export async function downloadSlackPrivateFile(
+  botToken: string,
+  url: string,
+  fetchImpl: SlackFetch = (globalThis as { fetch?: SlackFetch }).fetch as SlackFetch
+): Promise<{
+  bytes: Uint8Array;
+  contentType: string | null;
+  contentLength: number | null;
+}> {
+  if (typeof fetchImpl !== "function") {
+    throw new SlackApiError(
+      "files.download",
+      0,
+      null,
+      "fetch が利用できません (Node 22+ で実行してください)"
+    );
+  }
+  const res = await fetchImpl(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${botToken}` },
+  });
+  if (!res.ok) {
+    throw new SlackApiError(
+      "files.download",
+      res.status,
+      null,
+      `Slack file download が HTTP ${res.status} を返しました`
+    );
+  }
+  if (typeof res.arrayBuffer !== "function") {
+    throw new SlackApiError(
+      "files.download",
+      res.status,
+      null,
+      "Slack file download の応答が binary body を返しませんでした"
+    );
+  }
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const rawLength = res.headers?.get("content-length") ?? null;
+  const contentLength = rawLength ? Number(rawLength) : null;
+  return {
+    bytes,
+    contentType: res.headers?.get("content-type") ?? null,
+    contentLength: Number.isFinite(contentLength) ? contentLength : null,
+  };
 }
 
 /**

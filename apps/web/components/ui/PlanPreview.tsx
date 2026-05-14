@@ -389,10 +389,10 @@ function describeAction(a: PlanAction): ReactNode {
   }
 }
 
-function budgetSummary(b: { dailyUsd?: number; lifetimeUsd?: number }): string {
+function budgetSummary(b: { dailyBudget?: number; lifetimeBudget?: number }): string {
   const parts: string[] = [];
-  if (b.dailyUsd !== undefined) parts.push(`dailyUsd=${b.dailyUsd}`);
-  if (b.lifetimeUsd !== undefined) parts.push(`lifetimeUsd=${b.lifetimeUsd}`);
+  if (b.dailyBudget !== undefined) parts.push(`dailyBudget=${b.dailyBudget}`);
+  if (b.lifetimeBudget !== undefined) parts.push(`lifetimeBudget=${b.lifetimeBudget}`);
   return parts.length === 0 ? "(no budget)" : parts.join(" ");
 }
 

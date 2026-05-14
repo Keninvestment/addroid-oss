@@ -45,6 +45,16 @@ import {
   type OpsChangeProposalInput,
 } from "../../../worker/src/lib/ops-proposal-runtime.js";
 import {
+  createStandaloneCreativeGeneration,
+  createCreativeSubmissionProposal,
+  normalizeCreativeGenerationInput,
+  normalizeCreativeSubmissionInput,
+} from "../../../worker/src/lib/creative-submission-runtime.js";
+import {
+  createCreativePromotionProposals,
+  normalizeCreativePromotionBatchInput,
+} from "../../../worker/src/lib/creative-promotion-runtime.js";
+import {
   createAutomationRuleCalibrationUpdateProposal,
   createAutomationRuleProposal,
   type AutomationRuleCalibrationUpdateInput,
@@ -62,6 +72,7 @@ import {
   enqueueAgentTaskNow,
   scheduleAgentTaskNextRun,
 } from "../../../worker/src/lib/agent-task-runtime.js";
+import { formatImprovementReportForUser } from "../../../worker/src/lib/improvement-report-format.js";
 import {
   saveBudgetGuardPolicyConfig,
   type BudgetGuardPolicyConfigInput,
@@ -85,6 +96,7 @@ interface ParsedChatArgs {
   once?: string;
   yes: boolean;
   model?: string;
+  referenceImagePaths: string[];
 }
 
 export interface ChatCommandOverrides {
@@ -122,6 +134,9 @@ const ADDROID_BOT = [
 
 const SLASH_COMMANDS = [
   { command: "/help", description: "使い方と例を表示" },
+  { command: "/attach", description: "次の依頼に参考画像を添付" },
+  { command: "/attachments", description: "添付中の参考画像を表示" },
+  { command: "/clear-attachments", description: "添付中の参考画像をクリア" },
   { command: "/status", description: "接続・起動状態を確認" },
   { command: "/report", description: "日次レポートを取得" },
   { command: "/submit", description: "入稿前チェックを実行" },
@@ -175,6 +190,7 @@ export async function runChatCommand(
         agentContext,
         userFacingTools: !overrides.runCommand,
         chatMemory,
+        referenceImagePaths: parsed.referenceImagePaths,
       });
     } finally {
       await providerResult.close?.();
@@ -194,6 +210,7 @@ export async function runChatCommand(
     );
   }
   printSplash(out, providerResult, env);
+  const pendingReferenceImagePaths = [...parsed.referenceImagePaths];
   const inputStream = overrides.input ?? defaultStdin;
   const rl = shouldUseRichPrompt(inputStream, out)
     ? null
@@ -214,6 +231,11 @@ export async function runChatCommand(
         return 0;
       }
       if (input.startsWith("/")) {
+        const attachment = await handleAttachmentSlashCommand(input, {
+          out,
+          referenceImagePaths: pendingReferenceImagePaths,
+        });
+        if (attachment.handled) continue;
         const slash = await handleSlashCommand(input, {
           out,
           runCommand: overrides.runCommand ?? defaultRunChatCommand,
@@ -237,6 +259,7 @@ export async function runChatCommand(
         agentContext,
         userFacingTools: !overrides.runCommand,
         chatMemory,
+        referenceImagePaths: pendingReferenceImagePaths,
       });
       if (code !== 0 && code !== 130) out.write(`tool exited with ${code}\n`);
     }
@@ -285,6 +308,64 @@ async function handleSlashCommand(
   }
 }
 
+async function handleAttachmentSlashCommand(
+  input: string,
+  opts: {
+    out: NodeJS.WritableStream;
+    referenceImagePaths: string[];
+  }
+): Promise<{ handled: boolean }> {
+  const [command = "", ...args] = input.trim().split(/\s+/);
+  if (command === "/attachments") {
+    if (opts.referenceImagePaths.length === 0) {
+      opts.out.write("参考画像は添付されていません。\n");
+    } else {
+      opts.out.write(
+        [
+          "添付中の参考画像:",
+          ...opts.referenceImagePaths.map((p, i) => `- ${i + 1}: ${p}`),
+          "",
+        ].join("\n")
+      );
+    }
+    return { handled: true };
+  }
+  if (command === "/clear-attachments") {
+    opts.referenceImagePaths.splice(0, opts.referenceImagePaths.length);
+    opts.out.write("参考画像の添付をクリアしました。\n");
+    return { handled: true };
+  }
+  if (command !== "/attach") return { handled: false };
+  if (args.length === 0) {
+    opts.out.write("使い方: /attach <参考画像パス> [追加パス...]\n");
+    return { handled: true };
+  }
+  const added: string[] = [];
+  for (const raw of args) {
+    const abs = path.resolve(raw);
+    const ext = path.extname(abs).toLowerCase();
+    if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
+      opts.out.write(`skip: 参考画像として未対応の形式です: ${raw}\n`);
+      continue;
+    }
+    const stat = await fs.stat(abs).catch(() => null);
+    if (!stat?.isFile()) {
+      opts.out.write(`skip: ファイルが見つかりません: ${raw}\n`);
+      continue;
+    }
+    if (!opts.referenceImagePaths.includes(abs)) {
+      opts.referenceImagePaths.push(abs);
+      added.push(abs);
+    }
+  }
+  opts.out.write(
+    added.length > 0
+      ? `参考画像を ${added.length} 件添付しました。次のクリエイティブ生成依頼で使います。\n`
+      : "追加された参考画像はありません。\n"
+  );
+  return { handled: true };
+}
+
 async function handleChatInput(
   input: string,
   opts: {
@@ -297,10 +378,12 @@ async function handleChatInput(
     agentContext: AgentContext;
     userFacingTools: boolean;
     chatMemory?: ChatMemory;
+    referenceImagePaths?: string[];
   }
 ): Promise<number> {
   const progress = createWorkingIndicator(opts.out, opts.input);
   const agentContext = appendChatMemoryToAgentContext(opts.agentContext, opts.chatMemory);
+  const effectiveInput = appendReferenceImageContext(input, opts.referenceImagePaths ?? []);
   let finalMessage = "";
   let lastCode = 0;
   const toolSummaries: string[] = [];
@@ -313,7 +396,7 @@ async function handleChatInput(
     try {
       response = await progress.run(
         runAgentTurn({
-          input: buildAgentLoopInput(input, loopExecutions),
+          input: buildAgentLoopInput(effectiveInput, loopExecutions),
           provider: opts.provider,
           agentContext,
           model: opts.model,
@@ -523,13 +606,21 @@ async function executeUserFacingTool(
     agentContext: AgentContext;
     provider: LLMProvider;
     model?: string;
+    referenceImagePaths?: string[];
   }
 ): Promise<{ handled: true; code: number; message: string; data?: unknown } | { handled: false }> {
   if (tool.tool === "get_report") {
     const kind = typeof tool.toolArgs.kind === "string" ? tool.toolArgs.kind : "daily";
-    if (normalizeReportKind(kind) !== "daily") return { handled: false };
-    const code = await runDailyReportForChat(tool, opts);
-    return { handled: true, code, message: `daily report exit ${code}` };
+    const reportKind = normalizeReportKind(kind);
+    if (reportKind === "daily") {
+      const code = await runDailyReportForChat(tool, opts);
+      return { handled: true, code, message: `daily report exit ${code}` };
+    }
+    if (reportKind === "improvement") {
+      const code = await runImprovementReportForChat(tool, opts);
+      return { handled: true, code, message: `improvement report exit ${code}` };
+    }
+    return { handled: false };
   }
   if (tool.tool === "check_submission") {
     const code = await runSubmissionCheckForChat(tool, opts);
@@ -558,6 +649,15 @@ async function executeUserFacingTool(
   if (tool.tool === "propose_ops_change") {
     return await proposeOpsChangeForChat(tool, opts);
   }
+  if (tool.tool === "propose_creative_submission") {
+    return await proposeCreativeSubmissionForChat(tool, opts);
+  }
+  if (tool.tool === "generate_creatives") {
+    return await generateCreativesForChat(tool, opts);
+  }
+  if (tool.tool === "promote_creative_submission") {
+    return await promoteCreativeSubmissionForChat(tool, opts);
+  }
   if (tool.tool === "propose_automation_rule") {
     return await proposeAutomationRuleForChat(tool, opts);
   }
@@ -576,10 +676,53 @@ function toolSignature(tool: Awaited<ReturnType<typeof runAgentTurn>>["toolResul
   }
 }
 
+function appendReferenceImageContext(input: string, paths: string[]): string {
+  if (paths.length === 0) return input;
+  return [
+    input,
+    "",
+    "参考画像はこのローカルパスに添付済みです。",
+    "新しいクリエイティブ案だけを生成する場合は generate_creatives の referenceImagePaths にこの配列をそのまま指定してください。",
+    "/creatives の Creative ID を指定して入稿PRに回す場合は promote_creative_submission を使ってください。",
+    "広告作成・入稿・PR作成を明示された場合は propose_creative_submission の referenceImagePaths に指定してください。",
+    "遷移先URLが依頼文にある場合は generate_creatives / propose_creative_submission / promote_creative_submission の linkUrl または destinationUrl に指定してください。",
+    "添付そのものを最終広告素材として入稿する場合だけ localMediaPaths に指定してください。",
+    JSON.stringify(paths),
+  ].join("\n");
+}
+
+function mergeReferenceImagePaths(
+  args: Record<string, unknown>,
+  paths: string[]
+): Record<string, unknown> {
+  if (paths.length === 0) return args;
+  if (Array.isArray(args.localMediaPaths) && args.localMediaPaths.length > 0) return args;
+  const existing = Array.isArray(args.referenceImagePaths)
+    ? args.referenceImagePaths.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
+  return {
+    ...args,
+    referenceImagePaths: [...new Set([...existing, ...paths])],
+    generateImage: args.generateImage === false ? false : true,
+  };
+}
+
 function normalizeReportKind(value: string): "daily" | "budget" | "improvement" {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   if (v === "budget" || v === "budget_guard") return "budget";
-  if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement";
+  if (
+    v === "improvement" ||
+    v === "improvements" ||
+    v === "improvement_pr" ||
+    v === "creative" ||
+    v === "creatives" ||
+    v === "creative_generation" ||
+    v === "auto_creative" ||
+    v === "auto_creative_generation" ||
+    v === "自動クリエイティブ生成"
+  ) {
+    return "improvement";
+  }
   return "daily";
 }
 
@@ -729,12 +872,84 @@ async function runDailyReportForChat(
   }
 }
 
+async function runImprovementReportForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    input?: NodeJS.ReadableStream;
+    env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
+  }
+): Promise<number> {
+  if (!opts.env.DATABASE_URL) {
+    opts.out.write("改善提案を作成できません。先に `addroid init` を完了してください。\n");
+    return 2;
+  }
+
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    ctx = await prepareChatCronContext(opts.env);
+    const preset = "improvement_pr";
+    const jobId = await ctx.boss.send(preset, {
+      manual: true,
+      requestedBy: "agent:cli-chat",
+      requestedAt: new Date().toISOString(),
+    });
+    if (!jobId) {
+      opts.out.write(
+        [
+          "改善提案は既に実行中、または重複抑止により新しいジョブは作成されませんでした。",
+          `完了後はこちらで確認できます: ${opts.agentContext.webUrl}/improvements`,
+          "",
+        ].join("\n")
+      );
+      return 0;
+    }
+
+    const progress = createWorkingIndicator(opts.out, opts.input, "改善提案を作成中");
+    const run = await progress.run(waitForCronRun(ctx.prisma, jobId, preset, 300_000));
+    if (!run) {
+      opts.out.write(
+        [
+          "改善提案を実行キューに積みました。まだ完了していません。",
+          `完了後はこちらで確認できます: ${opts.agentContext.webUrl}/improvements`,
+          `詳細: jobId=${jobId}`,
+          "",
+        ].join("\n")
+      );
+      return 0;
+    }
+
+    const [logs, audits] = await Promise.all([
+      ctx.prisma.executionLog.findMany({
+        where: { cronRunId: run.id },
+        orderBy: { createdAt: "asc" },
+        select: { level: true, message: true, payload: true },
+      }),
+      loadImprovementAuditsForCronRun(ctx.prisma, ctx.workspaceId, run.id),
+    ]);
+    opts.out.write(formatImprovementReportForUser(run, logs, audits, opts.agentContext.webUrl));
+    return run.state === "failed" ? 1 : 0;
+  } catch (err) {
+    if (err instanceof ChatInterruptedError) {
+      opts.out.write("改善提案の完了待ちを中断しました。処理自体は継続している場合があります。\n");
+      return 130;
+    }
+    opts.out.write(`改善提案を作成できませんでした: ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
 async function createScheduledAgentTaskForChat(
   tool: ReadyAgentTool,
   opts: {
     out: NodeJS.WritableStream;
     env: NodeJS.ProcessEnv;
     agentContext: AgentContext;
+    provider: LLMProvider;
+    referenceImagePaths?: string[];
   }
 ): Promise<number> {
   if (!opts.env.DATABASE_URL) {
@@ -883,6 +1098,8 @@ async function proposeOpsChangeForChat(
     out: NodeJS.WritableStream;
     env: NodeJS.ProcessEnv;
     agentContext: AgentContext;
+    provider: LLMProvider;
+    referenceImagePaths?: string[];
   }
 ): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
   if (!opts.env.DATABASE_URL) {
@@ -911,6 +1128,158 @@ async function proposeOpsChangeForChat(
     return { handled: true, code: 0, message, data: result };
   } catch (err) {
     const message = `GitOps PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function proposeCreativeSubmissionForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
+    provider: LLMProvider;
+    referenceImagePaths?: string[];
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "クリエイティブ入稿 PR を作成できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const [{ resolveGithubAdapter }] = await Promise.all([
+      import("../../../worker/src/lib/github-adapter-wiring.js"),
+    ]);
+    ctx = await prepareChatCronContext(opts.env);
+    const github = await resolveGithubAdapter({ prisma: ctx.prisma, env: opts.env });
+    const result = await createCreativeSubmissionProposal({
+      prisma: ctx.prisma,
+      githubAdapter: github.adapter,
+      workspaceId: ctx.workspaceId,
+      input: normalizeCreativeSubmissionInput(
+        mergeReferenceImagePaths(tool.toolArgs, opts.referenceImagePaths ?? [])
+      ),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+      llmProvider: opts.provider,
+    });
+    const message =
+      `クリエイティブ入稿 PR #${result.prNumber} を作成しました。` +
+      "人間の承認・merge 後に PAUSED で作成されます。";
+    opts.out.write([
+      message,
+      `承認: ${opts.agentContext.webUrl}/approvals/${result.prNumber}`,
+      result.htmlUrl,
+      "",
+    ].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `クリエイティブ入稿 PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function promoteCreativeSubmissionForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
+    provider: LLMProvider;
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "生成済みクリエイティブの入稿 PR を作成できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    const [{ resolveGithubAdapter }] = await Promise.all([
+      import("../../../worker/src/lib/github-adapter-wiring.js"),
+    ]);
+    ctx = await prepareChatCronContext(opts.env);
+    const github = await resolveGithubAdapter({ prisma: ctx.prisma, env: opts.env });
+    const result = await createCreativePromotionProposals({
+      prisma: ctx.prisma,
+      githubAdapter: github.adapter,
+      workspaceId: ctx.workspaceId,
+      input: normalizeCreativePromotionBatchInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+      llmProvider: opts.provider,
+    });
+    const prLabel =
+      result.count === 1
+        ? `#${result.prNumbers[0]}`
+        : result.prNumbers.map((n) => `#${n}`).join(", ");
+    const message =
+      `生成済みクリエイティブ ${result.count} 件を入稿 PR ${prLabel} に回しました。` +
+      "人間の承認・merge 後に PAUSED で作成されます。";
+    opts.out.write([
+      message,
+      `承認: ${opts.agentContext.webUrl}/approvals`,
+      ...result.htmlUrls,
+      "",
+    ].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `生成済みクリエイティブの入稿 PR を作成できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function generateCreativesForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+    agentContext: AgentContext;
+    provider: LLMProvider;
+    referenceImagePaths?: string[];
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "クリエイティブ生成を実行できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    ctx = await prepareChatCronContext(opts.env);
+    const result = await createStandaloneCreativeGeneration({
+      prisma: ctx.prisma,
+      workspaceId: ctx.workspaceId,
+      input: normalizeCreativeGenerationInput(
+        mergeReferenceImagePaths(tool.toolArgs, opts.referenceImagePaths ?? [])
+      ),
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+      env: opts.env,
+      llmProvider: opts.provider,
+    });
+    const message = result.message;
+    opts.out.write([
+      message,
+      `${opts.agentContext.webUrl}/creatives`,
+      "",
+    ].join("\n"));
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `クリエイティブ生成を実行できませんでした: ${(err as Error).message}`;
     opts.out.write(`${message}\n`);
     return { handled: true, code: 1, message };
   } finally {
@@ -1092,6 +1461,32 @@ async function waitForCronRun(
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
   return null;
+}
+
+async function loadImprovementAuditsForCronRun(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  prisma: any,
+  workspaceId: string,
+  cronRunId: string
+): Promise<Array<{ action: string; ref: string | null; metadata: unknown }>> {
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      workspaceId,
+      action: { startsWith: "improvement_pr." },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    select: { action: true, ref: true, metadata: true },
+  });
+  return rows.filter((row: { metadata: unknown }) => {
+    const metadata = row.metadata;
+    return (
+      typeof metadata === "object" &&
+      metadata !== null &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).cronRunId === cronRunId
+    );
+  });
 }
 
 interface DailyReportUserSummary {
@@ -1983,6 +2378,16 @@ function normalizePresetName(value: string): string {
   if (v === "today" || v === "current" || v === "today_report") return "today_report";
   if (v === "budget" || v === "budget_guard") return "budget_guard";
   if (v === "improvement" || v === "improvements" || v === "improvement_pr") return "improvement_pr";
+  if (
+    v === "creative" ||
+    v === "creatives" ||
+    v === "creative_generation" ||
+    v === "auto_creative" ||
+    v === "auto_creative_generation" ||
+    v === "自動クリエイティブ生成"
+  ) {
+    return "auto_creative_generation";
+  }
   if (v === "github" || v === "github_poll") return "github_poll";
   if (v === "retention" || v === "retention_sweep") return "retention_sweep";
   return v;
@@ -2620,6 +3025,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "Usage:",
       "  addroid chat",
       "  addroid chat --once \"日次レポートを取得\"",
+      "  addroid chat --reference-image ./ref.png --once \"この画像を参考にクリエイティブ生成\"",
       "",
       "Examples:",
       "  日次レポートを取得",
@@ -2633,6 +3039,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "  - 入力欄で `/` を押すと利用できるコマンド候補を表示します。",
       "  - 対話入力では Enter で送信、Shift+Enter で改行します。",
       "  - `/report`, `/submit`, `/connect github`, `/account`, `/schedule`, `/open`, `/status` を直接実行できます。",
+      "  - 参考画像は `/attach ./ref.png` で次のクリエイティブ生成依頼に添付できます。",
       "  - LLM は AGENTS.md と主要 docs を参照して AdDroid tool を直接実行します。",
       "  - 任意 shell / restore / 破壊的 git / secret 表示 / approval 迂回の Meta 変更は拒否します。",
       "  - --yes は旧バージョン互換のため受け付けますが、chat では確認プロンプトを出しません。",
@@ -2642,7 +3049,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
 }
 
 function parseChatArgs(args: string[]): ParsedChatArgs {
-  const parsed: ParsedChatArgs = { help: false, yes: false };
+  const parsed: ParsedChatArgs = { help: false, yes: false, referenceImagePaths: [] };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i]!;
     if (a === "--help" || a === "-h") parsed.help = true;
@@ -2659,6 +3066,14 @@ function parseChatArgs(args: string[]): ParsedChatArgs {
       parsed.model = next;
     } else if (a.startsWith("--model=")) {
       parsed.model = a.slice("--model=".length);
+    } else if (a === "--reference-image" || a === "--ref-image") {
+      const next = args[++i];
+      if (!next) throw new Error(`${a} requires a value`);
+      parsed.referenceImagePaths.push(path.resolve(next));
+    } else if (a.startsWith("--reference-image=")) {
+      parsed.referenceImagePaths.push(path.resolve(a.slice("--reference-image=".length)));
+    } else if (a.startsWith("--ref-image=")) {
+      parsed.referenceImagePaths.push(path.resolve(a.slice("--ref-image=".length)));
     } else if (!a.startsWith("--") && !parsed.once) {
       parsed.once = [a, ...args.slice(i + 1)].join(" ");
       break;

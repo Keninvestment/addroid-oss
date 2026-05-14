@@ -24,6 +24,7 @@
 // 取得し、メソッドスコープでのみ保持する。
 
 import { spawn as nodeSpawn } from "node:child_process";
+import { LocalDiskStorage } from "@addroid/config";
 import {
   MetaAdapterUnauthenticatedError,
   MetaCliMissingTokenError,
@@ -172,7 +173,7 @@ function mockSuccessPayloadEnvelope(
  * - access token / ad account id は決して args に乗せない。CLI runner 側が公式
  *   CLI 互換 env (`ACCESS_TOKEN` / `AD_ACCOUNT_ID`) として注入する。
  */
-function planActionToCliArgs(action: PlanAction): {
+function planActionToCliArgs(action: PlanAction, accountCurrency = "USD"): {
   args: string[];
   resource: string;
   verb: string;
@@ -186,30 +187,23 @@ function planActionToCliArgs(action: PlanAction): {
           "ads",
           "campaign",
           "create",
-          "--id",
-          action.campaignId,
           "--name",
           action.name,
           "--objective",
-          action.objective,
-          "--initial-state",
-          action.initialState,
-          ...budgetFlags(action.budget),
+          cliEnum(action.objective),
+          "--status",
+          cliEnum(action.initialState),
+          ...budgetFlags(action.budget, accountCurrency),
+          ...(action.adsetBudgetSharing !== undefined
+            ? [action.adsetBudgetSharing ? "--adset-budget-sharing" : "--no-adset-budget-sharing"]
+            : []),
         ],
       };
     case "update_campaign":
       return {
         resource: "campaigns",
         verb: "update",
-        args: [
-          "ads",
-          "campaign",
-          "update",
-          "--id",
-          action.campaignId,
-          "--changes",
-          JSON.stringify(action.changes),
-        ],
+        args: ["ads", "campaign", "update", action.campaignId, ...changeFlags(action.changes, accountCurrency)],
       };
     case "create_adset":
       return {
@@ -219,34 +213,31 @@ function planActionToCliArgs(action: PlanAction): {
           "ads",
           "adset",
           "create",
-          "--campaign",
           action.campaignId,
-          "--id",
-          action.adsetId,
           "--name",
           action.name,
-          "--initial-state",
-          action.initialState,
-          ...(action.budget ? budgetFlags(action.budget) : []),
-          "--targeting",
-          JSON.stringify(action.targeting),
+          "--status",
+          cliEnum(action.initialState),
+          ...(action.optimizationGoal ? ["--optimization-goal", cliEnum(action.optimizationGoal)] : []),
+          ...(action.billingEvent ? ["--billing-event", cliEnum(action.billingEvent)] : []),
+          ...(action.budget ? budgetFlags(action.budget, accountCurrency) : []),
+          ...(action.bidAmount !== undefined
+            ? ["--bid-amount", amountToMinorUnits(action.bidAmount, accountCurrency)]
+            : []),
+          ...(action.startTime ? ["--start-time", action.startTime] : []),
+          ...(action.endTime ? ["--end-time", action.endTime] : []),
+          ...(action.targeting.countries.length > 0
+            ? ["--targeting-countries", action.targeting.countries.join(",")]
+            : []),
+          ...(action.pixelId ? ["--pixel-id", action.pixelId] : []),
+          ...(action.customEventType ? ["--custom-event-type", cliEnum(action.customEventType)] : []),
         ],
       };
     case "update_adset":
       return {
         resource: "adsets",
         verb: "update",
-        args: [
-          "ads",
-          "adset",
-          "update",
-          "--campaign",
-          action.campaignId,
-          "--id",
-          action.adsetId,
-          "--changes",
-          JSON.stringify(action.changes),
-        ],
+        args: ["ads", "adset", "update", action.adsetId, ...changeFlags(action.changes, accountCurrency)],
       };
     case "create_ad":
       return {
@@ -256,37 +247,22 @@ function planActionToCliArgs(action: PlanAction): {
           "ads",
           "ad",
           "create",
-          "--campaign",
-          action.campaignId,
-          "--adset",
           action.adsetId,
-          "--id",
-          action.adId,
           "--name",
           action.name,
-          "--creative",
+          "--creative-id",
           action.creativeRef,
-          "--initial-state",
-          action.initialState,
+          "--status",
+          cliEnum(action.initialState),
+          ...(action.pixelId ? ["--pixel-id", action.pixelId] : []),
+          ...(action.trackingSpecs ? ["--tracking-specs", JSON.stringify(action.trackingSpecs)] : []),
         ],
       };
     case "update_ad":
       return {
         resource: "ads",
         verb: "update",
-        args: [
-          "ads",
-          "ad",
-          "update",
-          "--campaign",
-          action.campaignId,
-          "--adset",
-          action.adsetId,
-          "--id",
-          action.adId,
-          "--changes",
-          JSON.stringify(action.changes),
-        ],
+        args: ["ads", "ad", "update", action.adId, ...changeFlags(action.changes, accountCurrency)],
       };
     case "create_creative":
       return {
@@ -296,30 +272,30 @@ function planActionToCliArgs(action: PlanAction): {
           "ads",
           "creative",
           "create",
-          "--id",
-          action.creativeId,
           "--name",
           action.name,
-          "--media-type",
-          action.mediaType,
-          ...(action.headline ? ["--headline", action.headline] : []),
-          ...(action.primaryText ? ["--primary-text", action.primaryText] : []),
-          ...(action.callToAction ? ["--cta", action.callToAction] : []),
+          ...(action.pageId ? ["--page-id", action.pageId] : []),
+          ...(action.storageKey && action.mediaType === "image" ? ["--image", fileArg(action.storageKey)] : []),
+          ...(action.storageKey && action.mediaType === "video" ? ["--video", fileArg(action.storageKey)] : []),
+          ...(action.body ?? action.primaryText ? ["--body", action.body ?? action.primaryText ?? ""] : []),
+          ...(action.title ?? action.headline ? ["--title", action.title ?? action.headline ?? ""] : []),
+          ...(action.linkUrl ? ["--link-url", action.linkUrl] : []),
+          ...(action.description ? ["--description", action.description] : []),
+          ...(action.callToAction ? ["--call-to-action", cliEnum(action.callToAction)] : []),
+          ...(action.instagramActorId ? ["--instagram-actor-id", action.instagramActorId] : []),
+          ...repeatFlags("--images", action.images?.map(fileArg)),
+          ...repeatFlags("--videos", action.videos?.map(fileArg)),
+          ...repeatFlags("--titles", action.titles),
+          ...repeatFlags("--bodies", action.bodies),
+          ...repeatFlags("--descriptions", action.descriptions),
+          ...repeatFlags("--call-to-actions", action.callToActions?.map(cliEnum)),
         ],
       };
     case "update_creative":
       return {
         resource: "creatives",
         verb: "update",
-        args: [
-          "ads",
-          "creative",
-          "update",
-          "--id",
-          action.creativeId,
-          "--changes",
-          JSON.stringify(action.changes),
-        ],
+        args: ["ads", "creative", "update", action.creativeId, ...changeFlags(action.changes, accountCurrency)],
       };
     // delete_* / experiment_* は META_CLI_SUPPORTED_OPERATIONS に未登録 (fail closed)。
     default:
@@ -327,11 +303,133 @@ function planActionToCliArgs(action: PlanAction): {
   }
 }
 
-function budgetFlags(b: { dailyUsd?: number; lifetimeUsd?: number }): string[] {
+function budgetFlags(
+  b: { dailyBudget?: number; lifetimeBudget?: number },
+  accountCurrency: string
+): string[] {
   const out: string[] = [];
-  if (b.dailyUsd !== undefined) out.push("--daily-usd", String(b.dailyUsd));
-  if (b.lifetimeUsd !== undefined) out.push("--lifetime-usd", String(b.lifetimeUsd));
+  if (b.dailyBudget !== undefined) {
+    out.push("--daily-budget", amountToMinorUnits(b.dailyBudget, accountCurrency));
+  }
+  if (b.lifetimeBudget !== undefined) {
+    out.push("--lifetime-budget", amountToMinorUnits(b.lifetimeBudget, accountCurrency));
+  }
   return out;
+}
+
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "BIF",
+  "CLP",
+  "DJF",
+  "GNF",
+  "JPY",
+  "KMF",
+  "KRW",
+  "MGA",
+  "PYG",
+  "RWF",
+  "UGX",
+  "VND",
+  "VUV",
+  "XAF",
+  "XOF",
+  "XPF",
+]);
+
+function amountToMinorUnits(value: number, accountCurrency: string): string {
+  const currency = accountCurrency.trim().toUpperCase();
+  const multiplier = ZERO_DECIMAL_CURRENCIES.has(currency) ? 1 : 100;
+  return String(Math.round(value * multiplier));
+}
+
+function cliEnum(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function fileArg(value: string): string {
+  if (pathLike(value)) return value;
+  try {
+    return new LocalDiskStorage().resolve(value);
+  } catch {
+    return value;
+  }
+}
+
+function pathLike(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || /^[A-Za-z]:[\\/]/.test(value);
+}
+
+function repeatFlags(flag: string, values: readonly string[] | undefined): string[] {
+  return (values ?? []).flatMap((value) => [flag, value]);
+}
+
+function changeFlags(
+  changes: Record<string, { to?: unknown }>,
+  accountCurrency: string
+): string[] {
+  const out: string[] = [];
+  for (const [key, change] of Object.entries(changes)) {
+    const value = change?.to;
+    if (value === undefined || value === null) continue;
+    switch (key) {
+      case "name":
+        out.push("--name", String(value));
+        break;
+      case "initialState":
+        out.push("--status", cliEnum(String(value)));
+        break;
+      case "budget":
+        if (isRecord(value)) {
+          out.push(...budgetFlags(value as { dailyBudget?: number; lifetimeBudget?: number }, accountCurrency));
+        }
+        break;
+      case "bidAmount":
+        if (typeof value === "number") out.push("--bid-amount", amountToMinorUnits(value, accountCurrency));
+        break;
+      case "endTime":
+        out.push("--end-time", String(value));
+        break;
+      case "creativeRef":
+        out.push("--creative-id", String(value));
+        break;
+      case "pixelId":
+        out.push("--pixel-id", String(value));
+        break;
+      case "trackingSpecs":
+        out.push("--tracking-specs", JSON.stringify(value));
+        break;
+      case "headline":
+      case "title":
+        out.push("--title", String(value));
+        break;
+      case "primaryText":
+      case "body":
+        out.push("--body", String(value));
+        break;
+      case "linkUrl":
+        out.push("--link-url", String(value));
+        break;
+      case "description":
+        out.push("--description", String(value));
+        break;
+      case "callToAction":
+        out.push("--call-to-action", cliEnum(String(value)));
+        break;
+      case "instagramActorId":
+        out.push("--instagram-actor-id", String(value));
+        break;
+      case "storageKey":
+        out.push("--image", fileArg(String(value)));
+        break;
+      default:
+        break;
+    }
+  }
+  return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------
@@ -587,18 +685,25 @@ export class FailClosedApplyExecutor implements MetaActionExecutor {
 export interface CliApplyExecutorOptions {
   runner: MetaCliRunner;
   resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
+  resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
 }
 
 export class CliApplyExecutor implements MetaActionExecutor {
   private readonly runner: MetaCliRunner;
   private readonly resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
+  private readonly resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
   constructor(opts: CliApplyExecutorOptions) {
     this.runner = opts.runner;
     this.resolveAdAccountId = opts.resolveAdAccountId;
+    this.resolveAdAccountCurrency = opts.resolveAdAccountCurrency;
   }
 
   async executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult> {
-    const args = planActionToCliArgs(input.action);
+    const accountCurrency =
+      (this.resolveAdAccountCurrency
+        ? await this.resolveAdAccountCurrency(input.action.account)
+        : null) ?? "USD";
+    const args = planActionToCliArgs(input.action, accountCurrency);
     if (!args) {
       return {
         status: "skipped",
@@ -819,6 +924,8 @@ export interface ResolveApplyExecutorOptions {
    * `AD_ACCOUNT_ID` (`act_<digits>`) を解決する。未指定時は accountKey を fallback。
    */
   resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
+  /** accountKey から Meta ad account currency (JPY/USD 等) を解決する。 */
+  resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
   /** test seam: 子プロセス起動関数。production は nodeSpawn。 */
   spawnImpl?: typeof nodeSpawn;
   /**
@@ -921,6 +1028,9 @@ export async function resolveApplyExecutor(
     executor: new CliApplyExecutor({
       runner,
       ...(opts.resolveAdAccountId ? { resolveAdAccountId: opts.resolveAdAccountId } : {}),
+      ...(opts.resolveAdAccountCurrency
+        ? { resolveAdAccountCurrency: opts.resolveAdAccountCurrency }
+        : {}),
     }),
     mode: "cli",
     reason,

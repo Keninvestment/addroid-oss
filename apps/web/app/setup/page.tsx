@@ -502,6 +502,9 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
                     Slack App の <InlineCode>OAuth & Permissions</InlineCode> で
                     ワークスペースにインストールし、<InlineCode>Bot User OAuth Token</InlineCode>
                     をコピーします。値は <InlineCode>xoxb-</InlineCode> で始まります。
+                    添付画像を参考にしたクリエイティブ生成には
+                    <InlineCode>files:read</InlineCode> が必要です。既存アプリの権限を
+                    更新した場合は、再インストールしてからこの画面で再接続してください。
                   </p>
                 </div>
               </li>
@@ -544,6 +547,8 @@ npm run dev:worker   # apps/worker (pg-boss) 単独`}
             <div className="setup-guide__note">
               保存した token は暗号化してDBに保存され、この画面には再表示しません。
               Slack 側で権限を変更した場合は、Slack App を再インストールしてから再接続してください。
+              <InlineCode>files:read</InlineCode> がない古い接続では、Slack 添付画像を
+              クリエイティブ生成の参考画像として取得できません。
             </div>
           </div>
           <div style={{ marginBottom: "var(--space-4)" }}>

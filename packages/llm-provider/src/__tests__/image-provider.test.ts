@@ -431,6 +431,56 @@ test("OpenAIImageProvider sends API key in Authorization header only and returns
   assert.doesNotMatch(String(calls[0]!.init!.body), /sk-test-openai-image-key/);
 });
 
+test("OpenAIImageProvider uses edits endpoint with reference images", async () => {
+  const tokenStore = new InMemoryLLMProviderTokenStore();
+  const crypto = identityCrypto();
+  await tokenStore.saveOAuthToken({
+    provider: "openai",
+    accountIdentifier: "openai-api-key",
+    scopes: ["api_key"],
+    authKind: "api_key",
+    accessTokenCiphertext: "sk-test-openai-image-key",
+    connectedAt: new Date("2026-01-01T00:00:00.000Z"),
+    defaultModel: "gpt-4.1",
+  });
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const provider = new OpenAIImageProvider({
+    tokenStore,
+    crypto,
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url), init });
+      return new Response(
+        JSON.stringify({
+          data: [{ b64_json: Buffer.from("edited-png").toString("base64") }],
+        }),
+        { status: 200, headers: { "x-request-id": "req_edit_1" } }
+      );
+    },
+  });
+
+  const result = await provider.generateImage({
+    prompt: "勝ち画像を参照して新しい広告画像を生成",
+    referenceImages: [
+      {
+        bytes: new Uint8Array(Buffer.from("reference")),
+        mimeType: "image/png",
+        filename: "winner.png",
+        sourceRef: "storage://winner",
+      },
+    ],
+    variationConditions: [{ width: 1024, height: 1024, variantKey: "square" }],
+  });
+
+  assert.equal(result.meta.requestId, "req_edit_1");
+  assert.equal(result.meta.parameters.referenceImageCount, 1);
+  assert.equal(Buffer.from(result.assets[0]!.bytes).toString("utf8"), "edited-png");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://api.openai.com/v1/images/edits");
+  assert.equal((calls[0]!.init!.headers as Record<string, string>).Authorization, "Bearer sk-test-openai-image-key");
+  assert.ok(calls[0]!.init!.body instanceof FormData);
+  assert.doesNotMatch(String(calls[0]!.init!.body), /sk-test-openai-image-key/);
+});
+
 test("OpenAIImageProvider redacts API key from provider errors", async () => {
   const tokenStore = new InMemoryLLMProviderTokenStore();
   const crypto = identityCrypto();

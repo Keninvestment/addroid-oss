@@ -20,6 +20,7 @@ import YAML from "yaml";
  *  - commands       : /adops slash command の登録
  *  - app_mentions:read : @AdDroid メンションを Socket Mode で受信
  *  - im:history     : AdDroid App DM を Socket Mode で受信
+ *  - files:read     : クリエイティブ生成時の添付画像を取得
  *  - channels:read  : 通知先チャンネル名解決
  *  - users:read     : actor 表示用に Slack user 情報を解決
  */
@@ -28,6 +29,7 @@ export const SLACK_BOT_SCOPES = [
   "commands",
   "app_mentions:read",
   "im:history",
+  "files:read",
   "channels:read",
   "users:read",
 ] as const;

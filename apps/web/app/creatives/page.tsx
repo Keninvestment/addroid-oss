@@ -40,6 +40,7 @@ import {
   findAssetForCreativeRow,
   formatTimestamp,
   isCreativeStatus,
+  parseCreativeSpec,
   readCreativeMetadataByRef,
   type CreativeStatus,
 } from "../../lib/creative-helpers";
@@ -71,6 +72,7 @@ interface CreativeRow {
   pullRequestId: string | null;
   aiRunId: string | null;
   creativeQaAiRunId: string | null;
+  spec: unknown;
   createdAt: Date;
   account: { id: string; key: string; displayName: string } | null;
   pullRequest: { number: number; htmlUrl: string | null; state: string } | null;
@@ -142,6 +144,7 @@ export default async function CreativesPage({
         pullRequestId: true,
         aiRunId: true,
         creativeQaAiRunId: true,
+        spec: true,
         createdAt: true,
         account: { select: { id: true, key: true, displayName: true } },
         pullRequest: { select: { number: true, htmlUrl: true, state: true } },
@@ -208,11 +211,23 @@ export default async function CreativesPage({
         title="生成クリエイティブ"
         subtitle={
           <>
-            改善提案から作成された広告クリエイティブの一覧です。
+            自動クリエイティブ生成で作成された広告クリエイティブの一覧です。
             画像が未設定の環境でもテキスト案として記録され、Meta へ直接反映されることはありません。
           </>
         }
-        actions={<RunCronButton presetName="improvement_pr" label="生成を開始" />}
+        actions={
+          <form
+            id="creative-submit-selected-form"
+            className="creative-actions"
+            action="/creatives/submit"
+            method="get"
+          >
+            <button className="btn" type="submit">
+              入稿チャット
+            </button>
+            <RunCronButton presetName="auto_creative_generation" label="生成を開始" />
+          </form>
+        }
       />
 
       <div className="page-body page-body--single">
@@ -255,7 +270,7 @@ export default async function CreativesPage({
               title="まだ生成クリエイティブはありません"
               description={
                 <>
-                  改善提案を実行すると、生成されたクリエイティブがここに表示されます。
+                  自動クリエイティブ生成を実行すると、生成されたクリエイティブがここに表示されます。
                   画像生成を設定していない場合も、テキスト案として承認待ちの変更を作成できます。
                 </>
               }
@@ -294,76 +309,145 @@ function CreativeCard({
   const hasStorageRef = Boolean(row.storageRef);
   const showImage = hasStorageRef && thumb.assetId !== null;
   const showStorageMissing = hasStorageRef && !thumb.storageReachable;
+  const spec = parseCreativeSpec(row.spec);
+  const adText = spec.adText;
+  const accountName = row.account?.displayName || row.account?.key || "AdDroid";
+  const headline = adText?.headline || row.displayName;
+  const primaryText = adText?.primaryText || "広告テキスト案は詳細画面で確認できます。";
+  const description = adText?.description || "詳しくはこちら";
+  const cta = adText?.callToAction || "LEARN_MORE";
+  const disabled = row.status === "qa_failed" || Boolean(row.pullRequestId);
 
   return (
-    <Link
-      href={`/creatives/${row.id}`}
-      className="creative-card"
-      data-testid="creative-card"
-      data-status={row.status}
-    >
-      <div className="creative-card__thumb">
-        {showImage ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            src={`/api/creatives/${row.id}/asset/${thumb.assetId}`}
-            alt={`creative ${row.displayName}`}
-            width={160}
-            height={160}
-            loading="lazy"
-            decoding="async"
-          />
-        ) : (
-          <div className="creative-card__placeholder" aria-hidden="true">
-            <span>{showStorageMissing ? "画像未取得" : "画像なし"}</span>
+    <article className="creative-card-wrap">
+      <label className="creative-card__select" title={disabled ? "このCRは入稿候補にできません" : "入稿候補に選択"}>
+        <input
+          form="creative-submit-selected-form"
+          type="checkbox"
+          name="creativeId"
+          value={row.id}
+          disabled={disabled}
+        />
+        <span>入稿候補</span>
+      </label>
+      <Link
+        href={`/creatives/${row.id}`}
+        className="creative-card"
+        data-testid="creative-card"
+        data-status={row.status}
+      >
+        <div className="creative-card__ad-preview" aria-label="Meta広告プレビュー">
+          <div className="creative-card__ad-header">
+            <div className="creative-card__avatar" aria-hidden="true">
+              {accountName.slice(0, 1).toUpperCase()}
+            </div>
+            <div className="creative-card__ad-identity">
+              <div className="creative-card__page-name" title={accountName}>
+                {accountName}
+              </div>
+              <div className="creative-card__sponsored">広告</div>
+            </div>
           </div>
-        )}
-        {showStorageMissing ? (
-          <div className="creative-card__overlay">
-            <StatusBadge state="warn">画像未取得</StatusBadge>
+          <div className="creative-card__primary-text">{primaryText}</div>
+          <div className="creative-card__thumb">
+            {showImage ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={`/api/creatives/${row.id}/asset/${thumb.assetId}`}
+                alt={`creative ${row.displayName}`}
+                width={160}
+                height={160}
+                loading="lazy"
+                decoding="async"
+              />
+            ) : (
+              <div className="creative-card__placeholder" aria-hidden="true">
+                <span>{showStorageMissing ? "画像未取得" : "画像なし"}</span>
+              </div>
+            )}
+            {showStorageMissing ? (
+              <div className="creative-card__overlay">
+                <StatusBadge state="warn">画像未取得</StatusBadge>
+              </div>
+            ) : null}
+            {!hasStorageRef ? (
+              <div className="creative-card__overlay">
+                <StatusBadge state="idle">テキスト案</StatusBadge>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-        {!hasStorageRef ? (
-          <div className="creative-card__overlay">
-            <StatusBadge state="idle">テキスト案</StatusBadge>
+          <div className="creative-card__link-preview">
+            <div className="creative-card__link-copy">
+              <div className="creative-card__headline" title={headline}>
+                {headline}
+              </div>
+              <div className="creative-card__description" title={description}>
+                {description}
+              </div>
+            </div>
+            <span className="creative-card__cta">{ctaLabel(cta)}</span>
           </div>
-        ) : null}
-      </div>
-      <div className="creative-card__meta">
-        <div className="creative-card__row">
-          <StatusBadge state={statusState}>{row.status}</StatusBadge>
         </div>
-        <div className="creative-card__title" title={row.displayName}>
-          {row.displayName}
-        </div>
-        <div className="creative-card__provider mono">
-          {row.provider && row.model ? (
-            <InlineCode>
-              {row.provider}/{row.model}
-            </InlineCode>
-          ) : (
-            <span className="creative-card__optional">画像 Provider 未設定</span>
-          )}
-        </div>
-        {thumb.width && thumb.height ? (
-          <div className="creative-card__dim mono">
-            <InlineCode>
-              {thumb.width}×{thumb.height}
-            </InlineCode>
+        <div className="creative-card__meta">
+          <div className="creative-card__row">
+            <StatusBadge state={statusState}>{row.status}</StatusBadge>
           </div>
-        ) : null}
-        <div className="creative-card__footer">
-          <span className="creative-card__account mono">
-            {row.account ? row.account.key : "—"}
-          </span>
-          <span className="creative-card__pr mono">
-            {row.pullRequest ? `PR #${row.pullRequest.number}` : "未添付"}
-          </span>
+          <div className="creative-card__title" title={row.displayName}>
+            {row.displayName}
+          </div>
+          <div className="creative-card__provider mono">
+            {row.provider && row.model ? (
+              <InlineCode>
+                {row.provider}/{row.model}
+              </InlineCode>
+            ) : (
+              <span className="creative-card__optional">画像 Provider 未設定</span>
+            )}
+          </div>
+          {thumb.width && thumb.height ? (
+            <div className="creative-card__dim mono">
+              <InlineCode>
+                {thumb.width}×{thumb.height}
+              </InlineCode>
+            </div>
+          ) : null}
+          <div className="creative-card__footer">
+            <span className="creative-card__account mono">
+              {row.account ? row.account.key : "—"}
+            </span>
+            <span className="creative-card__pr mono">
+              {row.pullRequest ? `PR #${row.pullRequest.number}` : "未添付"}
+            </span>
+          </div>
+          <div className="creative-card__time mono">
+            {formatTimestamp(row.createdAt)}
+          </div>
         </div>
-        <div className="creative-card__time mono">
-          {formatTimestamp(row.createdAt)}
-        </div>
-      </div>
-    </Link>
+      </Link>
+    </article>
   );
+}
+
+function ctaLabel(value: string): string {
+  switch (value) {
+    case "SHOP_NOW":
+      return "購入する";
+    case "SIGN_UP":
+      return "登録する";
+    case "CONTACT_US":
+      return "問い合わせ";
+    case "DOWNLOAD":
+      return "ダウンロード";
+    case "APPLY_NOW":
+      return "申し込む";
+    case "GET_QUOTE":
+      return "見積もり";
+    case "SUBSCRIBE":
+      return "購読する";
+    case "NO_BUTTON":
+      return "";
+    case "LEARN_MORE":
+    default:
+      return "詳しく見る";
+  }
 }

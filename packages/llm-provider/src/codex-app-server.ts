@@ -184,6 +184,7 @@ export class CodexAppServerLLMProvider implements LLMProvider {
       ? thread.model.trim()
       : this.defaultModel;
     const prompt = messagesToCodexPrompt(req.messages);
+    const input = messagesToCodexInput(req.messages, prompt);
 
     const result = await new Promise<{ content: string; status: string; inputTokens: number; outputTokens: number }>(
       (resolve, reject) => {
@@ -242,7 +243,7 @@ export class CodexAppServerLLMProvider implements LLMProvider {
 
         rpc.request("turn/start", {
           threadId,
-          input: [{ type: "text", text: prompt, text_elements: [] }],
+          input,
         }).catch((err) => settleError(asProviderError(err)));
       }
     );
@@ -427,9 +428,35 @@ function messagesToCodexPrompt(messages: LLMCompletionRequest["messages"]): stri
   return messages
     .map((m) => {
       const role = m.role === "system" ? "System" : m.role === "assistant" ? "Assistant" : "User";
-      return `${role}:\n${m.content}`;
+      return `${role}:\n${contentToPlainText(m.content)}`;
     })
     .join("\n\n");
+}
+
+function messagesToCodexInput(
+  messages: LLMCompletionRequest["messages"],
+  prompt: string
+): Array<Record<string, unknown>> {
+  const input: Array<Record<string, unknown>> = [{ type: "text", text: prompt, text_elements: [] }];
+  for (const message of messages) {
+    if (typeof message.content === "string") continue;
+    for (const part of message.content) {
+      if (part.type !== "image") continue;
+      if (part.localPath) {
+        input.push({ type: "localImage", path: part.localPath });
+      } else if (part.url) {
+        input.push({ type: "image", image_url: part.url });
+      }
+    }
+  }
+  return input;
+}
+
+function contentToPlainText(content: LLMCompletionRequest["messages"][number]["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) => part.type === "text" ? part.text : `[image: ${part.sourceRef ?? part.url ?? part.localPath ?? "inline"}]`)
+    .join("\n");
 }
 
 async function initializeRpc(rpc: CodexLLMAppServerRpcClient): Promise<void> {

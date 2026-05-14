@@ -22,9 +22,20 @@ export type LLMAuthKind = "oauth" | "api_key" | "app_server" | "none";
 
 export type LLMRole = "system" | "user" | "assistant";
 
+export type LLMContentPart =
+  | { type: "text"; text: string }
+  | {
+      type: "image";
+      mimeType: "image/png" | "image/jpeg" | "image/webp";
+      dataBase64?: string;
+      url?: string;
+      localPath?: string;
+      sourceRef?: string;
+    };
+
 export interface LLMMessage {
   role: LLMRole;
-  content: string;
+  content: string | LLMContentPart[];
 }
 
 export interface LLMCompletionRequest {

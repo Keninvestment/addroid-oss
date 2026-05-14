@@ -96,6 +96,8 @@ import {
   createPrismaImprovementPrStore,
 } from "./lib/improvement-pr-runtime.js";
 import { loadRecentPerformanceSnapshotContext } from "./lib/improvement-pr-performance-context.js";
+import { loadCreativeReferenceImages } from "./lib/creative-reference-images.js";
+import { addCreativeImageUnderstanding } from "./lib/creative-image-understanding.js";
 import { refreshLatestInsightsForManualImprovementPr } from "./lib/improvement-pr-insights-refresh.js";
 import { createPrismaPerformanceSnapshotRetentionStore } from "./lib/retention-runtime.js";
 import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
@@ -708,7 +710,14 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   : {}),
               });
             }
-          } else if (presetName === "improvement_pr") {
+          } else if (
+            presetName === "improvement_pr" ||
+            presetName === "auto_creative_generation"
+          ) {
+            const workflowRunName =
+              presetName === "auto_creative_generation"
+                ? "auto_creative_generation"
+                : "improvement_pr";
             const manualRun = isManualCronJobData(job.data);
             const manualRefreshNow = new Date();
             // regression fix: workspace mode + per-account modeOverride を取得し、
@@ -805,6 +814,15 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   if ("refreshFailedSummary" in performanceContext) {
                     return performanceContext.refreshFailedSummary;
                   }
+                  const referenceImages = await loadCreativeReferenceImages(
+                    creativeStorage,
+                    performanceContext.creativeContext
+                  );
+                  const creativeContextWithVision = await addCreativeImageUnderstanding(
+                    llmSelection.provider,
+                    performanceContext.creativeContext,
+                    referenceImages
+                  );
                   return runImprovementPrOnce({
                     workspaceId: workspace.id,
                     // regression fix: workspace + ad_account の解決済み mode。
@@ -812,11 +830,17 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     // report_only=auto_blocked / dangerous=approval_required
                     // を保証する。
                     mode: effectiveMode,
+                    workflowIntent:
+                      presetName === "auto_creative_generation"
+                        ? "auto_creative_generation"
+                        : "improvement_proposal",
                     accountKey: acc.key,
                     repo: repoSpec,
                     baseRef,
                     snapshotIds: performanceContext.snapshotIds,
                     analysisWindow: performanceContext.analysisWindow,
+                    creativeContext: creativeContextWithVision,
+                    referenceImages,
                     store: improvementPrStore,
                     pipeline: pipelineRunner,
                     publisher,
@@ -855,7 +879,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                 refId: handle.cronRunId,
                 level,
                 message:
-                  `improvement_pr ${acc.key}: ${summary.status}` +
+                  `${workflowRunName} ${acc.key}: ${summary.status}` +
                   (summary.decision
                     ? ` — ${summary.decision} (${summary.proposalCount} proposals)`
                     : summary.errorMessage
@@ -965,7 +989,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
               await failCronRun(
                 cronStore,
                 handle,
-                `improvement_pr had failures: ${errors.join("; ")}`
+                `${workflowRunName} had failures: ${errors.join("; ")}`
               );
             } else {
               await finishCronRun(cronStore, handle, {
@@ -1169,6 +1193,13 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
       });
       return row?.metaAccountId ?? (accountKey.startsWith("act_") ? accountKey : null);
     },
+    resolveAdAccountCurrency: async (accountKey) => {
+      const row = await prisma.adAccount.findUnique({
+        where: { workspaceId_key: { workspaceId: workspace.id, key: accountKey } },
+        select: { currency: true },
+      });
+      return row?.currency ?? null;
+    },
   });
   log.info(
     `[worker] apply executor: ${applyExecutorSelection.mode} (${applyExecutorSelection.reason})`
@@ -1361,6 +1392,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     // regression fix: cron 経路と同じ image-Provider + LocalDisk Storage を
     // /adops improve の inline 起動でも共有する。
     improvementPrImageProvider: imageProviderSelection.provider,
+    improvementPrLlmProvider: llmSelection.provider,
     improvementPrCreativeStorage: creativeStorage,
     // regression fix: cron 経路と同じ非空 Creative QA policy を /adops improve
     // からも適用する (空 policy で blocking check が skip に倒れて素通りする
@@ -1438,6 +1470,10 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
           botToken: installation.botToken,
           githubAdapter: getGithubAdapter(),
           ...(webBaseUrl ? { webUrl: webBaseUrl } : {}),
+          logger: {
+            info: (msg) => log.info(msg),
+            warn: (msg) => log.warn(msg),
+          },
         });
         log.info(
           `[worker] slack_agent ${payload.eventType} ${payload.slackChannelId}: ${result.status}` +
@@ -1682,21 +1718,27 @@ async function syncEnabledCronSchedules(input: {
   timeZone: string;
   log: WorkerLogger;
 }): Promise<void> {
-  const presetNames = new Set(CRON_PRESETS.map((preset) => preset.name));
+  const internalAlwaysOnPresets = new Set(["github_poll"]);
+  const presetByName = new Map(CRON_PRESETS.map((preset) => [preset.name, preset]));
   const rows = await input.prisma.cronSchedule.findMany({
-    where: { workspaceId: input.workspaceId, enabled: true },
-    select: { name: true, cron: true },
+    where: { workspaceId: input.workspaceId },
+    select: { name: true, cron: true, enabled: true },
   });
 
   for (const row of rows) {
-    if (!presetNames.has(row.name as (typeof CRON_PRESETS)[number]["name"])) {
+    const preset = presetByName.get(row.name as (typeof CRON_PRESETS)[number]["name"]);
+    if (!preset) {
       continue;
     }
     try {
-      await scheduleCron(input.boss, row.name, row.cron, input.timeZone);
+      if (row.enabled || internalAlwaysOnPresets.has(row.name)) {
+        await scheduleCron(input.boss, row.name, row.cron || preset.cron, input.timeZone);
+      } else {
+        await input.boss.unschedule(row.name);
+      }
     } catch (err) {
       input.log.warn(
-        `[worker] failed to sync enabled cron schedule ${row.name}: ${(err as Error).message}`
+        `[worker] failed to sync cron schedule ${row.name}: ${(err as Error).message}`
       );
     }
   }

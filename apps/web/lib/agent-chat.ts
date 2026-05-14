@@ -49,6 +49,16 @@ import {
   type OpsChangeProposalInput,
 } from "../../worker/src/lib/ops-proposal-runtime";
 import {
+  createStandaloneCreativeGeneration,
+  createCreativeSubmissionProposal,
+  normalizeCreativeGenerationInput,
+  normalizeCreativeSubmissionInput,
+} from "../../worker/src/lib/creative-submission-runtime";
+import {
+  createCreativePromotionProposals,
+  normalizeCreativePromotionBatchInput,
+} from "../../worker/src/lib/creative-promotion-runtime";
+import {
   createAutomationRuleCalibrationUpdateProposal,
   createAutomationRuleProposal,
   type AutomationRuleCalibrationUpdateInput,
@@ -66,6 +76,7 @@ import {
   createOrReuseAgentTask,
   normalizeAgentTaskPrompt,
 } from "../../worker/src/lib/agent-task-store";
+import { formatImprovementReportForUser } from "../../worker/src/lib/improvement-report-format";
 import {
   enqueueAgentTaskNow,
   scheduleAgentTaskNextRun,
@@ -88,6 +99,8 @@ export interface WebAgentChatOptions {
   includeDashboardMemory?: boolean;
   auditAction?: string;
   auditActor?: string;
+  userInput?: string;
+  referenceImagePaths?: string[];
 }
 
 export async function runWebAgentChat(
@@ -118,6 +131,32 @@ export async function runWebAgentChat(
       );
   const executions: WebAgentExecution[] = [];
   let message = "";
+  const userText = (options.userInput ?? input).trim();
+  if (shouldDirectGenerateCreatives(userText, options.referenceImagePaths ?? [])) {
+    const execution = await generateCreativesTool(
+      workspace.id,
+      mergeReferenceImagePaths({ prompt: userText }, options.referenceImagePaths ?? []),
+      "generate creative variants",
+      agentContext.webUrl,
+      selection.provider
+    );
+    executions.push(execution);
+    message = execution.message;
+    await recordAgentAudit(workspace.id, options.auditAction ?? "agent.chat_via_web", {
+      input: userText,
+      message,
+      executions: executions.map((e) => ({
+        display: e.display,
+        status: e.status,
+        message: e.message,
+      })),
+    }, options.auditActor ?? "agent:web-ui");
+    return {
+      ok: execution.status === "ok",
+      message,
+      executions,
+    };
+  }
   const seenTools = new Set<string>();
   for (let i = 0; i < 4; i += 1) {
     const turn = await runAgentTurn({
@@ -145,7 +184,8 @@ export async function runWebAgentChat(
         tool,
         agentContext.webUrl,
         workspace.id,
-        selection.provider
+        selection.provider,
+        options.referenceImagePaths ?? []
       );
       executions.push(execution);
       executedAny = true;
@@ -224,7 +264,8 @@ export async function executeWebAgentTool(
   tool: AgentToolResult,
   webUrl: string,
   workspaceId: string,
-  provider?: LLMProvider
+  provider?: LLMProvider,
+  referenceImagePaths: string[] = []
 ): Promise<WebAgentExecution> {
   if (tool.status === "denied") {
     return {
@@ -298,6 +339,30 @@ export async function executeWebAgentTool(
         };
       case "propose_ops_change":
         return await proposeOpsChangeTool(workspaceId, tool.toolArgs, tool.display);
+      case "propose_creative_submission":
+        return await proposeCreativeSubmissionTool(
+          workspaceId,
+          mergeReferenceImagePaths(tool.toolArgs, referenceImagePaths),
+          tool.display,
+          webUrl,
+          provider
+        );
+      case "generate_creatives":
+        return await generateCreativesTool(
+          workspaceId,
+          mergeReferenceImagePaths(tool.toolArgs, referenceImagePaths),
+          tool.display,
+          webUrl,
+          provider
+        );
+      case "promote_creative_submission":
+        return await promoteCreativeSubmissionTool(
+          workspaceId,
+          tool.toolArgs,
+          tool.display,
+          webUrl,
+          provider
+        );
       case "propose_automation_rule":
         return await proposeAutomationRuleTool(workspaceId, tool.toolArgs, tool.display, webUrl);
       case "propose_automation_rule_update":
@@ -320,6 +385,33 @@ export async function executeWebAgentTool(
       message: (err as Error).message,
     };
   }
+}
+
+function mergeReferenceImagePaths(
+  args: Record<string, unknown>,
+  paths: string[]
+): Record<string, unknown> {
+  if (paths.length === 0) return args;
+  if (Array.isArray(args.localMediaPaths) && args.localMediaPaths.length > 0) return args;
+  const existing = Array.isArray(args.referenceImagePaths)
+    ? args.referenceImagePaths.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
+  return {
+    ...args,
+    referenceImagePaths: [...new Set([...existing, ...paths])],
+    generateImage: args.generateImage === false ? false : true,
+  };
+}
+
+function shouldDirectGenerateCreatives(input: string, referenceImagePaths: string[]): boolean {
+  if (referenceImagePaths.length === 0) return false;
+  const text = input.trim();
+  if (!text) return false;
+  const asksGeneration =
+    /(クリエイティブ|creative|画像|バナー|広告素材).{0,24}(生成|作成|作って|つくって|案|バリエーション)/i.test(text) ||
+    /(生成|作成|作って|つくって).{0,24}(クリエイティブ|creative|画像|バナー|広告素材)/i.test(text);
+  if (!asksGeneration) return false;
+  return !/(入稿|出稿|広告作成|広告を作|キャンペーン|広告セット|adset|campaign|PR|プルリク|Meta.{0,8}反映|配信開始)/i.test(text);
 }
 
 function toolSignature(tool: AgentToolResult): string | null {
@@ -349,6 +441,89 @@ async function proposeOpsChangeTool(
     display,
     status: "ok",
     message: `GitOps PR #${result.prNumber} を作成しました。人間の承認・merge 後に反映されます。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function proposeCreativeSubmissionTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string,
+  provider?: LLMProvider
+): Promise<WebAgentExecution> {
+  const selection = await getActiveGithubAdapter();
+  const result = await createCreativeSubmissionProposal({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    input: normalizeCreativeSubmissionInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+    llmProvider: provider ?? null,
+  });
+  return {
+    display,
+    status: "ok",
+    message:
+      `クリエイティブ入稿 PR #${result.prNumber} を作成しました。` +
+      `承認はこちらで確認できます: ${webUrl}/approvals/${result.prNumber}\n` +
+      `merge 後に PAUSED で作成され、配信開始は別途 Activate で確認します。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function generateCreativesTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string,
+  provider?: LLMProvider
+): Promise<WebAgentExecution> {
+  const result = await createStandaloneCreativeGeneration({
+    prisma,
+    workspaceId,
+    input: normalizeCreativeGenerationInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+    llmProvider: provider ?? null,
+  });
+  return {
+    display,
+    status: "ok",
+    message: `${result.message}\n${webUrl}/creatives`,
+    data: result,
+  };
+}
+
+async function promoteCreativeSubmissionTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string,
+  provider?: LLMProvider
+): Promise<WebAgentExecution> {
+  const selection = await getActiveGithubAdapter();
+  const result = await createCreativePromotionProposals({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    input: normalizeCreativePromotionBatchInput(args),
+    actor: "agent:web-chat",
+    source: "web-chat",
+    llmProvider: provider ?? null,
+  });
+  const prLabel =
+    result.count === 1
+      ? `#${result.prNumbers[0]}`
+      : result.prNumbers.map((n) => `#${n}`).join(", ");
+  return {
+    display,
+    status: "ok",
+    message:
+      `生成済みクリエイティブ ${result.count} 件を入稿PR ${prLabel} に回しました。` +
+      `承認はこちらで確認できます: ${webUrl}/approvals\n` +
+      `merge 後に PAUSED で作成され、配信開始は別途 Activate で確認します。\n${result.htmlUrls.join("\n")}`,
     data: result,
   };
 }
@@ -851,6 +1026,39 @@ async function runReportTool(
       data: { result, run, logs },
     };
   }
+  if (preset === "improvement_pr") {
+    if (!result.jobId) {
+      return {
+        display,
+        status: "ok",
+        message: `改善提案は既に実行中です。完了後に ${webUrl}/improvements で確認できます。`,
+        data: result,
+      };
+    }
+    const run = await waitForCronRun(result.jobId, preset, 300_000);
+    if (!run) {
+      return {
+        display,
+        status: "ok",
+        message: `改善提案を作成中です。完了後に ${webUrl}/improvements で確認できます。`,
+        data: result,
+      };
+    }
+    const [logs, audits] = await Promise.all([
+      prisma.executionLog.findMany({
+        where: { cronRunId: run.id },
+        orderBy: { createdAt: "asc" },
+        select: { level: true, message: true, payload: true },
+      }),
+      loadImprovementAuditsForCronRun(run.id),
+    ]);
+    return {
+      display,
+      status: run.state === "failed" ? "error" : "ok",
+      message: formatImprovementReportForUser(run, logs, audits, webUrl),
+      data: { result, run, logs, audits },
+    };
+  }
   return {
     display,
     status: "ok",
@@ -859,6 +1067,30 @@ async function runReportTool(
       : `${preset} を実行キューに積みました。`,
     data: result,
   };
+}
+
+async function loadImprovementAuditsForCronRun(cronRunId: string): Promise<
+  Array<{ action: string; ref: string | null; metadata: unknown }>
+> {
+  const workspace = await ensureWebWorkspace();
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      workspaceId: workspace.id,
+      action: { startsWith: "improvement_pr." },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    select: { action: true, ref: true, metadata: true },
+  });
+  return rows.filter((row) => {
+    const metadata = row.metadata;
+    return (
+      typeof metadata === "object" &&
+      metadata !== null &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).cronRunId === cronRunId
+    );
+  });
 }
 
 async function createScheduledAgentTaskTool(
@@ -2158,6 +2390,13 @@ function reportPreset(value: string): CronPresetName {
           ? "budget_guard"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
+          : v === "creative" ||
+              v === "creatives" ||
+              v === "creative_generation" ||
+              v === "auto_creative" ||
+              v === "auto_creative_generation" ||
+              v === "自動クリエイティブ生成"
+            ? "auto_creative_generation"
           : v === "github" || v === "github_poll"
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"

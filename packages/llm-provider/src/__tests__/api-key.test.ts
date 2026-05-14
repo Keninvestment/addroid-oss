@@ -62,6 +62,59 @@ test("ApiKeyLLMProvider sends OpenAI API key in Authorization header only", asyn
   assert.equal((got.headers as Record<string, string>).Authorization, "Bearer sk-test-openai-key");
 });
 
+test("ApiKeyLLMProvider sends OpenAI image parts as multimodal content", async () => {
+  const store = new InMemoryLLMProviderTokenStore();
+  await store.saveOAuthToken({
+    provider: "openai",
+    authKind: "api_key",
+    accountIdentifier: "openai-api-key",
+    scopes: [],
+    accessTokenCiphertext: crypto.encrypt("sk-test-openai-key"),
+    connectedAt: new Date("2026-05-04T00:00:00Z"),
+    defaultModel: "gpt-4.1",
+  });
+  let body: unknown = null;
+  const provider = new ApiKeyLLMProvider({
+    provider: "openai",
+    tokenStore: store,
+    crypto,
+    defaultModel: "gpt-4.1",
+    fetchImpl: async (_url, init) => {
+      body = JSON.parse(String(init?.body ?? "{}"));
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 3, completion_tokens: 5 },
+          model: "gpt-4.1",
+        }),
+        { status: 200 }
+      );
+    },
+  });
+  await provider.complete({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "画像を読んでください" },
+          {
+            type: "image",
+            mimeType: "image/png",
+            dataBase64: "aGVsbG8=",
+            sourceRef: "storage://wins/ref.png",
+          },
+        ],
+      },
+    ],
+  });
+  assert.ok(body && typeof body === "object" && "messages" in body);
+  const messages = (body as { messages: Array<{ content: unknown }> }).messages;
+  assert.deepEqual(messages[0]?.content, [
+    { type: "text", text: "画像を読んでください" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } },
+  ]);
+});
+
 test("ApiKeyLLMProvider maps Anthropic messages response", async () => {
   const store = new InMemoryLLMProviderTokenStore();
   await store.saveOAuthToken({

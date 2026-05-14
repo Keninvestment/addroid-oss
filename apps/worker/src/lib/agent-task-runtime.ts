@@ -29,6 +29,16 @@ import {
   type OpsChangeProposalInput,
 } from "./ops-proposal-runtime.js";
 import {
+  createStandaloneCreativeGeneration,
+  createCreativeSubmissionProposal,
+  normalizeCreativeGenerationInput,
+  normalizeCreativeSubmissionInput,
+} from "./creative-submission-runtime.js";
+import {
+  createCreativePromotionProposals,
+  normalizeCreativePromotionBatchInput,
+} from "./creative-promotion-runtime.js";
+import {
   createAutomationRuleProposal,
   type AutomationRuleProposalInput,
 } from "./automation-rule-proposal-runtime.js";
@@ -44,6 +54,7 @@ import {
   saveBudgetGuardPolicyConfig,
   type BudgetGuardPolicyConfigInput,
 } from "./budget-guard-policy-config.js";
+import { formatImprovementReportForUser } from "./improvement-report-format.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
@@ -241,6 +252,7 @@ export async function runScheduledAgentTaskJob(
           boss: opts.boss,
           webUrl: agentContext.webUrl,
           githubAdapter: opts.githubAdapter,
+          provider: opts.provider,
         }));
         executedAny = true;
       }
@@ -328,6 +340,8 @@ export async function executeWorkerAgentTool(opts: {
   boss: PgBoss;
   webUrl: string;
   githubAdapter?: GithubAdapter;
+  provider?: LLMProvider;
+  referenceImagePaths?: string[];
   actor?: string;
   source?: PlanRunSource;
 }): Promise<{ display: string; status: string; message: string; data?: unknown }> {
@@ -374,6 +388,39 @@ export async function executeWorkerAgentTool(opts: {
           requestedBy: opts.actor ?? "agent:scheduled-task",
           requestedAt: new Date().toISOString(),
         });
+        if (preset === "improvement_pr") {
+          if (!jobId) {
+            return {
+              display: readyTool.display,
+              status: "ok",
+              message: `改善提案は既に実行中です。完了後に ${opts.webUrl}/improvements で確認できます。`,
+              data: { jobId },
+            };
+          }
+          const run = await waitForCronRun(opts.prisma, jobId, preset, 300_000);
+          if (!run) {
+            return {
+              display: readyTool.display,
+              status: "ok",
+              message: `改善提案を作成中です。完了後に ${opts.webUrl}/improvements で確認できます。`,
+              data: { jobId },
+            };
+          }
+          const [logs, audits] = await Promise.all([
+            opts.prisma.executionLog.findMany({
+              where: { cronRunId: run.id },
+              orderBy: { createdAt: "asc" },
+              select: { level: true, message: true, payload: true },
+            }),
+            loadImprovementAuditsForCronRun(opts.prisma, opts.workspaceId, run.id),
+          ]);
+          return {
+            display: readyTool.display,
+            status: run.state === "failed" ? "error" : "ok",
+            message: formatImprovementReportForUser(run, logs, audits, opts.webUrl),
+            data: { jobId, cronRunId: run.id },
+          };
+        }
         return {
           display: readyTool.display,
           status: "ok",
@@ -429,6 +476,74 @@ export async function executeWorkerAgentTool(opts: {
           data: result,
         };
       }
+      case "propose_creative_submission": {
+        if (!opts.githubAdapter) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: "GitHub adapter が worker に注入されていません。",
+          };
+        }
+        const result = await createCreativeSubmissionProposal({
+          prisma: opts.prisma,
+          githubAdapter: opts.githubAdapter,
+          workspaceId: opts.workspaceId,
+          input: normalizeCreativeSubmissionInput(
+            mergeReferenceImagePaths(readyTool.toolArgs, opts.referenceImagePaths ?? [])
+          ),
+          actor: opts.actor ?? "agent:scheduled-task",
+          source: normalizeCreativeSubmissionSource(opts.source),
+          llmProvider: opts.provider ?? null,
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: `クリエイティブ入稿 PR #${result.prNumber} を作成しました。`,
+          data: result,
+        };
+      }
+      case "generate_creatives": {
+        const result = await createStandaloneCreativeGeneration({
+          prisma: opts.prisma,
+          workspaceId: opts.workspaceId,
+          input: normalizeCreativeGenerationInput(
+            mergeReferenceImagePaths(readyTool.toolArgs, opts.referenceImagePaths ?? [])
+          ),
+          actor: opts.actor ?? "agent:scheduled-task",
+          source: normalizeCreativeGenerationSource(opts.source),
+          llmProvider: opts.provider ?? null,
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: result.message,
+          data: result,
+        };
+      }
+      case "promote_creative_submission": {
+        if (!opts.githubAdapter) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: "GitHub adapter が worker に注入されていません。",
+          };
+        }
+        const result = await createCreativePromotionProposals({
+          prisma: opts.prisma,
+          githubAdapter: opts.githubAdapter,
+          workspaceId: opts.workspaceId,
+          input: normalizeCreativePromotionBatchInput(readyTool.toolArgs),
+          actor: opts.actor ?? "agent:scheduled-task",
+          source: normalizeCreativeSubmissionSource(opts.source),
+          llmProvider: opts.provider ?? null,
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: `生成済みクリエイティブ ${result.count} 件を入稿 PR ${result.prNumbers.map((n) => `#${n}`).join(", ")} に回しました。`,
+          data: result,
+        };
+      }
       case "propose_automation_rule": {
         if (!opts.githubAdapter) {
           return {
@@ -466,6 +581,41 @@ export async function executeWorkerAgentTool(opts: {
       message: (err as Error).message,
     };
   }
+}
+
+function normalizeCreativeSubmissionSource(source: PlanRunSource | undefined) {
+  if (
+    source === "web-chat" ||
+    source === "slack-chat" ||
+    source === "agent-task" ||
+    source === "cli"
+  ) {
+    return source === "cli" ? "cli-chat" : source;
+  }
+  return "agent-task";
+}
+
+function normalizeCreativeGenerationSource(source: PlanRunSource | undefined) {
+  if (source === "web-chat" || source === "slack-chat" || source === "agent-task" || source === "cli") {
+    return source === "cli" ? "cli-chat" : source;
+  }
+  return "agent-task";
+}
+
+function mergeReferenceImagePaths(
+  args: Record<string, unknown>,
+  paths: string[]
+): Record<string, unknown> {
+  if (paths.length === 0) return args;
+  if (Array.isArray(args.localMediaPaths) && args.localMediaPaths.length > 0) return args;
+  const existing = Array.isArray(args.referenceImagePaths)
+    ? args.referenceImagePaths.filter((v): v is string => typeof v === "string" && v.length > 0)
+    : [];
+  return {
+    ...args,
+    referenceImagePaths: [...new Set([...existing, ...paths])],
+    generateImage: args.generateImage === false ? false : true,
+  };
 }
 
 function toolSignature(tool: AgentToolResult): string | null {
@@ -923,6 +1073,66 @@ function dateStringInRuntimeTimeZone(offsetDays: number): string {
   return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
 }
 
+async function waitForCronRun(
+  prisma: PrismaClient,
+  jobId: string,
+  name: string,
+  timeoutMs: number
+): Promise<{
+  id: string;
+  state: string;
+  startedAt: Date;
+  finishedAt: Date | null;
+  durationMs: number | null;
+  errorMessage: string | null;
+  output: Prisma.JsonValue;
+} | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const run = await prisma.cronRun.findFirst({
+      where: { jobId, name },
+      orderBy: { startedAt: "desc" },
+      select: {
+        id: true,
+        state: true,
+        startedAt: true,
+        finishedAt: true,
+        durationMs: true,
+        errorMessage: true,
+        output: true,
+      },
+    });
+    if (run && run.state !== "running") return run;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  return null;
+}
+
+async function loadImprovementAuditsForCronRun(
+  prisma: PrismaClient,
+  workspaceId: string,
+  cronRunId: string
+): Promise<Array<{ action: string; ref: string | null; metadata: unknown }>> {
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      workspaceId,
+      action: { startsWith: "improvement_pr." },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    select: { action: true, ref: true, metadata: true },
+  });
+  return rows.filter((row) => {
+    const metadata = row.metadata;
+    return (
+      typeof metadata === "object" &&
+      metadata !== null &&
+      !Array.isArray(metadata) &&
+      (metadata as Record<string, unknown>).cronRunId === cronRunId
+    );
+  });
+}
+
 function reportPreset(value: string): CronPresetName {
   const v = value.trim().toLowerCase().replace(/-/g, "_");
   const name =
@@ -934,6 +1144,13 @@ function reportPreset(value: string): CronPresetName {
           ? "budget_guard"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
+          : v === "creative" ||
+              v === "creatives" ||
+              v === "creative_generation" ||
+              v === "auto_creative" ||
+              v === "auto_creative_generation" ||
+              v === "自動クリエイティブ生成"
+            ? "auto_creative_generation"
           : v === "github" || v === "github_poll"
             ? "github_poll"
             : v === "retention" || v === "retention_sweep"

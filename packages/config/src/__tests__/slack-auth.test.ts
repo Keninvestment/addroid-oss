@@ -9,6 +9,7 @@ import {
   openSocketModeConnection,
   postSlackMessage,
   redactSecretTail,
+  getSlackFileInfo,
   SlackApiError,
   SlackTokenValidationError,
   validateSlackInputs,
@@ -36,7 +37,7 @@ function fakeFetch(
     assert.match(init.headers["Authorization"] ?? "", new RegExp(`^Bearer ${expected.tokenStartsWith}`));
     if (expected.bodyIncludes) {
       assert.ok(
-        init.body.includes(expected.bodyIncludes),
+        (init.body ?? "").includes(expected.bodyIncludes),
         `body should include ${expected.bodyIncludes}`
       );
     }
@@ -377,6 +378,53 @@ test("postSlackMessage の channel_not_found は SlackApiError で返る", async
         fetch
       ),
     (e) => e instanceof SlackApiError && e.slackError === "channel_not_found"
+  );
+});
+
+test("getSlackFileInfo は files.info を GET query で呼ぶ", async () => {
+  const fetch: SlackFetch = async (url, init) => {
+    assert.match(url, /\/files\.info\?file=F012IMG$/);
+    assert.equal(init.method, "GET");
+    assert.match(init.headers["Authorization"] ?? "", /^Bearer xoxb-/);
+    assert.equal(init.body, undefined);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        file: {
+          id: "F012IMG",
+          name: "reference.webp",
+          mimetype: "image/webp",
+          url_private_download: "https://files.slack.com/files-pri/T/F/download/reference.webp",
+        },
+      }),
+    };
+  };
+  const info = await getSlackFileInfo(VALID.botToken, "F012IMG", fetch);
+  assert.equal(info.id, "F012IMG");
+  assert.equal(info.mimetype, "image/webp");
+});
+
+test("getSlackFileInfo は response_metadata.messages をエラーに含める", async () => {
+  const fetch: SlackFetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      ok: false,
+      error: "invalid_arguments",
+      response_metadata: {
+        messages: ["[ERROR] missing required field: file"],
+      },
+    }),
+  });
+  await assert.rejects(
+    () => getSlackFileInfo(VALID.botToken, "F012IMG", fetch),
+    (e) =>
+      e instanceof SlackApiError &&
+      e.endpoint === "files.info" &&
+      e.slackError === "invalid_arguments" &&
+      e.message.includes("missing required field: file")
   );
 });
 
