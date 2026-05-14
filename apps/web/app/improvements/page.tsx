@@ -205,6 +205,12 @@ interface BudgetImpact {
   notes: string;
 }
 
+interface ProposalGroup {
+  key: string;
+  label: string;
+  proposals: ImprovementProposalDetail[];
+}
+
 interface PlanValidation {
   available: boolean;
   ok: boolean;
@@ -664,6 +670,43 @@ function proposalCategoryLabel(value: string): string {
   return labels[value] ?? value.replaceAll("_", " ");
 }
 
+function proposalGroupLabel(proposal: ImprovementProposalDetail): string {
+  const target = proposal.target.trim();
+  return target
+    ? `${hierarchyLabel(proposal.hierarchy)}: ${target}`
+    : hierarchyLabel(proposal.hierarchy);
+}
+
+function groupProposals(proposals: ImprovementProposalDetail[]): ProposalGroup[] {
+  const groups: ProposalGroup[] = [];
+  const indexByKey = new Map<string, number>();
+  for (const proposal of proposals) {
+    const key = `${proposal.hierarchy}:${proposal.target.trim()}`;
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex !== undefined) {
+      const group = groups[existingIndex];
+      if (group) group.proposals.push(proposal);
+      continue;
+    }
+    indexByKey.set(key, groups.length);
+    groups.push({
+      key,
+      label: proposalGroupLabel(proposal),
+      proposals: [proposal],
+    });
+  }
+  return groups;
+}
+
+function issueSeverityLabel(value: string): string {
+  const labels: Record<string, string> = {
+    error: "要修正",
+    warn: "注意",
+    info: "確認",
+  };
+  return labels[value] ?? value;
+}
+
 function displayProposalCount(
   row: AuditRow & { action: ImprovementPrAction },
   parsed: ParsedAuditMetadata
@@ -875,6 +918,7 @@ export default async function ImprovementsPage({
       : mediaBuyerDetail.proposals.length
         ? mediaBuyerDetail.proposals
         : analystDetail.proposals;
+  const detailProposalGroups = groupProposals(detailProposals);
   const detailMediaBuyerRationale =
     detailAudit?.parsed.mediaBuyerRationale ??
     mediaBuyerDetail.rationale ??
@@ -1590,51 +1634,98 @@ export default async function ImprovementsPage({
               <KeyValueList items={detailAuditItems} />
               {detailProposals.length > 0 ? (
                 <div style={{ display: "grid", gap: "0.75rem" }}>
-                  <SectionLabel>
-                    {detailAudit.parsed.proposals.length || mediaBuyerDetail.proposals.length
-                      ? "提案された改善"
-                      : "分析からの改善候補"}
-                  </SectionLabel>
-                  <div style={{ display: "grid", gap: "0.75rem" }}>
-                    {detailProposals.map((proposal, index) => (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      gap: "0.75rem",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    <SectionLabel>
+                      {detailAudit.parsed.proposals.length || mediaBuyerDetail.proposals.length
+                        ? "提案された改善"
+                        : "分析からの改善候補"}
+                    </SectionLabel>
+                    <span
+                      style={{
+                        color: "var(--color-text-secondary)",
+                        fontSize: "0.8125rem",
+                      }}
+                    >
+                      {detailProposals.length} 件
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gap: "0.875rem" }}>
+                    {detailProposalGroups.map((group) => (
                       <div
-                        key={`${proposal.hierarchy}:${proposal.target}:${index}`}
+                        key={group.key}
                         style={{
                           border: "1px solid var(--color-border-subtle)",
                           borderRadius: "var(--radius-md)",
-                          padding: "0.875rem",
-                          display: "grid",
-                          gap: "0.5rem",
+                          overflow: "hidden",
                         }}
                       >
                         <div
                           style={{
-                            display: "flex",
-                            gap: "0.5rem",
-                            alignItems: "center",
-                            flexWrap: "wrap",
+                            background: "var(--color-bg-subtle)",
+                            borderBottom: "1px solid var(--color-border-subtle)",
+                            color: "var(--color-text-secondary)",
+                            fontSize: "0.8125rem",
+                            fontWeight: 600,
+                            padding: "0.625rem 0.875rem",
                           }}
                         >
-                          <StatusBadge state="info">
-                            {proposalCategoryLabel(proposal.category)}
-                          </StatusBadge>
-                          <span style={{ fontWeight: 600 }}>
-                            {hierarchyLabel(proposal.hierarchy)}: {proposal.target || "未指定"}
-                          </span>
+                          {group.label}
                         </div>
-                        {proposal.proposedChange ? (
-                          <div>{proposal.proposedChange}</div>
-                        ) : null}
-                        {proposal.rationale ? (
-                          <div
-                            style={{
-                              fontSize: "0.8125rem",
-                              color: "var(--color-text-secondary)",
-                            }}
-                          >
-                            理由: {proposal.rationale}
-                          </div>
-                        ) : null}
+                        <div
+                          style={{
+                            display: "grid",
+                            gap: "0",
+                          }}
+                        >
+                          {group.proposals.map((proposal, index) => (
+                            <div
+                              key={`${proposal.category}:${proposal.proposedChange}:${index}`}
+                              style={{
+                                padding: "0.875rem",
+                                borderTop:
+                                  index === 0
+                                    ? "0"
+                                    : "1px solid var(--color-border-subtle)",
+                                display: "grid",
+                                gap: "0.5rem",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "0.5rem",
+                                  alignItems: "center",
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <StatusBadge state="info">
+                                  {proposalCategoryLabel(proposal.category)}
+                                </StatusBadge>
+                                <span style={{ fontWeight: 600 }}>
+                                  {proposal.proposedChange || proposal.rationale || "改善候補"}
+                                </span>
+                              </div>
+                              {proposal.rationale ? (
+                                <div
+                                  style={{
+                                    fontSize: "0.8125rem",
+                                    color: "var(--color-text-secondary)",
+                                  }}
+                                >
+                                  {proposal.rationale}
+                                </div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -1643,14 +1734,20 @@ export default async function ImprovementsPage({
               {detailAudit.parsed.issues.length > 0 ? (
                 <div style={{ display: "grid", gap: "0.75rem" }}>
                   <SectionLabel>確認メモ</SectionLabel>
-                  <div style={{ display: "grid", gap: "0.5rem" }}>
+                  <div
+                    style={{
+                      border: "1px solid var(--color-border-subtle)",
+                      borderRadius: "var(--radius-md)",
+                      overflow: "hidden",
+                    }}
+                  >
                     {detailAudit.parsed.issues.map((issue, index) => (
                       <div
                         key={`${issue.category}:${issue.message}:${index}`}
                         style={{
-                          border: "1px solid var(--color-border-subtle)",
-                          borderRadius: "var(--radius-md)",
-                          padding: "0.75rem",
+                          padding: "0.75rem 0.875rem",
+                          borderTop:
+                            index === 0 ? "0" : "1px solid var(--color-border-subtle)",
                           display: "grid",
                           gap: "0.375rem",
                         }}
@@ -1673,7 +1770,7 @@ export default async function ImprovementsPage({
                                     : "info"
                               }
                             >
-                              {issue.severity}
+                              {issueSeverityLabel(issue.severity)}
                             </StatusBadge>
                           ) : null}
                           {issue.category ? (
