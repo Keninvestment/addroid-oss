@@ -555,7 +555,9 @@ function creativeContextNotes(
         `${item.node.hierarchy}=${item.node.displayName}`,
         hierarchyNames.length > 0 ? hierarchyNames.join(" / ") : null,
         creative?.displayName ? `creative=${creative.displayName}` : null,
+        creative?.headline ? `headline=${creative.headline}` : null,
         creative?.primaryText ? `copy=${creative.primaryText}` : null,
+        creative?.linkUrl ? `link=${creative.linkUrl}` : null,
       ].filter(Boolean).join(": ")
     );
   }
@@ -608,29 +610,73 @@ function extractCreativeSnippet(value: unknown):
   | ImprovementPrCreativeNodeContext["creative"]
   | null {
   if (!isRecord(value)) return null;
+  const creative = isRecord(value.creative) ? value.creative : null;
   const rawName = readNestedRawString(value, ["raw", "name"]);
-  const context = readHierarchyContext(value);
-  const hierarchyText = context
-    .map((entry) => readStringValue(entry.displayName) ?? readStringValue(entry.rawName))
-    .filter((name): name is string => name !== null)
-    .join(" / ");
   return {
-    key: readSpecString(value, "creativeRef") ?? readSpecString(value, "id"),
-    displayName: readSpecString(value, "name") ?? rawName,
-    mediaType: readSpecString(value, "mediaType"),
-    headline: readSpecString(value, "headline") ?? readSpecString(value, "title"),
+    key:
+      readSpecString(creative, "key") ??
+      readSpecString(value, "creativeRef") ??
+      readSpecString(value, "id") ??
+      readNestedRawString(value, ["raw", "creative", "id"]),
+    displayName:
+      readSpecString(creative, "displayName") ??
+      readSpecString(value, "name") ??
+      readNestedRawString(value, ["raw", "creative", "name"]) ??
+      rawName,
+    mediaType:
+      readSpecString(creative, "mediaType") ??
+      readSpecString(value, "mediaType") ??
+      (readNestedRawString(value, ["raw", "creative", "video_id"]) ? "video" : null),
+    headline:
+      readSpecString(creative, "headline") ??
+      readSpecString(value, "headline") ??
+      readSpecString(value, "title") ??
+      readNestedRawString(value, ["raw", "creative", "title"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "link_data", "name"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "video_data", "title"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "template_data", "name"]),
     primaryText:
+      readSpecString(creative, "primaryText") ??
       readSpecString(value, "primaryText") ??
       readSpecString(value, "body") ??
-      (hierarchyText ? `Existing Meta hierarchy: ${hierarchyText}` : null),
-    callToAction: readSpecString(value, "callToAction"),
-    linkUrl: readSpecString(value, "linkUrl"),
-    pageId: readSpecString(value, "pageId"),
-    instagramActorId: readSpecString(value, "instagramActorId"),
+      readNestedRawString(value, ["raw", "creative", "body"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "link_data", "message"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "video_data", "message"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "template_data", "message"]) ??
+      null,
+    callToAction:
+      readSpecString(creative, "callToAction") ??
+      readSpecString(value, "callToAction") ??
+      readNestedRawString(value, ["raw", "creative", "call_to_action_type"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "link_data", "call_to_action", "type"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "video_data", "call_to_action", "type"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "template_data", "call_to_action", "type"]),
+    linkUrl:
+      readSpecString(creative, "linkUrl") ??
+      readSpecString(value, "linkUrl") ??
+      readNestedRawString(value, ["raw", "creative", "object_url"]) ??
+      readNestedRawString(value, ["raw", "creative", "template_url"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "link_data", "link"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "link_data", "call_to_action", "value", "link"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "video_data", "call_to_action", "value", "link"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "template_data", "link"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "template_data", "call_to_action", "value", "link"]),
+    pageId:
+      readSpecString(creative, "pageId") ??
+      readSpecString(value, "pageId") ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "page_id"]),
+    instagramActorId:
+      readSpecString(creative, "instagramActorId") ??
+      readSpecString(value, "instagramActorId") ??
+      readNestedRawString(value, ["raw", "creative", "instagram_actor_id"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "instagram_actor_id"]),
     storageRef: readSpecString(value, "storageRef"),
     provider: readSpecString(value, "provider"),
     model: readSpecString(value, "model"),
-    images: readSpecStringArray(value, "images"),
+    images: [
+      ...readSpecStringArray(creative, "images"),
+      ...readSpecStringArray(value, "images"),
+    ],
   };
 }
 

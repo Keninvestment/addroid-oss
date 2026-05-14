@@ -279,7 +279,7 @@ test("BrandYamlSchema accepts Instagram profile copy values from Meta", () => {
         id: "instagram-profile-creative",
         name: "Instagram Profile Creative",
         mediaType: "video",
-        primaryText: "下通り交差点にあるチル空間",
+        primaryText: "駅前にある落ち着いた店舗空間",
         callToAction: "VIEW_INSTAGRAM_PROFILE",
         callToActions: ["CALL_NOW"],
       },

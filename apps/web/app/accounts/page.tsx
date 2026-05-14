@@ -30,6 +30,7 @@ import { ReauthButton } from "./ReauthButton";
 import { RefreshBusinessesButton } from "./RefreshBusinessesButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { getPaginationState, paginationLabel } from "../../lib/pagination";
+import { firstSearchParam } from "../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -38,11 +39,6 @@ interface SearchParamsInput {
   reason?: string | string[];
   accounts?: string | string[];
   reauthPage?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 export default async function AccountsPage({
@@ -184,9 +180,9 @@ export default async function AccountsPage({
 
   const defaultAccount = accounts.find((a) => a.id === defaultAdAccountId) ?? null;
 
-  const oauthQuery = single(resolvedSearchParams?.oauth);
-  const reasonQuery = single(resolvedSearchParams?.reason);
-  const accountsQuery = single(resolvedSearchParams?.accounts);
+  const oauthQuery = firstSearchParam(resolvedSearchParams?.oauth);
+  const reasonQuery = firstSearchParam(resolvedSearchParams?.reason);
+  const accountsQuery = firstSearchParam(resolvedSearchParams?.accounts);
   const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
   const reauthPagination = getPaginationState(

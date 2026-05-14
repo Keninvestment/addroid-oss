@@ -29,6 +29,7 @@ import { SyncCampaignsButton } from "./SyncCampaignsButton";
 import type { StatusState } from "../../components/ui/StatusDot";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/meta-runtime";
+import { firstSearchParam } from "../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -40,11 +41,6 @@ interface SearchParamsInput {
   tab?: string | string[];
   campaignId?: string | string[];
   adsetId?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 const ALLOWED_STATUS = new Set(["PAUSED", "ACTIVE", "ARCHIVED"]);
@@ -129,13 +125,13 @@ export default async function CampaignsPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const accountIdParam = single(resolvedSearchParams?.accountId);
-  const statusParam = (single(resolvedSearchParams?.status) ?? "all").toUpperCase();
-  const queryParam = (single(resolvedSearchParams?.q) ?? "").trim();
-  const fromApply = single(resolvedSearchParams?.fromApply);
-  const tabParam = single(resolvedSearchParams?.tab) ?? "campaign";
-  const campaignIdParam = single(resolvedSearchParams?.campaignId);
-  const adsetIdParam = single(resolvedSearchParams?.adsetId);
+  const accountIdParam = firstSearchParam(resolvedSearchParams?.accountId);
+  const statusParam = (firstSearchParam(resolvedSearchParams?.status) ?? "all").toUpperCase();
+  const queryParam = (firstSearchParam(resolvedSearchParams?.q) ?? "").trim();
+  const fromApply = firstSearchParam(resolvedSearchParams?.fromApply);
+  const tabParam = firstSearchParam(resolvedSearchParams?.tab) ?? "campaign";
+  const campaignIdParam = firstSearchParam(resolvedSearchParams?.campaignId);
+  const adsetIdParam = firstSearchParam(resolvedSearchParams?.adsetId);
   const activeTab = (ALLOWED_TABS.has(tabParam) ? tabParam : "campaign") as CampaignsTab;
 
   let dbReady = true;

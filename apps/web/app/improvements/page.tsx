@@ -55,6 +55,7 @@ import { RunCronButton } from "../../components/RunCronButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
 import { getPaginationState, paginationLabel } from "../../lib/pagination";
+import { firstSearchParamOrNull } from "../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -166,6 +167,9 @@ interface ParsedAuditMetadata {
   classification: ImprovementPrClassification | null;
   auditDecision: ImprovementPrAuditDecision | null;
   dangerousCategories: string[];
+  skippedAt: string | null;
+  recommendation: string | null;
+  issues: ImprovementIssue[];
   proposals: ImprovementProposalDetail[];
   mediaBuyerRationale: string | null;
   dryRunSummary: string | null;
@@ -187,6 +191,12 @@ interface ImprovementProposalDetail {
   category: string;
   proposedChange: string;
   rationale: string;
+}
+
+interface ImprovementIssue {
+  severity: string;
+  category: string;
+  message: string;
 }
 
 interface BudgetImpact {
@@ -223,11 +233,6 @@ function readNullableNumber(v: unknown): number | null {
 
 function readString(v: unknown, fallback: string | null = null): string | null {
   return typeof v === "string" ? v : fallback;
-}
-
-function single(value: string | string[] | undefined): string | null {
-  if (Array.isArray(value)) return value[0] ?? null;
-  return value ?? null;
 }
 
 function parseCronRunAggregate(output: unknown): CronRunAggregate | null {
@@ -309,6 +314,9 @@ function parseAuditMetadata(metadata: unknown): ParsedAuditMetadata {
     classification,
     auditDecision,
     dangerousCategories,
+    skippedAt: readString(m.skippedAt),
+    recommendation: readString(m.recommendation),
+    issues: parseImprovementIssues(m.issues),
     proposals,
     mediaBuyerRationale: readString(m.mediaBuyerRationale),
     dryRunSummary: readString(m.dryRunSummary),
@@ -323,6 +331,18 @@ function parseAuditMetadata(metadata: unknown): ParsedAuditMetadata {
     headSha: readString(m.headSha),
     summary: readString(m.summary),
   };
+}
+
+function parseImprovementIssues(value: unknown): ImprovementIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const message = readString(item.message) ?? "";
+    const category = readString(item.category) ?? "";
+    const severity = readString(item.severity) ?? "";
+    if (!message && !category && !severity) return [];
+    return [{ message, category, severity }];
+  });
 }
 
 function parseProposalDetails(value: unknown): ImprovementProposalDetail[] {
@@ -344,6 +364,43 @@ function parseProposalDetails(value: unknown): ImprovementProposalDetail[] {
     if (!target && !category && !proposedChange && !rationale) return [];
     return [{ hierarchy, target, category, proposedChange, rationale }];
   });
+}
+
+function parseAnalystOutput(outputs: unknown): {
+  proposals: ImprovementProposalDetail[];
+  rationale: string | null;
+} {
+  if (!isRecord(outputs)) return { proposals: [], rationale: null };
+  const proposals = Array.isArray(outputs.topImprovements)
+    ? outputs.topImprovements.flatMap((item) => {
+        if (!isRecord(item)) return [];
+        const hierarchyRaw = readString(item.hierarchy) ?? "unknown";
+        const hierarchy: ImprovementProposalDetail["hierarchy"] =
+          hierarchyRaw === "account" ||
+          hierarchyRaw === "campaign" ||
+          hierarchyRaw === "adset" ||
+          hierarchyRaw === "ad"
+            ? hierarchyRaw
+            : "unknown";
+        const target = readString(item.target) ?? "";
+        const rationale = readString(item.rationale) ?? "";
+        const expectedImpact = readString(item.expectedImpact) ?? "";
+        if (!target && !rationale && !expectedImpact) return [];
+        return [
+          {
+            hierarchy,
+            target,
+            category: "analysis",
+            proposedChange: expectedImpact,
+            rationale,
+          },
+        ];
+      })
+    : [];
+  return {
+    proposals,
+    rationale: readString(outputs.commentary),
+  };
 }
 
 function parseMediaBuyerOutput(outputs: unknown): {
@@ -602,8 +659,18 @@ function proposalCategoryLabel(value: string): string {
     pause: "停止提案",
     new_campaign: "新規キャンペーン",
     monthly_budget_change: "月予算変更",
+    analysis: "分析候補",
   };
   return labels[value] ?? value.replaceAll("_", " ");
+}
+
+function displayProposalCount(
+  row: AuditRow & { action: ImprovementPrAction },
+  parsed: ParsedAuditMetadata
+): number | null {
+  if (parsed.proposalCount !== null) return parsed.proposalCount;
+  if (row.action === "improvement_pr.skipped") return 0;
+  return null;
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -629,7 +696,7 @@ export default async function ImprovementsPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const selectedAuditId = single(resolvedSearchParams?.auditId);
+  const selectedAuditId = firstSearchParamOrNull(resolvedSearchParams?.auditId);
   let runs: CronRunRow[] = [];
   let aiRuns: AiRunRow[] = [];
   let audits: AuditRow[] = [];
@@ -798,13 +865,20 @@ export default async function ImprovementsPage({
   }
   const mediaBuyerOutput =
     detailAiRuns.find((run) => run.agent === "media_buyer")?.outputs ?? null;
+  const analystOutput =
+    detailAiRuns.find((run) => run.agent === "analyst")?.outputs ?? null;
   const mediaBuyerDetail = parseMediaBuyerOutput(mediaBuyerOutput);
+  const analystDetail = parseAnalystOutput(analystOutput);
   const detailProposals =
     detailAudit?.parsed.proposals.length
       ? detailAudit.parsed.proposals
-      : mediaBuyerDetail.proposals;
+      : mediaBuyerDetail.proposals.length
+        ? mediaBuyerDetail.proposals
+        : analystDetail.proposals;
   const detailMediaBuyerRationale =
-    detailAudit?.parsed.mediaBuyerRationale ?? mediaBuyerDetail.rationale;
+    detailAudit?.parsed.mediaBuyerRationale ??
+    mediaBuyerDetail.rationale ??
+    analystDetail.rationale;
   const detailDryRunSummary =
     detailAudit?.parsed.dryRunSummary ?? mediaBuyerDetail.dryRunSummary;
   const detailBudgetImpact =
@@ -997,12 +1071,14 @@ export default async function ImprovementsPage({
     },
     {
       header: "提案数",
-      cell: ({ parsed }) =>
-        parsed.proposalCount === null ? (
+      cell: ({ row, parsed }) => {
+        const proposalCount = displayProposalCount(row, parsed);
+        return proposalCount === null ? (
           <span>—</span>
         ) : (
-          <span className="tabular-nums">{parsed.proposalCount}</span>
-        ),
+          <span className="tabular-nums">{proposalCount}</span>
+        );
+      },
       className: "tabular",
       headerClassName: "tabular",
     },
@@ -1242,6 +1318,32 @@ export default async function ImprovementsPage({
           ),
         },
         {
+          label: "停止箇所",
+          value: detailAudit.parsed.skippedAt ? (
+            <span>
+              <InlineCode>{detailAudit.parsed.skippedAt}</InlineCode>
+              {detailAudit.parsed.recommendation ? (
+                <>
+                  {" "}
+                  <StatusBadge
+                    state={
+                      detailAudit.parsed.recommendation === "approve"
+                        ? "ok"
+                        : detailAudit.parsed.recommendation === "reject"
+                          ? "error"
+                          : "warn"
+                    }
+                  >
+                    {decisionLabel(detailAudit.parsed.recommendation)}
+                  </StatusBadge>
+                </>
+              ) : null}
+            </span>
+          ) : (
+            <span>—</span>
+          ),
+        },
+        {
           label: "注意が必要な変更",
           value:
             detailAudit.parsed.dangerousCategories.length === 0 ? (
@@ -1255,11 +1357,11 @@ export default async function ImprovementsPage({
         {
           label: "提案数",
           value:
-            detailAudit.parsed.proposalCount === null ? (
+            displayProposalCount(detailAudit.row, detailAudit.parsed) === null ? (
               <span>—</span>
             ) : (
               <span className="tabular-nums">
-                {detailAudit.parsed.proposalCount}
+                {displayProposalCount(detailAudit.row, detailAudit.parsed)}
               </span>
             ),
         },
@@ -1443,52 +1545,6 @@ export default async function ImprovementsPage({
         </div>
 
         <Panel
-          title="自動実行の状態"
-          subtitle={
-            !dbReady
-              ? "保存先を確認してください"
-              : scheduleRow
-                ? "改善提案の定期実行"
-                : "改善提案の自動実行は未登録"
-          }
-          status={
-            <StatusDot
-              state={
-                !dbReady
-                  ? "warn"
-                  : !scheduleRow
-                    ? "idle"
-                    : scheduleRow.enabled
-                      ? "ok"
-                      : "idle"
-              }
-            >
-              {!dbReady
-                ? "warn"
-                : !scheduleRow
-                  ? "未登録"
-                  : scheduleRow.enabled
-                    ? "有効"
-                    : "無効"}
-            </StatusDot>
-          }
-        >
-          {!dbReady ? (
-            <EmptyState
-              title="自動実行の状態を読み出せません"
-              description="接続と健康状態を確認してください。"
-            />
-          ) : !scheduleRow ? (
-            <EmptyState
-              title="改善提案の自動実行はまだ登録されていません"
-              description="AdDroid を開始すると標準の自動実行が登録されます。"
-            />
-          ) : (
-            <KeyValueList items={scheduleItems} />
-          )}
-        </Panel>
-
-        <Panel
           title={detailPanelTitle}
           subtitle={detailPanelSubtitle}
           status={
@@ -1534,7 +1590,11 @@ export default async function ImprovementsPage({
               <KeyValueList items={detailAuditItems} />
               {detailProposals.length > 0 ? (
                 <div style={{ display: "grid", gap: "0.75rem" }}>
-                  <SectionLabel>提案された改善</SectionLabel>
+                  <SectionLabel>
+                    {detailAudit.parsed.proposals.length || mediaBuyerDetail.proposals.length
+                      ? "提案された改善"
+                      : "分析からの改善候補"}
+                  </SectionLabel>
                   <div style={{ display: "grid", gap: "0.75rem" }}>
                     {detailProposals.map((proposal, index) => (
                       <div
@@ -1573,6 +1633,61 @@ export default async function ImprovementsPage({
                             }}
                           >
                             理由: {proposal.rationale}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {detailAudit.parsed.issues.length > 0 ? (
+                <div style={{ display: "grid", gap: "0.75rem" }}>
+                  <SectionLabel>確認メモ</SectionLabel>
+                  <div style={{ display: "grid", gap: "0.5rem" }}>
+                    {detailAudit.parsed.issues.map((issue, index) => (
+                      <div
+                        key={`${issue.category}:${issue.message}:${index}`}
+                        style={{
+                          border: "1px solid var(--color-border-subtle)",
+                          borderRadius: "var(--radius-md)",
+                          padding: "0.75rem",
+                          display: "grid",
+                          gap: "0.375rem",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "0.5rem",
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          {issue.severity ? (
+                            <StatusBadge
+                              state={
+                                issue.severity === "error"
+                                  ? "error"
+                                  : issue.severity === "warn"
+                                    ? "warn"
+                                    : "info"
+                              }
+                            >
+                              {issue.severity}
+                            </StatusBadge>
+                          ) : null}
+                          {issue.category ? (
+                            <span style={{ fontWeight: 600 }}>{issue.category}</span>
+                          ) : null}
+                        </div>
+                        {issue.message ? (
+                          <div
+                            style={{
+                              fontSize: "0.875rem",
+                              color: "var(--color-text-secondary)",
+                            }}
+                          >
+                            {issue.message}
                           </div>
                         ) : null}
                       </div>
@@ -1747,6 +1862,52 @@ export default async function ImprovementsPage({
                 state={aiRunsPagination}
               />
             </div>
+          )}
+        </Panel>
+
+        <Panel
+          title="自動実行の状態"
+          subtitle={
+            !dbReady
+              ? "保存先を確認してください"
+              : scheduleRow
+                ? "改善提案の定期実行"
+                : "改善提案の自動実行は未登録"
+          }
+          status={
+            <StatusDot
+              state={
+                !dbReady
+                  ? "warn"
+                  : !scheduleRow
+                    ? "idle"
+                    : scheduleRow.enabled
+                      ? "ok"
+                      : "idle"
+              }
+            >
+              {!dbReady
+                ? "warn"
+                : !scheduleRow
+                  ? "未登録"
+                  : scheduleRow.enabled
+                    ? "有効"
+                    : "無効"}
+            </StatusDot>
+          }
+        >
+          {!dbReady ? (
+            <EmptyState
+              title="自動実行の状態を読み出せません"
+              description="接続と健康状態を確認してください。"
+            />
+          ) : !scheduleRow ? (
+            <EmptyState
+              title="改善提案の自動実行はまだ登録されていません"
+              description="AdDroid を開始すると標準の自動実行が登録されます。"
+            />
+          ) : (
+            <KeyValueList items={scheduleItems} />
           )}
         </Panel>
       </div>

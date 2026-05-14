@@ -7,17 +7,13 @@ import { PageHeader } from "../../../components/ui/PageHeader";
 import { Panel } from "../../../components/ui/Panel";
 import { SetDefaultAccountForm } from "../SetDefaultAccountForm";
 import { ensureWebWorkspace } from "../../../lib/meta-runtime";
+import { firstSearchParam } from "../../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
 interface SearchParamsInput {
   oauth?: string | string[];
   accounts?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 export default async function SelectAccountPage({
@@ -47,8 +43,8 @@ export default async function SelectAccountPage({
       })
     : [];
 
-  const oauth = single(resolvedSearchParams?.oauth);
-  const count = Number(single(resolvedSearchParams?.accounts) ?? "0");
+  const oauth = firstSearchParam(resolvedSearchParams?.oauth);
+  const count = Number(firstSearchParam(resolvedSearchParams?.accounts) ?? "0");
 
   return (
     <>

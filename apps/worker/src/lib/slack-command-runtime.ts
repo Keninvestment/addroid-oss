@@ -62,8 +62,7 @@ import type { MetaAdapter } from "@addroid/meta-adapter";
 import { executeActivate } from "./activate-runtime.js";
 import { type LoadedBudgetGuardPolicy, buildBudgetGuardSpendContext } from "./budget-guard-runtime.js";
 import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performance-context.js";
-import { loadCreativeReferenceImages } from "./creative-reference-images.js";
-import { addCreativeImageUnderstanding } from "./creative-image-understanding.js";
+import { enrichCreativeGenerationContext } from "./creative-generation-context.js";
 import { refreshLatestInsightsForManualImprovementPr } from "./improvement-pr-insights-refresh.js";
 import { formatImprovementReportForUser } from "./improvement-report-format.js";
 
@@ -623,17 +622,13 @@ async function handleImprove(
               includeToday: true,
             }
           );
-          const referenceImages = isReadableCreativeStorage(deps.improvementPrCreativeStorage)
-            ? await loadCreativeReferenceImages(
-                deps.improvementPrCreativeStorage,
-                performanceContext.creativeContext
-              )
-            : [];
-          const creativeContextWithVision = await addCreativeImageUnderstanding(
-            deps.improvementPrLlmProvider ?? null,
-            performanceContext.creativeContext,
-            referenceImages
-          );
+          const enrichedContext = await enrichCreativeGenerationContext({
+            provider: deps.improvementPrLlmProvider ?? null,
+            storage: isReadableCreativeStorage(deps.improvementPrCreativeStorage)
+              ? deps.improvementPrCreativeStorage
+              : null,
+            creativeContext: performanceContext.creativeContext,
+          });
           return runImprovementPrOnce({
             workspaceId: deps.workspaceId,
             mode: effectiveMode,
@@ -642,8 +637,8 @@ async function handleImprove(
             baseRef: repo.baseRef,
             snapshotIds: performanceContext.snapshotIds,
             analysisWindow: performanceContext.analysisWindow,
-            creativeContext: creativeContextWithVision,
-            referenceImages,
+            creativeContext: enrichedContext.creativeContext,
+            referenceImages: enrichedContext.referenceImages,
             store: deps.improvementPrStore,
             pipeline: deps.improvementPrPipeline,
             publisher: deps.improvementPrPublisher,

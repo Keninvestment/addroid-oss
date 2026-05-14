@@ -45,6 +45,7 @@ import {
   type CreativeStatus,
 } from "../../lib/creative-helpers";
 import { ensureWebWorkspace } from "../../lib/meta-runtime";
+import { firstSearchParam } from "../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -52,11 +53,6 @@ interface SearchParamsInput {
   accountId?: string | string[];
   status?: string | string[];
   provider?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 interface CreativeRow {
@@ -93,9 +89,9 @@ export default async function CreativesPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const accountIdParam = single(resolvedSearchParams?.accountId) ?? null;
-  const statusParam = (single(resolvedSearchParams?.status) ?? "all").trim();
-  const providerParam = (single(resolvedSearchParams?.provider) ?? "all").trim();
+  const accountIdParam = firstSearchParam(resolvedSearchParams?.accountId) ?? null;
+  const statusParam = (firstSearchParam(resolvedSearchParams?.status) ?? "all").trim();
+  const providerParam = (firstSearchParam(resolvedSearchParams?.provider) ?? "all").trim();
 
   let dbReady = true;
   let accounts: AccountOption[] = [];

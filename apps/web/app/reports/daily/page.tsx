@@ -24,6 +24,7 @@ import { RunCronButton } from "../../../components/RunCronButton";
 import { formatDateTime, formatStoredDateOnly, resolveDisplayTimeZone } from "../../../lib/datetime";
 import { ensureWebWorkspace } from "../../../lib/meta-runtime";
 import { getPaginationState, paginationLabel } from "../../../lib/pagination";
+import { firstSearchParam } from "../../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -103,11 +104,6 @@ interface SearchParamsInput {
   runId?: string | string[];
   runsPage?: string | string[];
   snapshotsPage?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -595,7 +591,7 @@ export default async function ReportsDailyPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const selectedRunId = single(resolvedSearchParams?.runId) ?? null;
+  const selectedRunId = firstSearchParam(resolvedSearchParams?.runId) ?? null;
   let runs: CronRunRow[] = [];
   let latestRunCandidates: CronRunRow[] = [];
   let selectedRunFromQuery: CronRunRow | null = null;

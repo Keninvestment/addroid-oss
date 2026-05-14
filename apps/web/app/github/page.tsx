@@ -11,6 +11,7 @@ import { BootstrapOpsRepoButton } from "./BootstrapOpsRepoButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
 import { ensureWebWorkspace } from "../../lib/github-runtime";
 import { getPaginationState, paginationLabel } from "../../lib/pagination";
+import { firstSearchParam } from "../../lib/search-params";
 
 export const dynamic = "force-dynamic";
 
@@ -19,11 +20,6 @@ interface SearchParamsInput {
   bootstrap?: string | string[];
   reason?: string | string[];
   prsPage?: string | string[];
-}
-
-function single(v: string | string[] | undefined): string | undefined {
-  if (Array.isArray(v)) return v[0];
-  return v;
 }
 
 export default async function GithubPage({
@@ -93,9 +89,9 @@ export default async function GithubPage({
   const repo = repos[0];
   const repoState = !dbReady ? "warn" : !repo ? "warn" : repo.bootstrappedAt ? "ok" : "warn";
 
-  const oauthQuery = single(resolvedSearchParams?.oauth);
-  const bootstrapQuery = single(resolvedSearchParams?.bootstrap);
-  const reasonQuery = single(resolvedSearchParams?.reason);
+  const oauthQuery = firstSearchParam(resolvedSearchParams?.oauth);
+  const bootstrapQuery = firstSearchParam(resolvedSearchParams?.bootstrap);
+  const reasonQuery = firstSearchParam(resolvedSearchParams?.reason);
   const banner = renderBanner(oauthQuery, bootstrapQuery, reasonQuery);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
   const prsPagination = getPaginationState(resolvedSearchParams, "prsPage", prsTotal);

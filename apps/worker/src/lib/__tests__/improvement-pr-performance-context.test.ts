@@ -100,26 +100,26 @@ test("loadRecentPerformanceSnapshotContext grounds snapshot rows via ads_hierarc
             id: "hier-ad",
             nodeType: "ad",
             nodeKey: "120228334025200756",
-            displayName: "新しいトラフィック広告",
+            displayName: "既存のトラフィック広告",
             status: "paused",
             externalId: "120228334025200756",
-            spec: { raw: { name: "新しいトラフィック広告" } },
+            spec: { raw: { name: "既存のトラフィック広告" } },
             parent: {
               id: "hier-adset",
               nodeType: "adset",
               nodeKey: "120228334025180756",
-              displayName: "ADS_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算",
+              displayName: "ADS_店舗A 縦長 - 動画 - プロフィール誘導 - CP予算",
               status: "paused",
               externalId: "120228334025180756",
-              spec: { raw: { name: "ADS_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算" } },
+              spec: { raw: { name: "ADS_店舗A 縦長 - 動画 - プロフィール誘導 - CP予算" } },
               parent: {
                 id: "hier-campaign",
                 nodeType: "campaign",
                 nodeKey: "120228334025190756",
-                displayName: "CP_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算",
+                displayName: "CP_店舗A 縦長 - 動画 - プロフィール誘導 - CP予算",
                 status: "paused",
                 externalId: "120228334025190756",
-                spec: { raw: { name: "CP_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算" } },
+                spec: { raw: { name: "CP_店舗A 縦長 - 動画 - プロフィール誘導 - CP予算" } },
               },
             },
           },
@@ -137,12 +137,126 @@ test("loadRecentPerformanceSnapshotContext grounds snapshot rows via ads_hierarc
   });
 
   assert.equal(context.creativeContext?.target?.hierarchyId, "hier-ad");
-  assert.equal(context.creativeContext?.target?.displayName, "新しいトラフィック広告");
-  assert.match(context.creativeContext?.notes?.join("\n") ?? "", /SIN熊本店 縦長/);
-  assert.match(
-    context.creativeContext?.target?.creative?.primaryText ?? "",
-    /Existing Meta hierarchy/
+  assert.equal(context.creativeContext?.target?.displayName, "既存のトラフィック広告");
+  assert.match(context.creativeContext?.notes?.join("\n") ?? "", /店舗A 縦長/);
+  assert.equal(context.creativeContext?.target?.creative?.primaryText, null);
+});
+
+test("loadRecentPerformanceSnapshotContext extracts Meta creative copy and URL from synced ad specs", async () => {
+  const prisma = {
+    performanceSnapshot: {
+      async findMany() {
+        return [
+          {
+            ...row("today-ad", "ad", "2026-05-11", 8_000_000n, 800, 80, 0),
+            nodeKey: "ad-1",
+            hierarchyId: "hier-ad",
+            hierarchy: {
+              id: "hier-ad",
+              nodeType: "ad",
+              nodeKey: "ad-1",
+              displayName: "店舗A プロフィール誘導広告",
+              status: "active",
+              externalId: "ad-1",
+              spec: {
+                source: "meta_graph_sync",
+                creative: {
+                  key: "creative-1",
+                  displayName: "店舗A PR 動画",
+                  mediaType: "video",
+                  headline: "駅近のくつろぎ空間",
+                  primaryText: "駅から徒歩5分。落ち着いた内装の店舗でゆっくり過ごせます。",
+                  callToAction: "LEARN_MORE",
+                  linkUrl: "https://example.com/store-a",
+                  pageId: "page-1",
+                  instagramActorId: "ig-1",
+                },
+                raw: { name: "店舗A プロフィール誘導広告" },
+              },
+            },
+          },
+        ];
+      },
+    },
+    creative: { async findMany() { return []; } },
+  } as unknown as PrismaClient;
+
+  const context = await loadRecentPerformanceSnapshotContext(prisma, {
+    accountId: "acct-1",
+    timeZone: "UTC",
+    now: new Date("2026-05-11T12:00:00.000Z"),
+    includeToday: true,
+  });
+
+  const creative = context.creativeContext?.target?.creative;
+  assert.equal(creative?.key, "creative-1");
+  assert.equal(creative?.headline, "駅近のくつろぎ空間");
+  assert.equal(
+    creative?.primaryText,
+    "駅から徒歩5分。落ち着いた内装の店舗でゆっくり過ごせます。"
   );
+  assert.equal(creative?.callToAction, "LEARN_MORE");
+  assert.equal(creative?.linkUrl, "https://example.com/store-a");
+  assert.match(context.creativeContext?.notes?.join("\n") ?? "", /link=https:\/\/example.com/);
+});
+
+test("loadRecentPerformanceSnapshotContext falls back to raw Meta object_story_spec creative fields", async () => {
+  const prisma = {
+    performanceSnapshot: {
+      async findMany() {
+        return [
+          {
+            ...row("today-ad", "ad", "2026-05-11", 8_000_000n, 800, 80, 0),
+            nodeKey: "ad-1",
+            hierarchyId: "hier-ad",
+            hierarchy: {
+              id: "hier-ad",
+              nodeType: "ad",
+              nodeKey: "ad-1",
+              displayName: "店舗A プロフィール誘導広告",
+              status: "active",
+              externalId: "ad-1",
+              spec: {
+                source: "meta_graph_sync",
+                raw: {
+                  name: "店舗A プロフィール誘導広告",
+                  creative: {
+                    id: "creative-raw-1",
+                    name: "Raw creative",
+                    object_story_spec: {
+                      page_id: "page-raw",
+                      link_data: {
+                        name: "駅近でくつろぐ夜",
+                        message: "Wi-Fiと電源を備えた落ち着いたカフェバー。",
+                        link: "https://example.com/raw-store-a",
+                        call_to_action: { type: "LEARN_MORE" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        ];
+      },
+    },
+    creative: { async findMany() { return []; } },
+  } as unknown as PrismaClient;
+
+  const context = await loadRecentPerformanceSnapshotContext(prisma, {
+    accountId: "acct-1",
+    timeZone: "UTC",
+    now: new Date("2026-05-11T12:00:00.000Z"),
+    includeToday: true,
+  });
+
+  const creative = context.creativeContext?.target?.creative;
+  assert.equal(creative?.key, "creative-raw-1");
+  assert.equal(creative?.headline, "駅近でくつろぐ夜");
+  assert.equal(creative?.primaryText, "Wi-Fiと電源を備えた落ち着いたカフェバー。");
+  assert.equal(creative?.callToAction, "LEARN_MORE");
+  assert.equal(creative?.linkUrl, "https://example.com/raw-store-a");
+  assert.equal(creative?.pageId, "page-raw");
 });
 
 function row(

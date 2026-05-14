@@ -30,6 +30,18 @@ interface GraphRow {
   raw: Record<string, unknown>;
 }
 
+interface MetaCreativeSpec {
+  key?: string;
+  displayName?: string;
+  mediaType?: string;
+  headline?: string;
+  primaryText?: string;
+  callToAction?: string;
+  linkUrl?: string;
+  pageId?: string;
+  instagramActorId?: string;
+}
+
 interface GraphPage {
   data?: unknown;
   paging?: { next?: unknown };
@@ -341,7 +353,17 @@ async function fetchGraphRows(
       ? "id,name,status,effective_status,configured_status,updated_time"
       : edge === "adsets"
         ? "id,name,status,effective_status,configured_status,campaign_id,updated_time"
-        : "id,name,status,effective_status,configured_status,campaign_id,adset_id,updated_time";
+        : [
+            "id",
+            "name",
+            "status",
+            "effective_status",
+            "configured_status",
+            "campaign_id",
+            "adset_id",
+            "updated_time",
+            "creative{id,name,title,body,call_to_action_type,object_url,template_url,object_story_spec,thumbnail_url,image_url,video_id,effective_object_story_id,instagram_actor_id,instagram_permalink_url}",
+          ].join(",");
   let url = new URL(
     `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${accountId}/${edge}`
   );
@@ -429,6 +451,7 @@ async function upsertNode(
   parentId: string | null
 ): Promise<{ id: string }> {
   const status = normalizeMetaStatus(row.effectiveStatus ?? row.status);
+  const creative = nodeType === "ad" ? normalizeMetaCreative(row.raw) : null;
   const data = {
     displayName: row.name ?? row.id,
     status,
@@ -439,8 +462,9 @@ async function upsertNode(
       configuredStatus: row.configuredStatus ?? row.status,
       effectiveStatus: row.effectiveStatus,
       syncedAt: new Date().toISOString(),
+      ...(creative ? { creative } : {}),
       raw: row.raw,
-    } as Prisma.InputJsonValue,
+    } as unknown as Prisma.InputJsonValue,
   };
   return prisma.adsHierarchyNode.upsert({
     where: {
@@ -459,6 +483,57 @@ async function upsertNode(
     },
     select: { id: true },
   });
+}
+
+function normalizeMetaCreative(rawAd: Record<string, unknown>): MetaCreativeSpec | null {
+  const rawCreative = isRecord(rawAd.creative) ? rawAd.creative : null;
+  if (!rawCreative) return null;
+  const objectStorySpec = isRecord(rawCreative.object_story_spec)
+    ? rawCreative.object_story_spec
+    : {};
+
+  const headline = firstString([
+    readString(rawCreative.title),
+    readNestedString(objectStorySpec, ["link_data", "name"]),
+    readNestedString(objectStorySpec, ["video_data", "title"]),
+    readNestedString(objectStorySpec, ["template_data", "name"]),
+  ]);
+  const primaryText = firstString([
+    readString(rawCreative.body),
+    readNestedString(objectStorySpec, ["link_data", "message"]),
+    readNestedString(objectStorySpec, ["video_data", "message"]),
+    readNestedString(objectStorySpec, ["template_data", "message"]),
+  ]);
+  const callToAction = firstString([
+    readString(rawCreative.call_to_action_type),
+    readNestedString(objectStorySpec, ["link_data", "call_to_action", "type"]),
+    readNestedString(objectStorySpec, ["video_data", "call_to_action", "type"]),
+    readNestedString(objectStorySpec, ["template_data", "call_to_action", "type"]),
+  ]);
+  const linkUrl = firstString([
+    readString(rawCreative.object_url),
+    readString(rawCreative.template_url),
+    readNestedString(objectStorySpec, ["link_data", "link"]),
+    readNestedString(objectStorySpec, ["link_data", "call_to_action", "value", "link"]),
+    readNestedString(objectStorySpec, ["video_data", "call_to_action", "value", "link"]),
+    readNestedString(objectStorySpec, ["template_data", "link"]),
+    readNestedString(objectStorySpec, ["template_data", "call_to_action", "value", "link"]),
+  ]);
+  const out: MetaCreativeSpec = {
+    key: readString(rawCreative.id) ?? undefined,
+    displayName: readString(rawCreative.name) ?? undefined,
+    mediaType: readString(rawCreative.video_id) ? "video" : "image",
+    headline: headline ?? undefined,
+    primaryText: primaryText ?? undefined,
+    callToAction: callToAction ?? undefined,
+    linkUrl: linkUrl ?? undefined,
+    pageId: readNestedString(objectStorySpec, ["page_id"]) ?? undefined,
+    instagramActorId:
+      readString(rawCreative.instagram_actor_id) ??
+      readNestedString(objectStorySpec, ["instagram_actor_id"]) ??
+      undefined,
+  };
+  return Object.values(out).some((value) => value !== undefined) ? out : null;
 }
 
 function normalizeMetaStatus(value: string | null): string {
@@ -501,6 +576,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readNestedString(value: unknown, path: string[]): string | null {
+  let current = value;
+  for (const key of path) {
+    if (!isRecord(current)) return null;
+    current = current[key];
+  }
+  return readString(current);
+}
+
+function firstString(values: Array<string | null>): string | null {
+  return values.find((value): value is string => value !== null) ?? null;
 }
 
 function extractConversions(row: Record<string, unknown>): number {

@@ -96,8 +96,7 @@ import {
   createPrismaImprovementPrStore,
 } from "./lib/improvement-pr-runtime.js";
 import { loadRecentPerformanceSnapshotContext } from "./lib/improvement-pr-performance-context.js";
-import { loadCreativeReferenceImages } from "./lib/creative-reference-images.js";
-import { addCreativeImageUnderstanding } from "./lib/creative-image-understanding.js";
+import { enrichCreativeGenerationContext } from "./lib/creative-generation-context.js";
 import { refreshLatestInsightsForManualImprovementPr } from "./lib/improvement-pr-insights-refresh.js";
 import { createPrismaPerformanceSnapshotRetentionStore } from "./lib/retention-runtime.js";
 import { selectLLMProviderForWorker } from "./lib/llm-runtime.js";
@@ -814,15 +813,11 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                   if ("refreshFailedSummary" in performanceContext) {
                     return performanceContext.refreshFailedSummary;
                   }
-                  const referenceImages = await loadCreativeReferenceImages(
-                    creativeStorage,
-                    performanceContext.creativeContext
-                  );
-                  const creativeContextWithVision = await addCreativeImageUnderstanding(
-                    llmSelection.provider,
-                    performanceContext.creativeContext,
-                    referenceImages
-                  );
+                  const enrichedContext = await enrichCreativeGenerationContext({
+                    provider: llmSelection.provider,
+                    storage: creativeStorage,
+                    creativeContext: performanceContext.creativeContext,
+                  });
                   return runImprovementPrOnce({
                     workspaceId: workspace.id,
                     // regression fix: workspace + ad_account の解決済み mode。
@@ -839,8 +834,8 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
                     baseRef,
                     snapshotIds: performanceContext.snapshotIds,
                     analysisWindow: performanceContext.analysisWindow,
-                    creativeContext: creativeContextWithVision,
-                    referenceImages,
+                    creativeContext: enrichedContext.creativeContext,
+                    referenceImages: enrichedContext.referenceImages,
                     store: improvementPrStore,
                     pipeline: pipelineRunner,
                     publisher,

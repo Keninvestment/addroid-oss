@@ -20,12 +20,8 @@ import type {
   ImprovementPrCreativeNodeContext,
 } from "@addroid/queue";
 import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performance-context.js";
-import { addCreativeImageUnderstanding } from "./creative-image-understanding.js";
-import {
-  addLandingPageBriefToCreativeContext,
-  landingPageUrlForPrompt,
-} from "./creative-landing-page-context.js";
-import { loadCreativeReferenceImages } from "./creative-reference-images.js";
+import { landingPageUrlForPrompt } from "./creative-landing-page-context.js";
+import { enrichCreativeGenerationContext } from "./creative-generation-context.js";
 import { selectImageProviderForWorker } from "./image-runtime.js";
 import { ensureOpsRepoLocalCheckout, resolveOpsRepoLocalDirForWorkspace } from "./ops-repo-local.js";
 import { runPlanForRoot } from "./plan-runtime.js";
@@ -281,27 +277,21 @@ export async function createStandaloneCreativeGeneration(opts: {
     referenceImagePaths: opts.input.referenceImagePaths,
     uploadedReferenceMedia: opts.input.uploadedReferenceMedia,
   });
-  const creativeReferenceImages = await loadCreativeReferenceImages(storage, creativeContext);
-  const referenceImages = mergeReferenceImages([
-    ...userReferenceImages,
-    ...creativeReferenceImages,
-  ]);
+  const enrichedContext = await enrichCreativeGenerationContext({
+    provider: opts.llmProvider ?? null,
+    storage,
+    creativeContext,
+    userReferenceImages,
+    explicitUrls: [
+      { label: "requested landing page", url: opts.input.linkUrl },
+      { label: "requested destination URL", url: opts.input.destinationUrl },
+    ],
+  });
+  const referenceImages = enrichedContext.referenceImages;
   const referenceImageUsageMode = referenceImageUsageModeForPrompt(userPrompt);
   const generationReferenceImages =
     referenceImageUsageMode === "direct_image_reference" ? referenceImages : [];
-  const creativeContextWithVision = await addCreativeImageUnderstanding(
-    opts.llmProvider ?? null,
-    creativeContext,
-    referenceImages
-  );
-  const creativeContextWithLanding = await addLandingPageBriefToCreativeContext(
-    opts.llmProvider ?? null,
-    creativeContextWithVision,
-    [
-      { label: "requested landing page", url: opts.input.linkUrl },
-      { label: "requested destination URL", url: opts.input.destinationUrl },
-    ]
-  );
+  const creativeContextWithLanding = enrichedContext.creativeContext;
   const variantCount = Math.max(1, Math.min(4, opts.input.variantCount ?? 3));
   const generatedText = await generateCreativeTextVariants({
     provider: opts.llmProvider ?? null,
@@ -666,24 +656,18 @@ export async function createCreativeSubmissionProposal(opts: {
     timeZone: account.timezoneName ?? workspace.defaultAdAccount?.timezoneName ?? "UTC",
   });
   const userReferenceImages = await loadSubmissionReferenceImages(normalized);
-  const creativeReferenceImages = await loadCreativeReferenceImages(storage, creativeContext);
-  const referenceImages = mergeReferenceImages([
-    ...userReferenceImages,
-    ...creativeReferenceImages,
-  ]);
+  const enrichedContext = await enrichCreativeGenerationContext({
+    provider: opts.llmProvider ?? null,
+    storage,
+    creativeContext,
+    userReferenceImages,
+    explicitUrls: [{ label: "requested landing page", url: normalized.linkUrl }],
+  });
+  const referenceImages = enrichedContext.referenceImages;
   const referenceImageUsageMode = referenceImageUsageModeForPrompt(normalized.prompt);
   const generationReferenceImages =
     referenceImageUsageMode === "direct_image_reference" ? referenceImages : [];
-  const creativeContextWithVision = await addCreativeImageUnderstanding(
-    opts.llmProvider ?? null,
-    creativeContext,
-    referenceImages
-  );
-  const creativeContextWithLanding = await addLandingPageBriefToCreativeContext(
-    opts.llmProvider ?? null,
-    creativeContextWithVision,
-    [{ label: "requested landing page", url: normalized.linkUrl }]
-  );
+  const creativeContextWithLanding = enrichedContext.creativeContext;
   const generatedSubmissionText =
     normalized.prompt && needsGeneratedCreativeText(normalized)
       ? await generateCreativeTextVariants({
@@ -1558,19 +1542,6 @@ async function loadSubmissionReferenceImages(
     });
   }
   return refs;
-}
-
-function mergeReferenceImages(images: ImageReferenceInput[], limit = 4): ImageReferenceInput[] {
-  const out: ImageReferenceInput[] = [];
-  const seen = new Set<string>();
-  for (const image of images) {
-    const key = image.sourceRef ?? image.localPath ?? image.filename ?? `${image.mimeType}:${image.bytes.byteLength}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(image);
-    if (out.length >= limit) break;
-  }
-  return out;
 }
 
 function referenceMimeType(

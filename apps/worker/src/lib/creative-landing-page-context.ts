@@ -37,9 +37,13 @@ export async function addLandingPageBriefToCreativeContext(
     brandProfile: null,
     notes: [],
   };
+  const existingNotes = new Set(base.notes ?? []);
   return {
     ...base,
-    notes: [...(base.notes ?? []), ...notes],
+    notes: [
+      ...(base.notes ?? []),
+      ...notes.filter((note) => !existingNotes.has(note)),
+    ],
   };
 }
 
