@@ -4,7 +4,13 @@
 // pricing) を集約し、apps/web / apps/worker / apps/cli から単一エントリで
 // 参照できるようにする。新しい I/O を追加する場合はサブモジュール側に閉じ込め、
 // 本ファイルからは re-export のみを行う。
+//
+// Compatibility note:
+// この barrel は workspace 内の internal public API。export の削除・リネームは
+// release 前の互換性レビュー対象にする。Mock / Stub / InMemory 系はテスト専用に
+// 見えても、未設定時 fallback や local harness から参照されるため維持する。
 
+// Core provider contract and shared errors.
 export {
   LLMNotImplementedError,
   LLMOAuthStateMismatchError,
@@ -32,12 +38,14 @@ export {
 
 export { redactPayloadForError } from "./redact.js";
 
+// Token-store helpers for tests, local fallback, and connector implementations.
 export {
   InMemoryLLMProviderTokenStore,
   type LLMProviderTokenRecord,
   type LLMProviderTokenStore,
 } from "./token-store.js";
 
+// Concrete LLM providers and selection helpers.
 export {
   CodexAppServerLLMProvider,
   type CodexLLMAppServerHandle,
@@ -72,6 +80,7 @@ export {
   type ModelPricing,
 } from "./pricing.js";
 
+// AI run persistence helpers.
 export {
   AI_AGENTS,
   AI_RUN_LINKED_REF_TYPES,
@@ -91,6 +100,7 @@ export {
   type BuildAiRunInputOptions,
 } from "./ai-runs.js";
 
+// Image provider contract, implementations, and local/mock harness helpers.
 export {
   ImageProviderError,
   ImageProviderInvalidRequestError,
@@ -152,6 +162,7 @@ export {
   type PersistedCreativeMetadata,
 } from "./creative-storage.js";
 
+// Creative QA public helpers.
 export {
   CREATIVE_QA_CHECK_KINDS,
   CREATIVE_QA_FALLBACK_TEXT_ONLY,
@@ -183,6 +194,7 @@ export {
   type QualityPolicy,
 } from "./creative-qa.js";
 
+// Agent prompt builders and runner helpers used by worker pipelines.
 export {
   ANALYST_AGENT_SYSTEM_PROMPT,
   AUDIT_AGENT_SYSTEM_PROMPT,

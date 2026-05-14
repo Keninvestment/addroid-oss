@@ -341,7 +341,7 @@ addroid/
 ├── apps/
 │   ├── web/                Next.js App Router (TypeScript) — localhost-only operator console
 │   ├── worker/             pg-boss を起動する Node.js TypeScript ワーカー
-│   └── cli/                `addroid` コマンド (init / doctor / up / down / status / logs / validate / plan / activate / cron / auth)
+│   └── cli/                `addroid` コマンド (init / start / stop / open / status / connect / account / report / submit / schedule / chat / backup、詳細系 doctor / logs / validate / plan / activate / cron / auth ほか)
 ├── packages/
 │   ├── db/                 Prisma client の共通エクスポート
 │   ├── config/             ~/.addroid/config.yaml と secrets.local.yaml の取扱い、暗号化境界

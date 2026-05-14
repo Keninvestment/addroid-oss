@@ -267,7 +267,7 @@ test("init は初期設定済みなら無印の対話再実行を状態表示だ
 });
 
 test("init は初期設定済みでも addroid コマンド未検出なら checkout CLI link を案内して実行する", async () => {
-  await withTempHome(async (home) => {
+  await withTempHome(async () => {
     const prevDb = process.env.DATABASE_URL;
     const prevKey = process.env.ENCRYPTION_KEY;
     process.env.DATABASE_URL = "postgresql://addroid:secret@localhost:5432/addroid";

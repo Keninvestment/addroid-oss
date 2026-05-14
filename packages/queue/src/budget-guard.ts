@@ -188,8 +188,7 @@ export function evaluateBudgetGuardPolicy(
         message: formatRatioMessage(
           "daily budget consumption",
           observed,
-          dailyRatio,
-          ctx.currency
+          dailyRatio
         ),
         observedValue: round6(observed),
         threshold: round6(dailyRatio),
@@ -216,8 +215,7 @@ export function evaluateBudgetGuardPolicy(
           message: formatRatioMessage(
             "monthly budget pace",
             observed,
-            monthlyRatio,
-            ctx.currency
+            monthlyRatio
           ),
           observedValue: round6(observed),
           threshold: round6(monthlyRatio),
@@ -237,8 +235,7 @@ export function evaluateBudgetGuardPolicy(
         message: formatRatioMessage(
           "day-over-day spend ratio",
           observed,
-          dodRatio,
-          ctx.currency
+          dodRatio
         ),
         observedValue: round6(observed),
         threshold: round6(dodRatio),
@@ -345,10 +342,8 @@ function formatCurrency(amount: number, currency?: string): string {
 function formatRatioMessage(
   label: string,
   observed: number,
-  threshold: number,
-  currency: string | undefined
+  threshold: number
 ): string {
-  const _ = currency; // keep currency in signature for future localization
   return `${label} reached ${formatRatio(observed)} (>= threshold ${formatRatio(threshold)})`;
 }
 

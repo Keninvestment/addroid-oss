@@ -40,7 +40,6 @@ import { createHash } from "node:crypto";
 
 import type {
   ImageGenerateResult,
-  ImageGeneratedAsset,
   ImageProviderName,
   ImageVariationCondition,
 } from "./image-provider.js";

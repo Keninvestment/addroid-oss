@@ -16,9 +16,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## バージョニング方針
 
-- **Public surface:** `addroid` CLI、`apps/web` の SSR ルートと API、`prisma/schema.prisma`、
+- **Public surface:** `@addroid/cli` npm package (`addroid` / `addroid-cli` bin alias)、
+  `addroid` CLI、`apps/web` の SSR ルートと API、`prisma/schema.prisma`、
   `~/.addroid/config.yaml` のスキーマ、`packages/yaml-schemas` で定義する Ads YAML / cron.yaml /
-  project.yaml のスキーマ、`docs/SECURITY.md` で定義する outbound-only / localhost-only 契約。
+  project.yaml のスキーマ、`packages/agent-runtime` の Agent tool manifest、ops template の
+  `project.yaml` / `brand.yaml` / `cron.yaml` / `budget-guard.yaml` /
+  `automation-rules.yaml`、`docs/SECURITY.md` で定義する outbound-only / localhost-only 契約。
 - **MAJOR (X.0.0):** Public surface に対する breaking change (CLI サブコマンド削除 / 既定挙動の
   逆転、Prisma の破壊的マイグレーション、YAML スキーマの後方互換喪失、`~/.addroid/` レイアウトの
   非互換変更、outbound-only / localhost-only 契約の変更)。アップグレードガイドを
@@ -60,8 +63,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [0.1.0] - YYYY-MM-DD
 
-> AdDroid OSS の初回 OSS 公開リリース。`addroid init` / `addroid doctor` / `addroid up` の
-> 3 コマンドでローカル起動が完結する localhost-only / outbound-only / GitOps 駆動の
+> AdDroid OSS の初回 OSS 公開リリース。`addroid init` / `addroid start` / `addroid status` /
+> `addroid open` と詳細診断系コマンドでローカル起動が完結する localhost-only / outbound-only / GitOps 駆動の
 > Meta 広告運用コンソールを提供します。
 >
 > **公開日は npm publish 実行時に確定します** ([`docs/RELEASE.md`](docs/RELEASE.md) §"リリース手順"
@@ -72,9 +75,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - `apps/web` (Next.js App Router, TypeScript) を `127.0.0.1:3000` only で listen。
   Web UI 認証は持たず、ローカルプロセス信頼モデルで動作。
 - `apps/worker` (pg-boss) と `apps/cli` (`addroid` コマンド) のモノレポ構成。
-- `addroid init` / `addroid doctor` / `addroid up` / `addroid down` / `addroid status` /
-  `addroid logs` / `addroid validate` / `addroid plan` / `addroid activate` /
-  `addroid cron` / `addroid auth` の 11 サブコマンド。
+- `addroid` / `addroid-cli` bin alias と、operator 向けコマンド
+  `init` / `start` / `stop` / `open` / `status` / `connect` / `account` /
+  `report` / `submit` / `schedule` / `chat` / `backup`。
+- 詳細・CI 向けコマンド `doctor` / `logs` / `service` / `restore` /
+  `validate` / `up` / `down` / `plan` / `activate` / `cron` / `auth` /
+  `accounts`。
 - `~/.addroid/` 配下の `config.yaml` / `secrets.local.yaml` / `storage/` / `logs/` /
   `run/` の冪等初期化と `0600` パーミッション強制。
 - `packages/config` の AES-256-GCM 暗号化境界 (`v1.aes256gcm.<iv>.<tag>.<payload>` 形式)。
@@ -89,7 +95,9 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - Apply executor が新規オブジェクトを **すべて PAUSED で作成** し、ACTIVE 化は別経路
   (`addroid activate` / Web UI / Slack) に分離。
 - `audit_logs` の polymorphic targetType による Apply / Activate の独立承認境界。
-- `/plans` `/apply` `/apply/[id]` `/campaigns` `/accounts` ルート。
+- `/plans` `/campaigns` `/accounts` `/accounts/select` ルートと、
+  `/api/plan` / `/api/approvals/[prNumber]/merge` / `/api/campaigns/sync` /
+  `/api/campaigns/[id]/activate` / `/api/accounts` / `/api/accounts/default`。
 - `/setup` の Doctor 結果セクション (DB / worker / GitHub / Meta / Storage / env_hygiene)。
 
 ### Added — AI workflows + LLM Provider abstraction
@@ -98,8 +106,9 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - `daily_report` / `budget_guard` / `improvement_pr` / `adhoc` の 4 ワークフロー。
 - AI agents (strategy / copy / analyst / media_buyer / gitops / audit) の役割分離。
 - LLM Provider 未設定時の `StubLLMProvider` fail-closed 動作 (GitOps 状態を破壊しない)。
-- `/reports` `/reports/[id]` `/budget-guard` `/improvements` `/improvements/[id]` /
-  `/ai/runs` `/ai/runs/[id]` `/ai/providers` ルート。
+- `/reports/daily` `/budget` `/improvements` `/ai` ルートと、
+  `/api/budget/policy` / `/api/ai/provider` / `/api/agent-tasks` /
+  `/api/agent-tasks/[id]/run` / `/api/agent-tasks/[id]/toggle`。
 - ai_runs の inputs / outputs に対する sanitize-on-render redactor。
 
 ### Added — Optional Slack integration + three approval paths
@@ -110,8 +119,9 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - 通知 dispatch (`notification_dispatch`) と任意 fail-soft 動作 (Slack 未設定時は skip)。
 - 3 経路 merge (GitHub merge / Web UI merge / Slack `/adops activate`) の
   `approval_records.decisionSource` 区別。
-- `/approvals` `/approvals/[prNumber]` `/slack` `/slack/commands` `/slack/notifications`
-  ルート。
+- `/approvals` `/approvals/[prNumber]` ルートと、
+  `/api/slack/connect` / `/api/chat` / `/api/cron/[name]/run-status` /
+  `/api/cron/[name]/run` / `/api/cron/[name]/schedule` / `/api/cron/[name]/toggle`。
 - `templates/slack-app-manifest.yaml` (Socket Mode only テンプレ)。
 
 ### Added — Creative generation + Image Provider abstraction
@@ -126,7 +136,9 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - improvement_pr に creative metadata + QA result + storage ref を添付するフロー。
 - Image Provider 未設定時の `succeeded_text_only` fallback (`improvement_pr` をテキストのみで
   作成、UI は benign idle 表示)。
-- `/creatives` `/creatives/[id]` ルート。
+- `/creatives` `/creatives/[id]` `/creatives/library` `/creatives/review` /
+  `/creatives/submit` ルートと、`/api/creatives/[id]/asset/[assetId]` /
+  `/api/creatives/submit`。
 
 ### Added — Release readiness, sandbox / mock, and npm packaging
 

@@ -196,7 +196,7 @@ npm run addroid -- plan --dry-run    # Apply の差分シミュレーション
 | `/approvals` | 承認待ち PR、Web UI からの merge |
 | `/approvals/[prNumber]` | PR の preview body / 変更ファイル一覧 / merge 操作 |
 | `/plans` | Apply 前の plan dry-run 結果 |
-| `/apply/[id]` | Apply ジョブの詳細とリトライ |
+| `/campaigns` | Apply 後の Meta 階層確認と Activate 操作 |
 | `/cron/audit` | `audit_logs` の閲覧 |
 
 ---

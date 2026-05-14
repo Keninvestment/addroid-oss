@@ -58,12 +58,6 @@ function findCheck(
   return c;
 }
 
-function checkOutcomes(result: CreativeQaAssetResult): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const c of result.checks) out[c.kind] = c.outcome;
-  return out;
-}
-
 // ---------------------------------------------------------------------------
 // CREATIVE_QA_CHECK_KINDS / DEFAULT_CREATIVE_QA_SEVERITY
 // ---------------------------------------------------------------------------

@@ -118,8 +118,8 @@ Activate に手動承認が必須です (TopBar Mode チップで常時可視化
 |---|---|
 | `/setup#meta` | Meta execution mode (live / sandbox / mock / unconfigured) と接続済み app type |
 | `/accounts` | OAuth 状態 / Business 一覧 / Ad Account 一覧 / per-account mode override |
+| `/accounts/select` | 既定 Ad Account の選択 |
 | `/plans` | Apply 前の plan dry-run 結果 |
-| `/apply/[id]` | Apply ジョブ単位の詳細とリトライ |
 | `/campaigns` | Meta 階層と Activate 操作 |
 
 TopBar の `Meta: <act_id> · <mode>` チップは全ルートで常時表示され、`mock` /

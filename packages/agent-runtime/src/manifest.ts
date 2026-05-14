@@ -1,3 +1,9 @@
+// Agent tool manifest is an internal public API shared by CLI chat, Web chat,
+// Slack, and scheduled-agent runs. Tool names, args, effects, and
+// allowedSurfaces require the same compatibility review as CLI commands.
+// Deprecated tools should remain listed with an empty allowedSurfaces window
+// until a release note explicitly removes them.
+
 export type AgentSurface = "cli-chat" | "web-chat" | "slack-chat" | "scheduled-agent";
 
 export type AgentToolEffect =

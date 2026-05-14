@@ -25,8 +25,10 @@ OSS adopter / fork operator はリポジトリを `git clone` し、`npm install
 必要に応じて `npm run addroid -- start` で常駐サービスを起動・修復できます。
 `npm install -g @addroid/cli` は CLI bin の配布単位であり、postinstall では非破壊の
 next-step message だけを表示します。`@addroid/cli` 単体ではフルコンソールは動かず、
-リポジトリの web / worker / prisma に依存します (CLI は init / doctor / validate / plan /
-activate などローカル操作用)。
+リポジトリの web / worker / prisma に依存します (CLI は `init` / `start` / `stop` / `open` /
+`status` / `connect` / `account` / `report` / `submit` / `schedule` / `chat` / `backup` と、
+詳細・CI 向けの `doctor` / `logs` / `service` / `restore` / `validate` / `up` / `down` /
+`plan` / `activate` / `cron` / `auth` / `accounts` を提供)。
 
 ---
 
@@ -55,8 +57,11 @@ fork して別 owner で配布する場合、上記すべてを fork owner の�
 
 CHANGELOG.md の冒頭で定義したものを再掲します。
 
-- **Public surface:** `addroid` CLI、`apps/web` SSR ルート / API、`prisma/schema.prisma`、
+- **Public surface:** `@addroid/cli` npm package (`addroid` / `addroid-cli` bin alias)、
+  `addroid` CLI、`apps/web` SSR ルート / API、`prisma/schema.prisma`、
   `~/.addroid/config.yaml`、`packages/yaml-schemas` (Ads YAML / cron.yaml / project.yaml)、
+  `packages/agent-runtime` の Agent tool manifest、ops template の `project.yaml` /
+  `brand.yaml` / `cron.yaml` / `budget-guard.yaml` / `automation-rules.yaml`、
   `docs/SECURITY.md` の outbound-only / localhost-only 契約。
 - **MAJOR (X.0.0):** Public surface に対する後方互換喪失。例: CLI サブコマンド削除 /
   既定挙動の逆転、Prisma の破壊的マイグレーション、YAML スキーマ非互換、`~/.addroid/`
@@ -113,6 +118,16 @@ private workspaces (`@addroid/web` / `@addroid/worker` / `@addroid/*`) の versi
       初回リリースの場合は `[X.Y.Z] - YYYY-MM-DD` セクションが完成している
 - [ ] CHANGELOG の日付欄が `YYYY-MM-DD` プレースホルダのままになっていない (Step 5 で確定)
 - [ ] `README.md` のコマンド表 / バージョン記述が新版と整合
+- [ ] CLI public command (`apps/cli/src/index.ts` の dispatch) と CHANGELOG / README の
+      コマンド表が整合
+- [ ] `apps/web/app/**/page.tsx` と `apps/web/app/api/**/route.ts` の SSR / API route 一覧が
+      CHANGELOG / README の公開 route 記述と整合
+- [ ] `packages/agent-runtime/src/manifest.ts` の tool 名・引数・`allowedSurfaces` の変更が
+      breaking / deprecation 対象としてレビュー済み
+- [ ] `packages/*/src/index.ts` の barrel export 削除・リネームが internal public API 変更として
+      レビュー済み
+- [ ] `templates/addroid-ops-template/` の `project.yaml` / `brand.yaml` / `cron.yaml` /
+      `budget-guard.yaml` / `automation-rules.yaml` の変更が GitOps schema 互換性レビュー済み
 - [ ] 破壊的変更がある場合、CHANGELOG にアップグレードガイドを併記
 
 ### 4.4 メタデータ整合性

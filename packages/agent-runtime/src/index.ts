@@ -1,3 +1,8 @@
+// AdDroid Agent runtime barrel.
+//
+// Internal public API for CLI chat, Web chat, Slack, and scheduled-agent.
+// Keep export removals/renames behind release compatibility review.
+
 export {
   buildAgentContext,
   type AgentContext,

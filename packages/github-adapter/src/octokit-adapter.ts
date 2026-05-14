@@ -215,7 +215,6 @@ export class OctokitGithubAdapter implements GithubAdapter {
 
   async bootstrapOpsRepo(input: BootstrapOpsRepoInput): Promise<BootstrapOpsRepoResult> {
     const api = await this.getAuthenticatedClient("bootstrap ops repo");
-    const owner = await api.getAuthenticatedUserLogin();
     const defaultBranch = input.defaultBranch ?? "main";
     const visibility = input.visibility ?? "private";
     const repo = await api.createUserRepo({

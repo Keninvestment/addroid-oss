@@ -253,11 +253,12 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 | http://127.0.0.1:3000/ | Dashboard — config / DB / worker / GitHub / Meta / LLM / Slack / cron / audit の状態 |
 | http://127.0.0.1:3000/setup | Setup ガイド (UI 内) — config / DB / worker / GitHub / Meta / LLM Provider / Image Provider / Slack / Doctor / OSS Release Readiness / Documentation |
 | http://127.0.0.1:3000/accounts | Meta Access Token 接続、Business / Ad Account 一覧、execution mode override |
+| http://127.0.0.1:3000/accounts/select | 既定 Ad Account の選択 |
 | http://127.0.0.1:3000/github | GitHub OAuth、ops repo、PR ポーリング状態 |
 | http://127.0.0.1:3000/approvals | 承認待ち PR 一覧と Web UI からの merge |
 | http://127.0.0.1:3000/plans | Apply 前の plan dry-run 結果 |
 | http://127.0.0.1:3000/campaigns | 既存 Meta 階層と Activate 操作 |
-| http://127.0.0.1:3000/reports | 日次レポート一覧 |
+| http://127.0.0.1:3000/reports/daily | 日次レポート |
 | http://127.0.0.1:3000/budget | 予算超過監視 |
 | http://127.0.0.1:3000/improvements | 改善提案 PR 一覧 |
 | http://127.0.0.1:3000/ai | AI run 履歴と provider ヘルス |

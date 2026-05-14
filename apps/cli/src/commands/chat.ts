@@ -617,7 +617,7 @@ async function executeUserFacingTool(
       return { handled: true, code, message: `daily report exit ${code}` };
     }
     if (reportKind === "improvement") {
-      const code = await runImprovementReportForChat(tool, opts);
+      const code = await runImprovementReportForChat(opts);
       return { handled: true, code, message: `improvement report exit ${code}` };
     }
     return { handled: false };
@@ -872,15 +872,12 @@ async function runDailyReportForChat(
   }
 }
 
-async function runImprovementReportForChat(
-  tool: ReadyAgentTool,
-  opts: {
-    out: NodeJS.WritableStream;
-    input?: NodeJS.ReadableStream;
-    env: NodeJS.ProcessEnv;
-    agentContext: AgentContext;
-  }
-): Promise<number> {
+async function runImprovementReportForChat(opts: {
+  out: NodeJS.WritableStream;
+  input?: NodeJS.ReadableStream;
+  env: NodeJS.ProcessEnv;
+  agentContext: AgentContext;
+}): Promise<number> {
   if (!opts.env.DATABASE_URL) {
     opts.out.write("改善提案を作成できません。先に `addroid init` を完了してください。\n");
     return 2;
@@ -2449,11 +2446,6 @@ function pushMetaOptional(out: string[], flag: string, value: unknown): void {
   if (text) out.push(flag, text);
 }
 
-function resolveOpsPath(raw: unknown, envValue: string | undefined, fallback: string): string {
-  const value = typeof raw === "string" && raw.trim() ? raw.trim() : envValue?.trim() || fallback;
-  return path.resolve(value);
-}
-
 function resolveOptionalOpsPath(raw: unknown, envValue: string | undefined): string | null {
   const value = typeof raw === "string" && raw.trim() ? raw.trim() : envValue?.trim() || "";
   return value ? path.resolve(value) : null;
@@ -2843,7 +2835,7 @@ function readChatLine(
     renderedLines = lines.length;
   };
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const keyboardProtocolEnabled = enableModifiedKeyReporting(out);
     const cleanup = () => {
       stdin.off("data", onData);

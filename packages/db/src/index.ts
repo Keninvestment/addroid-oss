@@ -2,6 +2,11 @@
 //
 // Web / worker / CLI のすべてが本モジュール経由で `prisma` を共有します。
 // 多重インスタンス化 (Next.js dev での HMR 等) を避けるため globalThis にキャッシュします。
+//
+// Compatibility note:
+// `export * from "@prisma/client"` is intentionally broad. Workspace packages
+// import generated Prisma enums/types through `@addroid/db`, so narrowing this
+// barrel is a breaking internal API change and needs a migration plan first.
 
 import { PrismaClient } from "@prisma/client";
 

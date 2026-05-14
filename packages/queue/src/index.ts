@@ -9,7 +9,13 @@
 //   - GitHub Webhook を使わず、merged PR は github_poll cron で検知する。
 //   - daily_report / today_report / improvement_pr / auto_creative_generation は登録のみで未起動。
 //   - 自然言語カスタム cron は preset cron ではなく scheduled_task_run job で動く。
+//
+// Compatibility note:
+// この barrel は worker / web / CLI / tests が共有する internal public API。
+// export の削除・リネームは release 前の互換性レビュー対象にする。型だけに見える
+// Store / Adapter export も、Prisma 実装注入と local harness の境界として維持する。
 
+// Queue names, preset schedules, and pg-boss bootstrapping.
 export {
   CRON_PRESETS,
   APPLY_JOB_NAME,
@@ -38,6 +44,7 @@ export {
   type CronValidationResult,
 } from "./cron-validation.js";
 
+// Store / adapter contracts. These are DI boundaries, not disposable test-only types.
 export {
   type AccountExecutionModes,
   type CronOpsStore,
@@ -83,6 +90,7 @@ export {
   type CronRunHandle,
 } from "./runs.js";
 
+// Apply / activate execution pipeline.
 export {
   enqueueApplyJob,
   type ApplyJobBoss,
@@ -153,6 +161,7 @@ export {
   type RunGithubPollOptions,
 } from "./github-poll.js";
 
+// Scheduled business workflows.
 export {
   computeKpiDeltas,
   microsToMajor,
@@ -245,6 +254,7 @@ export {
   type BreakdownsPolicy,
 } from "./analytics.js";
 
+// Natural-language automation rule DSL and guardrail helpers.
 export {
   evaluateAutomationRule,
   interpretAutomationRequestTiming,
@@ -297,6 +307,7 @@ export {
   type AutomationRuleCalibration,
 } from "./automation-baseline.js";
 
+// Slack queue integration.
 export {
   SLACK_COMMAND_JOB_NAME,
   SLACK_SLASH_COMMAND,
@@ -357,6 +368,7 @@ export {
   type SocketModeUrlOpener,
 } from "./slack-socket-receiver.js";
 
+// Improvement PR generation pipeline.
 export {
   runImprovementPrOnce,
 	  type ImprovementPrAgentRunResult,

@@ -95,8 +95,8 @@ Activate のみ別の承認境界 (`approval_records` の `decisionSource="slack
 - Rate limit warning (Meta API throttling)
 - Auth revoked (token expire / Meta sandbox mode 強制切替)
 
-通知は `notification_dispatch` テーブルに記録され、`/slack/notifications` で履歴を
-確認できます。
+通知は `notification_dispatch` テーブルに記録されます。Slack 接続状態は `/setup` と
+`/api/slack/connect` の接続フローから確認します。
 
 ---
 
@@ -104,8 +104,8 @@ Activate のみ別の承認境界 (`approval_records` の `decisionSource="slack
 
 - `oauth_tokens` に provider="slack" の行がない場合は SlackNotificationDispatcher が
   no-op で skip
-- Dashboard と `/setup#slack` は benign idle 表示
-- `/slack` / `/slack/commands` / `/slack/notifications` は 200 OK + 空状態
+- Dashboard と `/setup` は benign idle 表示
+- `/api/slack/connect` は未接続状態を安全に扱い、既存トークンの秘匿値は返さない
 - AI workflow / Apply / Activate / レポート取得は通常通り動作
 
 ---
