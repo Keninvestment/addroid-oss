@@ -6,6 +6,10 @@ import { LocalDiskStorage } from "@addroid/config";
 import { Prisma, type PrismaClient } from "@addroid/db";
 import type { CreatePullRequestFile, GithubAdapter } from "@addroid/github-adapter";
 import {
+  fetchMetaAssetReadiness,
+  type MetaAssetIdentityCandidate,
+} from "@addroid/meta-adapter";
+import {
   DEFAULT_CREATIVE_QA_POLICY,
   extractJsonFromLlmContent,
   generateAndQaCreative,
@@ -25,6 +29,7 @@ import { enrichCreativeGenerationContext } from "./creative-generation-context.j
 import { selectImageProviderForWorker } from "./image-runtime.js";
 import { ensureOpsRepoLocalCheckout, resolveOpsRepoLocalDirForWorkspace } from "./ops-repo-local.js";
 import { runPlanForRoot } from "./plan-runtime.js";
+import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 
 export type CreativeSubmissionSource =
   | "web"
@@ -58,7 +63,7 @@ export interface CreativeSubmissionInput {
   body?: string;
   linkUrl?: string;
   description?: string;
-  instagramActorId?: string;
+  instagramUserId?: string;
   images?: string[];
   videos?: string[];
   titles?: string[];
@@ -259,7 +264,7 @@ export async function createStandaloneCreativeGeneration(opts: {
   );
   const account = await opts.prisma.adAccount.findUnique({
     where: { workspaceId_key: { workspaceId: opts.workspaceId, key: accountKey } },
-    select: { id: true, key: true, displayName: true, currency: true, timezoneName: true },
+    select: { id: true, key: true, displayName: true, currency: true, timezoneName: true, metaAccountId: true },
   });
   if (!account) {
     throw new Error(`広告アカウント ${accountKey} が登録されていません。先に account sync/select を完了してください。`);
@@ -613,7 +618,14 @@ export async function createCreativeSubmissionProposal(opts: {
   const accountKey = readAccountKey(opts.input, workspace.defaultAdAccount?.key ?? null);
   const account = await opts.prisma.adAccount.findUnique({
     where: { workspaceId_key: { workspaceId: opts.workspaceId, key: accountKey } },
-    select: { id: true, key: true, displayName: true, currency: true, timezoneName: true },
+    select: {
+      id: true,
+      key: true,
+      displayName: true,
+      currency: true,
+      timezoneName: true,
+      metaAccountId: true,
+    },
   });
   if (!account) {
     throw new Error(`広告アカウント ${accountKey} が登録されていません。先に account sync/select を完了してください。`);
@@ -642,8 +654,16 @@ export async function createCreativeSubmissionProposal(opts: {
   const original = fs.readFileSync(brandPath, "utf8");
   const brand = YAML.parse(original) as unknown;
   if (!isRecord(brand)) throw new Error("brand.yaml の形式が不正です。");
+  migrateLegacyCreativeIdentityKeys(brand);
 
   const normalized = { ...opts.input };
+  await inferCreativeIdentity({
+    prisma: opts.prisma,
+    accountKey,
+    adAccountId: account.metaAccountId ?? account.key,
+    brand,
+    input: normalized,
+  });
   validateCreativeSubmissionInput(normalized);
   validateCreativeSubmissionCliCompatibility(normalized);
   const draftId = makeStableId(normalized.creativeName || normalized.adName || normalized.headline || "creative");
@@ -716,7 +736,7 @@ export async function createCreativeSubmissionProposal(opts: {
     body: normalized.body,
     linkUrl: normalized.linkUrl,
     description: normalized.description,
-    instagramActorId: normalized.instagramActorId,
+    instagramUserId: normalized.instagramUserId,
     images: normalized.images,
     videos: normalized.videos,
     titles: normalized.titles,
@@ -741,7 +761,7 @@ export async function createCreativeSubmissionProposal(opts: {
   const baseDir = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
   const plan = validateWithTempCheckout({ rootDir, baseDir, file, accountKey });
   if (!plan.ok) {
-    throw new Error(`dry-run で問題が見つかったため PR は作成しません: ${summarizePlan(plan)}`);
+    throw new Error(formatDryRunFailure(plan));
   }
 
   const title = `[addroid] Creative submission: ${account.displayName || accountKey}`;
@@ -923,7 +943,7 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     body: readString(args.body) ?? undefined,
     linkUrl: readString(args.linkUrl) ?? undefined,
     description: readString(args.description) ?? undefined,
-    instagramActorId: readString(args.instagramActorId) ?? undefined,
+    instagramUserId: readString(args.instagramUserId) ?? undefined,
     images: readStringArray(args.images),
     videos: readStringArray(args.videos),
     titles: readStringArray(args.titles),
@@ -1576,7 +1596,14 @@ function placeAdDraft(
     creativeId: string;
     adId: string;
   }
-): { campaignId: string; adsetId: string; createdCampaign: boolean; createdAdset: boolean } {
+): {
+  campaignId: string;
+  adsetId: string;
+  createdCampaign: boolean;
+  createdAdset: boolean;
+  adoptedCampaign: boolean;
+  adoptedAdset: boolean;
+} {
   const ad = {
     id: opts.adId,
     name: opts.input.adName || opts.input.creativeName || opts.adId,
@@ -1601,46 +1628,55 @@ function placeAdDraft(
           adsetId: opts.input.adsetId,
           createdCampaign: false,
           createdAdset: false,
+          adoptedCampaign: false,
+          adoptedAdset: false,
         };
       }
+      adsets.push(importedExistingAdset(opts.input, ad));
+      return {
+        campaignId: opts.input.campaignId,
+        adsetId: opts.input.adsetId,
+        createdCampaign: false,
+        createdAdset: false,
+        adoptedCampaign: false,
+        adoptedAdset: true,
+      };
     }
-    throw new Error(`指定された campaign/adset が brand.yaml に見つかりません: ${opts.input.campaignId}/${opts.input.adsetId}`);
+    campaigns.push(importedExistingCampaign(opts.input, ad));
+    return {
+      campaignId: opts.input.campaignId,
+      adsetId: opts.input.adsetId,
+      createdCampaign: false,
+      createdAdset: false,
+      adoptedCampaign: true,
+      adoptedAdset: true,
+    };
   }
   if (opts.input.campaignId && opts.input.adsetName) {
     for (const campaign of campaigns) {
       if (!isRecord(campaign) || campaign.id !== opts.input.campaignId) continue;
       const adsets = ensureArray(campaign, "adsets");
       const adsetId = uniqueId(adsets, makeStableId(opts.input.adsetName));
-      adsets.push({
-        id: adsetId,
-        name: opts.input.adsetName,
-        initialState: "paused",
-        ...(dailyBudget(opts.input) !== undefined || lifetimeBudget(opts.input) !== undefined
-          ? {
-              budget: removeUndefined({
-                dailyBudget: dailyBudget(opts.input),
-                lifetimeBudget: lifetimeBudget(opts.input),
-              }),
-            }
-          : {}),
-        ...adsetOptions,
-        targeting: removeUndefined({
-          countries: opts.input.countries ?? [],
-          ageMin: opts.input.ageMin,
-          ageMax: opts.input.ageMax,
-          interests: [],
-          customAudiences: [],
-        }),
-        ads: [ad],
-      });
+      adsets.push(newAdsetDraft(opts.input, ad, adsetId, adsetOptions));
       return {
         campaignId: opts.input.campaignId,
         adsetId,
         createdCampaign: false,
         createdAdset: true,
+        adoptedCampaign: false,
+        adoptedAdset: false,
       };
     }
-    throw new Error(`指定された campaign が brand.yaml に見つかりません: ${opts.input.campaignId}`);
+    const adsetId = makeStableId(opts.input.adsetName);
+    campaigns.push(importedExistingCampaign(opts.input, ad, newAdsetDraft(opts.input, ad, adsetId, adsetOptions)));
+    return {
+      campaignId: opts.input.campaignId,
+      adsetId,
+      createdCampaign: false,
+      createdAdset: true,
+      adoptedCampaign: true,
+      adoptedAdset: false,
+    };
   }
 
   const campaignId = uniqueId(campaigns, makeStableId(opts.input.campaignName ?? "campaign"));
@@ -1672,7 +1708,80 @@ function placeAdDraft(
       },
     ],
   });
-  return { campaignId, adsetId, createdCampaign: true, createdAdset: true };
+  return {
+    campaignId,
+    adsetId,
+    createdCampaign: true,
+    createdAdset: true,
+    adoptedCampaign: false,
+    adoptedAdset: false,
+  };
+}
+
+function importedExistingCampaign(
+  input: CreativeSubmissionInput,
+  ad: Record<string, unknown>,
+  adset: Record<string, unknown> = importedExistingAdset(input, ad)
+) {
+  return {
+    id: input.campaignId!,
+    externalId: input.campaignId!,
+    importedExisting: true,
+    name: input.campaignName || `Existing campaign ${input.campaignId}`,
+    objective: input.objective ?? "OUTCOME_TRAFFIC",
+    initialState: "paused",
+    budget: removeUndefined({
+      dailyBudget: dailyBudget(input) ?? 1,
+      lifetimeBudget: lifetimeBudget(input),
+    }),
+    adsets: [adset],
+  };
+}
+
+function newAdsetDraft(
+  input: CreativeSubmissionInput,
+  ad: Record<string, unknown>,
+  adsetId: string,
+  adsetOptions = buildAdsetOptions(input)
+) {
+  return {
+    id: adsetId,
+    name: input.adsetName!,
+    initialState: "paused",
+    ...(dailyBudget(input) !== undefined || lifetimeBudget(input) !== undefined
+      ? {
+          budget: removeUndefined({
+            dailyBudget: dailyBudget(input),
+            lifetimeBudget: lifetimeBudget(input),
+          }),
+        }
+      : {}),
+    ...adsetOptions,
+    targeting: removeUndefined({
+      countries: input.countries ?? [],
+      ageMin: input.ageMin,
+      ageMax: input.ageMax,
+      interests: [],
+      customAudiences: [],
+    }),
+    ads: [ad],
+  };
+}
+
+function importedExistingAdset(input: CreativeSubmissionInput, ad: Record<string, unknown>) {
+  return {
+    id: input.adsetId!,
+    externalId: input.adsetId!,
+    importedExisting: true,
+    name: input.adsetName || `Existing adset ${input.adsetId}`,
+    initialState: "paused",
+    targeting: removeUndefined({
+      countries: input.countries ?? [],
+      interests: [],
+      customAudiences: [],
+    }),
+    ads: [ad],
+  };
 }
 
 function buildAdsetOptions(input: CreativeSubmissionInput): Record<string, unknown> {
@@ -1701,7 +1810,7 @@ function validateWithTempCheckout(input: {
     fs.writeFileSync(dest, extractAddedContentFromDiff(input.file.diff), "utf8");
     return runPlanForRoot({
       rootDir: tmp,
-      baseDir: input.baseDir,
+      baseDir: input.baseDir ?? input.rootDir,
       accountFilter: input.accountKey,
     });
   } finally {
@@ -1714,6 +1823,39 @@ function summarizePlan(plan: ReturnType<typeof runPlanForRoot>): string {
   return `creates=${counts.creates} updates=${counts.updates} deletes=${counts.deletes} errors=${counts.errors + plan.validationErrors.length} warnings=${counts.warnings + plan.validationWarnings.length}`;
 }
 
+function formatDryRunFailure(plan: ReturnType<typeof runPlanForRoot>): string {
+  const details = dryRunFailureDetails(plan);
+  return [
+    `dry-run で問題が見つかったため PR は作成しません: ${summarizePlan(plan)}`,
+    "この dry-run は Meta CLI ではなく、ops repo の一時コピーにPR差分を当てて YAML 検証と実行計画生成だけを行います。Meta には接続・反映していません。",
+    ...(details.length > 0 ? ["原因:", ...details.map((line) => `- ${line}`)] : []),
+  ].join("\n");
+}
+
+function dryRunFailureDetails(plan: ReturnType<typeof runPlanForRoot>): string[] {
+  const lines: string[] = [];
+  for (const err of plan.validationErrors.slice(0, 8)) {
+    lines.push(`${err.file}${err.pointer ? ` ${err.pointer}` : ""}: ${err.message}`);
+  }
+  for (const account of plan.perAccount) {
+    for (const finding of account.findings.filter((f) => f.level === "error").slice(0, 8)) {
+      lines.push(
+        `${account.account}${finding.pointer ? ` ${finding.pointer}` : ""}: ${finding.message}`
+      );
+    }
+  }
+  const total =
+    plan.validationErrors.length +
+    plan.perAccount.reduce(
+      (sum, account) => sum + account.findings.filter((f) => f.level === "error").length,
+      0
+    );
+  if (total > lines.length) {
+    lines.push(`ほか ${total - lines.length} 件のエラーがあります。`);
+  }
+  return lines;
+}
+
 function creativeSubmissionBody(input: {
   accountKey: string;
   accountCurrency: string | null;
@@ -1722,7 +1864,14 @@ function creativeSubmissionBody(input: {
   input: CreativeSubmissionInput;
   creativeId: string;
   adId: string;
-  placement: { campaignId: string; adsetId: string; createdCampaign: boolean; createdAdset: boolean };
+  placement: {
+    campaignId: string;
+    adsetId: string;
+    createdCampaign: boolean;
+    createdAdset: boolean;
+    adoptedCampaign?: boolean;
+    adoptedAdset?: boolean;
+  };
   mediaType: string;
   storageKeys: string[];
   generatedImage: boolean;
@@ -1742,6 +1891,8 @@ function creativeSubmissionBody(input: {
     `- Placement: \`${input.placement.campaignId}/${input.placement.adsetId}\``,
     `- New campaign: \`${input.placement.createdCampaign ? "yes" : "no"}\``,
     `- New adset: \`${input.placement.createdAdset ? "yes" : "no"}\``,
+    `- Adopted existing campaign: \`${input.placement.adoptedCampaign ? "yes" : "no"}\``,
+    `- Adopted existing adset: \`${input.placement.adoptedAdset ? "yes" : "no"}\``,
     `- Media type: \`${input.mediaType}\``,
     `- Generated image: \`${input.generatedImage ? "yes" : "no"}\``,
     `- Creative context: \`${input.creativeContext ? input.creativeContext.strategy : "none"}\``,
@@ -1756,6 +1907,11 @@ function creativeSubmissionBody(input: {
     "## Meta Ads CLI coverage",
     "",
     "- This PR only includes fields that AdDroid can apply through Meta Ads CLI 2026/04/29.",
+    ...(input.placement.adoptedCampaign || input.placement.adoptedAdset
+      ? [
+          "- Adopted campaign/adset entries are references to existing Meta objects; this PR does not create or update those parent objects.",
+        ]
+      : []),
     "- Targeting supported at apply time: country codes only (`targeting-countries`).",
     "- Not included: city/radius targeting, placement/platform selection, device targeting, Advantage audience, custom audience, excluded audience, flexible targeting, age, gender, and locale.",
     "",
@@ -1866,6 +2022,103 @@ function readAccountKey(input: CreativeSubmissionInput, fallback: string | null)
   const key = input.accountKey?.trim() || fallback;
   if (!key) throw new Error("accountKey が未指定で、デフォルト広告アカウントも未設定です。");
   return key;
+}
+
+function migrateLegacyCreativeIdentityKeys(brand: Record<string, unknown>): void {
+  const creatives = Array.isArray(brand.creatives) ? brand.creatives.filter(isRecord) : [];
+  for (const creative of creatives) {
+    const legacy = readString(creative.instagramActorId);
+    if (legacy && !readString(creative.instagramUserId)) {
+      creative.instagramUserId = legacy;
+    }
+    delete creative.instagramActorId;
+  }
+}
+
+async function inferCreativeIdentity(input: {
+  prisma: PrismaClient;
+  accountKey: string;
+  adAccountId: string;
+  brand: Record<string, unknown>;
+  input: CreativeSubmissionInput;
+}): Promise<void> {
+  if (input.input.pageId && input.input.instagramUserId) return;
+  const candidates = [
+    ...identityCandidatesFromBrand(input.brand),
+    ...(await identityCandidatesFromMeta(input.prisma, input.adAccountId)),
+  ];
+  const chosen = chooseIdentityCandidate(candidates, input.input);
+  if (!input.input.pageId && chosen?.pageId) input.input.pageId = chosen.pageId;
+  if (!input.input.instagramUserId && chosen?.instagramUserId) {
+    input.input.instagramUserId = chosen.instagramUserId;
+  }
+}
+
+function identityCandidatesFromBrand(brand: Record<string, unknown>): MetaAssetIdentityCandidate[] {
+  const creatives = Array.isArray(brand.creatives) ? brand.creatives.filter(isRecord) : [];
+  return creatives
+    .slice()
+    .reverse()
+    .map((creative) => ({
+      source: "creative_object_story_spec" as const,
+      pageId: readString(creative.pageId),
+      instagramUserId: readString(creative.instagramUserId),
+    }))
+    .filter((candidate) => candidate.pageId || candidate.instagramUserId);
+}
+
+async function identityCandidatesFromMeta(
+  prisma: PrismaClient,
+  adAccountId: string
+): Promise<MetaAssetIdentityCandidate[]> {
+  const selection = await buildPrismaMetaAdapterSelection({ prisma }).catch(() => null);
+  if (!selection || selection.choice === "stub") return [];
+  const lease = await selection.adapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease) return [];
+  const report = await fetchMetaAssetReadiness({
+    accessToken: lease.accessToken,
+    adAccountId,
+    limit: 100,
+  });
+  return report.candidates;
+}
+
+function chooseIdentityCandidate(
+  candidates: readonly MetaAssetIdentityCandidate[],
+  input: CreativeSubmissionInput
+): MetaAssetIdentityCandidate | null {
+  const pageId = input.pageId?.trim() || null;
+  const instagramUserId = input.instagramUserId?.trim() || null;
+  const withBoth = candidates.filter((candidate) => candidate.pageId && candidate.instagramUserId);
+  if (pageId && instagramUserId) {
+    return withBoth.find((candidate) => candidate.pageId === pageId && candidate.instagramUserId === instagramUserId) ?? null;
+  }
+  if (pageId) {
+    return withBoth.find((candidate) => candidate.pageId === pageId) ??
+      candidates.find((candidate) => candidate.pageId === pageId) ??
+      null;
+  }
+  if (instagramUserId) {
+    return withBoth.find((candidate) => candidate.instagramUserId === instagramUserId) ??
+      candidates.find((candidate) => candidate.instagramUserId === instagramUserId) ??
+      null;
+  }
+  const firstWithBoth = withBoth[0];
+  if (firstWithBoth) return firstWithBoth;
+  const uniquePages = uniqueNonNull(candidates.map((candidate) => candidate.pageId));
+  const uniqueInstagramUsers = uniqueNonNull(candidates.map((candidate) => candidate.instagramUserId));
+  if (uniquePages.length === 1 || uniqueInstagramUsers.length === 1) {
+    return {
+      source: "creative_object_story_spec",
+      pageId: uniquePages[0] ?? null,
+      instagramUserId: uniqueInstagramUsers[0] ?? null,
+    };
+  }
+  return null;
+}
+
+function uniqueNonNull(values: Array<string | null>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
 }
 
 function ensureArray(parent: Record<string, unknown>, key: string): Record<string, unknown>[] {

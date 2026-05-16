@@ -135,7 +135,7 @@ export interface CreateCreativeAction extends ActionBase {
   body?: string;
   linkUrl?: string;
   description?: string;
-  instagramActorId?: string;
+  instagramUserId?: string;
   images?: string[];
   videos?: string[];
   titles?: string[];
@@ -304,7 +304,11 @@ export function buildExecutionPlan(input: BuildExecutionPlanInput): ExecutionPla
   // -- campaigns / adsets / ads ------------------------------------------
   for (const camp of next.campaigns) {
     const prev = prevCampaignsById.get(camp.id) ?? null;
-    if (prev === null) {
+    if (prev === null && camp.importedExisting === true) {
+      // Existing Meta objects that were adopted into brand.yaml are treated as
+      // already present. This lets a PR add a new ad under a live campaign/adset
+      // without emitting duplicate create_campaign/create_adset actions.
+    } else if (prev === null) {
       creates.push(toCreateCampaign(account, camp));
     } else {
       const changes = diffCampaign(prev, camp);
@@ -321,7 +325,13 @@ export function buildExecutionPlan(input: BuildExecutionPlanInput): ExecutionPla
       account,
       campaignId: camp.id,
       nextAdsets: camp.adsets,
-      previousAdsets: prev?.adsets ?? [],
+      previousAdsets:
+        prev?.adsets ??
+        (camp.importedExisting === true
+          ? camp.adsets
+              .filter((adset) => adset.importedExisting === true)
+              .map((adset) => ({ ...adset, ads: [] }))
+          : []),
       creates,
       updates,
       deleteBuckets,
@@ -452,7 +462,7 @@ function toCreateCreative(account: string, c: Creative): CreateCreativeAction {
   if (c.body !== undefined) out.body = c.body;
   if (c.linkUrl !== undefined) out.linkUrl = c.linkUrl;
   if (c.description !== undefined) out.description = c.description;
-  if (c.instagramActorId !== undefined) out.instagramActorId = c.instagramActorId;
+  if (c.instagramUserId !== undefined) out.instagramUserId = c.instagramUserId;
   if (c.images !== undefined) out.images = [...c.images];
   if (c.videos !== undefined) out.videos = [...c.videos];
   if (c.titles !== undefined) out.titles = [...c.titles];
@@ -592,7 +602,7 @@ function diffCreative(prev: Creative, next: Creative): Record<string, FieldChang
     "body",
     "linkUrl",
     "description",
-    "instagramActorId",
+    "instagramUserId",
   ] as const) {
     if ((prev[key] ?? null) !== (next[key] ?? null)) {
       changes[key] = { from: prev[key] ?? null, to: next[key] ?? null };
@@ -694,7 +704,10 @@ function diffAdsets(args: DiffAdsetsArgs): void {
 
   for (const adset of nextAdsets) {
     const prev = prevById.get(adset.id) ?? null;
-    if (prev === null) {
+    if (prev === null && adset.importedExisting === true) {
+      // Adopted live adsets are already present in Meta. Do not create them;
+      // still diff their ads below so newly added ads are planned.
+    } else if (prev === null) {
       creates.push({
         kind: "create_adset",
         account,
@@ -884,7 +897,11 @@ function collectGuardrailFindings(brand: BrandYaml, findings: PlanFinding[]): vo
   const g: Guardrails | undefined = brand.guardrails;
   for (let i = 0; i < brand.campaigns.length; i += 1) {
     const c = brand.campaigns[i]!;
-    if (g?.maxDailyBudgetPerCampaign !== undefined && c.budget.dailyBudget !== undefined) {
+    if (
+      c.importedExisting !== true &&
+      g?.maxDailyBudgetPerCampaign !== undefined &&
+      c.budget.dailyBudget !== undefined
+    ) {
       if (c.budget.dailyBudget > g.maxDailyBudgetPerCampaign) {
         findings.push({
           level: "error",
@@ -894,6 +911,7 @@ function collectGuardrailFindings(brand: BrandYaml, findings: PlanFinding[]): vo
       }
     }
     if (
+      c.importedExisting !== true &&
       g?.maxLifetimeBudgetPerCampaign !== undefined &&
       c.budget.lifetimeBudget !== undefined
     ) {
@@ -906,7 +924,7 @@ function collectGuardrailFindings(brand: BrandYaml, findings: PlanFinding[]): vo
       }
     }
     // Adset budgets > campaign budgets は warning (Meta 側が許容するケースもあるため)。
-    if (c.budget.dailyBudget !== undefined) {
+    if (c.importedExisting !== true && c.budget.dailyBudget !== undefined) {
       let adsetSum = 0;
       let allHaveDaily = c.adsets.length > 0;
       for (const a of c.adsets) {

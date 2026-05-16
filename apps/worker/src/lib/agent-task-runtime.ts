@@ -9,6 +9,10 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import type PgBoss from "pg-boss";
 import type { GithubAdapter } from "@addroid/github-adapter";
 import {
+  fetchMetaAssetReadiness,
+  type MetaAssetReadinessReport,
+} from "@addroid/meta-adapter";
+import {
   CRON_PRESETS,
   SCHEDULED_TASK_JOB_NAME,
   resolveCronScheduleTimeZone,
@@ -55,6 +59,11 @@ import {
   type BudgetGuardPolicyConfigInput,
 } from "./budget-guard-policy-config.js";
 import { formatImprovementReportForUser } from "./improvement-report-format.js";
+import {
+  decidePullRequestApproval,
+  type ApprovalDecisionAction,
+} from "./approval-decision-runtime.js";
+import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
@@ -366,11 +375,16 @@ export async function executeWorkerAgentTool(opts: {
           select: { key: true, displayName: true, metaAccountId: true },
           orderBy: { key: "asc" },
         });
+        const assetReadiness = await loadWorkerMetaAssetReadiness(opts.prisma, accounts);
+        const blocked = assetReadiness.filter((report) => !report.ok);
         return {
           display: readyTool.display,
           status: "ok",
-          message: `${accounts.length} 件の広告アカウントがあります。`,
-          data: { accounts },
+          message:
+            blocked.length > 0
+              ? `${accounts.length} 件の広告アカウントがあります。Meta権限の要確認が ${blocked.length} 件あります: ${blocked[0]!.messages[0] ?? "アセット権限を確認してください。"}`
+              : `${accounts.length} 件の広告アカウントがあります。${assetReadiness.length ? `Meta権限チェックは ${assetReadiness.length} 件 OK です。` : ""}`,
+          data: { accounts, assetReadiness },
         };
       }
       case "select_ad_account":
@@ -473,6 +487,33 @@ export async function executeWorkerAgentTool(opts: {
           display: readyTool.display,
           status: "ok",
           message: `GitOps PR #${result.prNumber} を作成しました。`,
+          data: result,
+        };
+      }
+      case "decide_approval": {
+        const action = normalizeApprovalDecision(readyTool.toolArgs);
+        const result = await decidePullRequestApproval({
+          prisma: opts.prisma,
+          githubAdapter: opts.githubAdapter,
+          workspaceId: opts.workspaceId,
+          prNumber: readRequiredPrNumber(readyTool.toolArgs),
+          action,
+          actor: opts.actor ?? "agent:scheduled-task",
+          decisionSource: action === "approve" ? "slack_merge" : "slack_reject",
+          ...(normalizeMergeMethod(readyTool.toolArgs)
+            ? { mergeMethod: normalizeMergeMethod(readyTool.toolArgs) }
+            : {}),
+          ...(readOptionalString(readyTool.toolArgs.comment)
+            ? { comment: readOptionalString(readyTool.toolArgs.comment)! }
+            : {}),
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message:
+            action === "approve"
+              ? `PR #${result.prNumber} を承認しました。`
+              : `PR #${result.prNumber} を否決しました。`,
           data: result,
         };
       }
@@ -581,6 +622,25 @@ export async function executeWorkerAgentTool(opts: {
       message: (err as Error).message,
     };
   }
+}
+
+async function loadWorkerMetaAssetReadiness(
+  prisma: PrismaClient,
+  accounts: readonly { key: string; metaAccountId: string | null }[]
+): Promise<MetaAssetReadinessReport[]> {
+  const selection = await buildPrismaMetaAdapterSelection({ prisma }).catch(() => null);
+  if (!selection || selection.choice === "stub") return [];
+  const lease = await selection.adapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease) return [];
+  return await Promise.all(
+    accounts.slice(0, 10).map((account) =>
+      fetchMetaAssetReadiness({
+        accessToken: lease.accessToken,
+        adAccountId: account.metaAccountId ?? account.key,
+        limit: 50,
+      })
+    )
+  );
 }
 
 function normalizeCreativeSubmissionSource(source: PlanRunSource | undefined) {
@@ -949,6 +1009,54 @@ function readRequiredString(value: unknown, label: string): string {
     throw new Error(`${label} が指定されていません。`);
   }
   return value.trim();
+}
+
+function readOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readRequiredPrNumber(args: Record<string, unknown>): number {
+  const raw = args.prNumber ?? args.pr_number ?? args.number;
+  const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
+  if (!Number.isFinite(n) || n <= 0) throw new Error("prNumber が指定されていません。");
+  return n;
+}
+
+function normalizeApprovalDecision(args: Record<string, unknown>): ApprovalDecisionAction {
+  const raw =
+    readStringArg(args, "decision") ??
+    readStringArg(args, "action") ??
+    readStringArg(args, "intent");
+  const normalized = raw?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (
+    normalized === "approve" ||
+    normalized === "approved" ||
+    normalized === "承認"
+  ) {
+    return "approve";
+  }
+  if (
+    normalized === "reject" ||
+    normalized === "rejected" ||
+    normalized === "deny" ||
+    normalized === "否決" ||
+    normalized === "却下"
+  ) {
+    return "reject";
+  }
+  throw new Error("decision は approve または reject を指定してください。");
+}
+
+function normalizeMergeMethod(
+  args: Record<string, unknown>
+): "merge" | "squash" | "rebase" | undefined {
+  const raw = readStringArg(args, "mergeMethod", "merge_method");
+  if (!raw) return undefined;
+  const normalized = raw.toLowerCase();
+  if (normalized === "merge" || normalized === "squash" || normalized === "rebase") {
+    return normalized;
+  }
+  throw new Error("mergeMethod は merge / squash / rebase のいずれかです。");
 }
 
 function normalizeBudgetGuardConfigInput(

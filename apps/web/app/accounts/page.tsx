@@ -38,6 +38,7 @@ interface SearchParamsInput {
   oauth?: string | string[];
   reason?: string | string[];
   accounts?: string | string[];
+  assetCheck?: string | string[];
   reauthPage?: string | string[];
 }
 
@@ -183,7 +184,8 @@ export default async function AccountsPage({
   const oauthQuery = firstSearchParam(resolvedSearchParams?.oauth);
   const reasonQuery = firstSearchParam(resolvedSearchParams?.reason);
   const accountsQuery = firstSearchParam(resolvedSearchParams?.accounts);
-  const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery);
+  const assetCheckQuery = firstSearchParam(resolvedSearchParams?.assetCheck);
+  const banner = renderBanner(oauthQuery, reasonQuery, accountsQuery, assetCheckQuery);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
   const reauthPagination = getPaginationState(
     resolvedSearchParams,
@@ -423,7 +425,8 @@ export default async function AccountsPage({
 function renderBanner(
   oauth: string | undefined,
   reason: string | undefined,
-  accounts: string | undefined
+  accounts: string | undefined,
+  assetCheck: string | undefined
 ) {
   if (!oauth) return null;
   if (oauth === "error") {
@@ -440,9 +443,14 @@ function renderBanner(
       <div className="banner" data-state="ok">
         <span className="banner__title">Meta と接続しました。</span>
         <span>
-          {Number.isFinite(n) && n > 0
+          {(Number.isFinite(n) && n > 0
             ? `${n} 件の Ad Account を新規登録しました。`
-            : "新規登録された Ad Account はありませんでした (既存と一致)。"}
+            : "新規登録された Ad Account はありませんでした (既存と一致)。") +
+            (assetCheck === "attention"
+              ? " Metaアセット権限に確認が必要な項目があります。更新ボタンまたはチャットで権限チェックを確認してください。"
+              : assetCheck === "ok"
+                ? " Metaアセット権限チェックも完了しました。"
+                : "")}
         </span>
       </div>
     );

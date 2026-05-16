@@ -169,7 +169,7 @@ test("loadRecentPerformanceSnapshotContext extracts Meta creative copy and URL f
                   callToAction: "LEARN_MORE",
                   linkUrl: "https://example.com/store-a",
                   pageId: "page-1",
-                  instagramActorId: "ig-1",
+                  instagramUserId: "ig-1",
                 },
                 raw: { name: "店舗A プロフィール誘導広告" },
               },

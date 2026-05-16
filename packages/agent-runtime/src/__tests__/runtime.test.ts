@@ -138,6 +138,48 @@ test("runAgentTurn denies unavailable tools on scheduled-agent surface", async (
   assert.equal(result.toolResults[0]?.status, "unsupported");
 });
 
+test("runAgentTurn resolves approval decisions on interactive chat surfaces only", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "承認します。",
+      tools: [
+        {
+          name: "decide_approval",
+          args: { prNumber: 12, decision: "approve" },
+          why: "ユーザーがPR承認を依頼したため",
+        },
+      ],
+    })
+  );
+  const context = {
+    content: "test agent context",
+    webUrl: "http://127.0.0.1:3000",
+    loadedDocs: ["test"],
+  };
+  const interactive = await runAgentTurn({
+    input: "PR #12 を承認して",
+    provider,
+    agentContext: context,
+    purpose: "test",
+    surface: "cli-chat",
+  });
+  const tool = interactive.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "decide_approval");
+  assert.equal(tool.command, null);
+  assert.equal(tool.toolArgs.prNumber, 12);
+
+  const scheduled = await runAgentTurn({
+    input: "PR #12 を承認して",
+    provider,
+    agentContext: context,
+    purpose: "test",
+    surface: "scheduled-agent",
+  });
+  assert.equal(scheduled.toolResults[0]?.status, "unsupported");
+});
+
 test("runAgentTurn keeps nested proposal args and rejects direct activation on chat surfaces", async () => {
   const provider = new StaticProvider(
     JSON.stringify({

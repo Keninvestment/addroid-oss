@@ -34,6 +34,7 @@ import {
   type ImprovementPrAuditWriter,
   type ImprovementPrExecutionMode,
   type ImprovementPrSummary,
+  type AdsLoader,
   type JsonValue,
   type RetentionSweepSummary,
   type SlackCommandJobPayload,
@@ -1174,10 +1175,24 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     where: { id: workspace.id },
     select: { opsRepoId: true },
   });
-  const adsLoader = createLocalDirAdsLoaderFromEnv(process.env, {
+  const baseAdsLoader = createLocalDirAdsLoaderFromEnv(process.env, {
     expectedRepoId: wsRow?.opsRepoId ?? null,
     localDir: opsRepoRootDir,
   });
+  const adsLoader: AdsLoader = {
+    async loadForApply(input) {
+      await ensureOpsRepoLocalCheckout({
+        prisma: prisma as never,
+        workspaceId: workspace.id,
+      }).catch((err) => {
+        log.warn(
+          `[worker] ops repo sync before apply failed: ${(err as Error).message}`
+        );
+        return null;
+      });
+      return baseAdsLoader.loadForApply(input);
+    },
+  };
   const applyExecutorSelection = await resolveApplyExecutor({
     env: process.env,
     metaAdapter: metaAdapterSelection.adapter,

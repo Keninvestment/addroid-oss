@@ -357,13 +357,11 @@ export async function runExecuteApply(
   // 伝播し、Apply 経路の Meta CLI execution_log を承認境界に紐付ける)。
   let context: ApplyJobContext = contextRaw;
 
-  // 1.5) 実行時 GitOps 再検証 (regression fix)
-  // enqueue 時に branch protection を経由して auto_approved になっていても、
-  // 実行段階で:
+  // 1.5) 実行時 GitOps 再検証
+  // enqueue 後でも、実行段階で:
   //   - PR が closed 等 merged ではなくなっている
-  //   - ops repo の branch protection が外されている
   //   - approval_records が 1 行も無い (= 手で apply_jobs を挿入した)
-  //   - 最新 approval が rejected / auto_blocked
+  //   - 最新 approval が rejected / auto_blocked / headSha 不一致
   // のいずれかであれば Meta mutation 経路に到達させない。
   // markApplyRunning より前で fail-closed させるため、Meta CLI / executor は呼ばない。
   const snapshot = await opts.store.loadApplyApprovalSnapshot(opts.applyJobId);
@@ -422,7 +420,7 @@ export async function runExecuteApply(
   // invocation の `refs.approvalRecordId` に伝播し、Apply の各 CLI 実行を
   // `execution_logs` 上で承認境界 (approval_records) に紐付けるための情報源。
   // snapshot は revalidation 成功時点で必ず存在し、latestApprovalDecision が
-  // approved/auto_approved のいずれかなので approvalRecordId は通常 string。
+  // approved なので approvalRecordId は通常 string。
   // ただし型上は null も許容するため、フォールバックを残す。
   context = {
     ...context,
@@ -1483,12 +1481,11 @@ function failingActionForLog(record: FailingActionRecord): JsonValue {
 }
 
 // ---------------------------------------------------------------------
-// regression fix: execute-time approval revalidation
+// execute-time approval revalidation
 //
 // runExecuteApply は 1.5) ステップで `loadApplyApprovalSnapshot` の結果を
 // この関数に通し、Meta mutation 経路に進めるかを判定する。stale な apply_job /
-// 手で挿入された apply_job / branch protection を後から外された ops repo を
-// すべて 1 か所で fail-closed する境界。
+// 手で挿入された apply_job / headSha がズレた承認を 1 か所で fail-closed する境界。
 //
 // すべての revalidation 失敗は audit_logs に `apply.blocked_unapproved` として
 // 残され、execution_logs (kind=apply, level=error) と apply_jobs.state=failed
@@ -1498,9 +1495,10 @@ function failingActionForLog(record: FailingActionRecord): JsonValue {
 type RevalidationFailureReason =
   | "snapshot_unavailable"
   | "pr_not_merged"
-  | "branch_protection_revoked"
   | "no_approval_record"
-  | "approval_rejected";
+  | "approval_rejected"
+  | "approval_head_sha_mismatch"
+  | "invalid_approval_source";
 
 type RevalidationResult =
   | { ok: true }
@@ -1524,14 +1522,6 @@ export function evaluateApprovalSnapshot(
       detail: `現在の PR state="${snapshot.pullRequestState}" は merged ではないため Meta mutation を実行しません。`,
     };
   }
-  if (!snapshot.branchProtectionApplied) {
-    return {
-      ok: false,
-      reason: "branch_protection_revoked",
-      detail:
-        "ops repo の branch protection が現時点で適用されていないため、approval enforcement を再確認できず実行を拒否しました。",
-    };
-  }
   if (snapshot.latestApprovalDecision === null) {
     return {
       ok: false,
@@ -1540,14 +1530,27 @@ export function evaluateApprovalSnapshot(
         "approval_records に 1 行も無いため、GitOps 経由で承認された apply_job として認識できません (手で apply_jobs を挿入した可能性)。",
     };
   }
-  if (
-    snapshot.latestApprovalDecision !== "auto_approved" &&
-    snapshot.latestApprovalDecision !== "approved"
-  ) {
+  if (snapshot.latestApprovalDecision !== "approved") {
     return {
       ok: false,
       reason: "approval_rejected",
       detail: `最新の approval_records.decision="${snapshot.latestApprovalDecision}" は承認状態ではありません。`,
+    };
+  }
+  if (snapshot.approvalRecordHeadSha !== snapshot.pullRequestHeadSha) {
+    return {
+      ok: false,
+      reason: "approval_head_sha_mismatch",
+      detail:
+        "承認された変更IDと現在の PR 変更IDが一致しないため Meta mutation を実行しません。",
+    };
+  }
+  if (!isAcceptedApprovalSource(snapshot.approvalDecisionSource)) {
+    return {
+      ok: false,
+      reason: "invalid_approval_source",
+      detail:
+        "最新の承認記録が Web UI / CLI / Slack / GitHub の承認由来ではないため Meta mutation を実行しません。",
     };
   }
   return { ok: true };
@@ -1557,11 +1560,22 @@ function snapshotForLog(snapshot: ApplyApprovalSnapshot | null): JsonValue {
   if (!snapshot) return null;
   return {
     pullRequestState: snapshot.pullRequestState,
-    branchProtectionApplied: snapshot.branchProtectionApplied,
+    pullRequestHeadSha: snapshot.pullRequestHeadSha,
     latestApprovalDecision: snapshot.latestApprovalDecision,
     approvalRecordId: snapshot.approvalRecordId,
+    approvalRecordHeadSha: snapshot.approvalRecordHeadSha,
+    approvalDecisionSource: snapshot.approvalDecisionSource,
     mergedAt: snapshot.mergedAt ? snapshot.mergedAt.toISOString() : null,
   };
+}
+
+function isAcceptedApprovalSource(source: string | null): boolean {
+  return (
+    source === "web_merge" ||
+    source === "cli_merge" ||
+    source === "slack_merge" ||
+    source === "github_merge"
+  );
 }
 
 // ---------------------------------------------------------------------

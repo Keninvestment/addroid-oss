@@ -27,7 +27,7 @@
 //   - dangerous categories (budget_increase / new_campaign / targeting_change /
 //     monthly_budget_change / automation_rule_change) は audit agent が
 //     `auto_blocked` を返した時点で approval_records.decision="auto_blocked" と
-//     して記録され、PR は GitHub 側 branch protection と二段で承認境界を持つ。
+//     して記録され、PR は AdDroid の対話型承認または GitHub merge を承認境界に持つ。
 //   - 改善提案は必ず `publisher.createPullRequest` を経由してから succeeded を
 //     返す。`pipeline` + `publisher` + `audit` が揃わない呼び出しは throw する
 //     (= proposals が PR boundary を迂回して succeeded になる経路は存在しない)。
@@ -468,7 +468,7 @@ export interface ImprovementPrCreativeNodeContext {
     callToAction?: string | null;
     linkUrl?: string | null;
     pageId?: string | null;
-    instagramActorId?: string | null;
+    instagramUserId?: string | null;
     storageRef?: string | null;
     provider?: string | null;
     model?: string | null;

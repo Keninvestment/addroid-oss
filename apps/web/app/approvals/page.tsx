@@ -39,7 +39,7 @@ interface PendingPrRow {
   headSha: string;
   htmlUrl: string | null;
   baseRef: string;
-  polledAt: Date;
+  createdAt: Date;
   latestDecision: string | null;
 }
 
@@ -99,7 +99,7 @@ export default async function ApprovalsPage({
     );
     const open = await prisma.githubPullRequest.findMany({
       where: openWhere,
-      orderBy: { polledAt: "desc" },
+      orderBy: { createdAt: "desc" },
       skip: openPagination.skip,
       take: openPagination.take,
       select: {
@@ -110,7 +110,7 @@ export default async function ApprovalsPage({
         headSha: true,
         htmlUrl: true,
         baseRef: true,
-        polledAt: true,
+        createdAt: true,
         approvalRecords: {
           orderBy: { createdAt: "desc" },
           take: 1,
@@ -126,7 +126,7 @@ export default async function ApprovalsPage({
       headSha: row.headSha,
       htmlUrl: row.htmlUrl,
       baseRef: row.baseRef,
-      polledAt: row.polledAt,
+      createdAt: row.createdAt,
       latestDecision: row.approvalRecords[0]?.decision ?? null,
     }));
 
@@ -262,8 +262,9 @@ export default async function ApprovalsPage({
                   className: "mono",
                 },
                 {
-                    header: "確認日時",
-                    cell: (row) => formatDateTime(row.polledAt, { timeZone: pageDisplayTimeZone }),
+                  header: "作成日時",
+                  cell: (row) =>
+                    formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
                   className: "tabular mono",
                   headerClassName: "tabular",
                 },

@@ -23,6 +23,8 @@
 // 本ファイルは Prisma を import しない。token は MetaAdapter から都度復号して
 // 取得し、メソッドスコープでのみ保持する。
 
+import fs from "node:fs/promises";
+import path from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 import { LocalDiskStorage } from "@addroid/config";
 import {
@@ -31,6 +33,7 @@ import {
   MetaCliRunner,
   MetaCliVersionUnverifiedError,
   MetaTokenExpiredError,
+  fetchMetaAssetReadiness,
   recommendActionForExit,
   toExecutionLogInput,
   type MetaAdapter,
@@ -46,6 +49,8 @@ import type {
   MetaActionExecutor,
 } from "@addroid/queue";
 import type { PlanAction } from "@addroid/yaml-schemas";
+
+const META_GRAPH_API_VERSION = "v25.0";
 
 // ---------------------------------------------------------------------
 // regression fix: canonical pre-spawn payload shape
@@ -282,7 +287,7 @@ function planActionToCliArgs(action: PlanAction, accountCurrency = "USD"): {
           ...(action.linkUrl ? ["--link-url", action.linkUrl] : []),
           ...(action.description ? ["--description", action.description] : []),
           ...(action.callToAction ? ["--call-to-action", cliEnum(action.callToAction)] : []),
-          ...(action.instagramActorId ? ["--instagram-actor-id", action.instagramActorId] : []),
+          ...(action.instagramUserId ? ["--instagram-user-id", action.instagramUserId] : []),
           ...repeatFlags("--images", action.images?.map(fileArg)),
           ...repeatFlags("--videos", action.videos?.map(fileArg)),
           ...repeatFlags("--titles", action.titles),
@@ -415,8 +420,8 @@ function changeFlags(
       case "callToAction":
         out.push("--call-to-action", cliEnum(String(value)));
         break;
-      case "instagramActorId":
-        out.push("--instagram-actor-id", String(value));
+      case "instagramUserId":
+        out.push("--instagram-user-id", String(value));
         break;
       case "storageKey":
         out.push("--image", fileArg(String(value)));
@@ -430,6 +435,196 @@ function changeFlags(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface GraphApplyRefs {
+  refType: "apply_job";
+  refId: string;
+  pullRequestNumber?: number;
+  approvalRecordId?: string;
+}
+
+class MetaGraphApplyError extends Error {
+  readonly exitClass: MetaCliExitClass;
+  readonly status: number | null;
+  readonly payload: JsonValue;
+
+  constructor(input: {
+    message: string;
+    exitClass: MetaCliExitClass;
+    status?: number | null;
+    payload?: JsonValue;
+  }) {
+    super(input.message);
+    this.name = "MetaGraphApplyError";
+    this.exitClass = input.exitClass;
+    this.status = input.status ?? null;
+    this.payload = input.payload ?? null;
+  }
+}
+
+function graphEndpoint(pathname: string): string {
+  const cleaned = pathname.replace(/^\/+/, "");
+  return `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${cleaned}`;
+}
+
+async function postGraphJson(
+  pathname: string,
+  accessToken: string,
+  body: Record<string, string>
+): Promise<{ status: number; json: unknown }> {
+  const form = new URLSearchParams(body);
+  const res = await fetch(graphEndpoint(pathname), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form.toString(),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw graphError(res.status, json);
+  return { status: res.status, json };
+}
+
+async function postGraphMultipart(
+  pathname: string,
+  accessToken: string,
+  fields: Record<string, string>,
+  file: { field: string; path: string }
+): Promise<{ status: number; json: unknown }> {
+  const bytes = await fs.readFile(file.path);
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.set(key, value);
+  form.set(file.field, new Blob([bytes]), path.basename(file.path));
+  const res = await fetch(graphEndpoint(pathname), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw graphError(res.status, json);
+  return { status: res.status, json };
+}
+
+function graphError(status: number, json: unknown): MetaGraphApplyError {
+  const error = isRecord(json) && isRecord(json.error) ? json.error : null;
+  const code = typeof error?.code === "number" ? error.code : null;
+  const message =
+    typeof error?.message === "string"
+      ? error.message
+      : `Meta Graph API returned HTTP ${status}`;
+  return new MetaGraphApplyError({
+    message,
+    exitClass: classifyGraphError(status, code),
+    status,
+    payload: json as JsonValue,
+  });
+}
+
+function classifyGraphError(status: number, code: number | null): MetaCliExitClass {
+  if (status === 401 || code === 190 || code === 102 || code === 104 || code === 463 || code === 467) {
+    return "auth_error";
+  }
+  if (status === 429 || code === 4 || code === 17 || code === 32 || code === 613) {
+    return "rate_limit_error";
+  }
+  if (status >= 400 && status < 500) return "api_error";
+  return "unknown_error";
+}
+
+function extractId(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const id = json.id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function extractImageHash(json: unknown): string | null {
+  if (!isRecord(json)) return null;
+  const direct = json.hash;
+  if (typeof direct === "string" && direct.length > 0) return direct;
+  const images = json.images;
+  if (!isRecord(images)) return null;
+  for (const value of Object.values(images)) {
+    if (isRecord(value) && typeof value.hash === "string" && value.hash.length > 0) {
+      return value.hash;
+    }
+  }
+  return null;
+}
+
+function graphLogPayload(input: {
+  accountKey: string;
+  action: PlanAction;
+  sanitizedCommand: string;
+  sanitizedArgs: string[];
+  refs: GraphApplyRefs;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  exitClass: MetaCliExitClass;
+  stdout?: string;
+  stderr?: string;
+  statusCode?: number | null;
+  response?: JsonValue;
+  preflight?: JsonValue;
+}): Record<string, JsonValue> {
+  const out: Record<string, JsonValue> = {
+    accountKey: input.accountKey,
+    binary: "meta-graph-api",
+    sanitizedCommand: input.sanitizedCommand,
+    sanitizedArgs: input.sanitizedArgs,
+    exitCode: input.exitClass === "success" ? 0 : input.statusCode ?? null,
+    signal: null,
+    exitClass: input.exitClass,
+    recommendedAction: recommendActionForExit(input.exitClass) as unknown as JsonValue,
+    durationMs: input.durationMs,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    timedOut: false,
+    stdout: input.stdout ?? "",
+    stderr: input.stderr ?? "",
+    throttleHeaders: null,
+    mode: "graph",
+    resource: "creatives",
+    verb: "create",
+    action: JSON.parse(JSON.stringify(input.action)) as JsonValue,
+    response: input.response ?? null,
+    preflight: input.preflight ?? null,
+    refType: input.refs.refType,
+    refId: input.refs.refId,
+  };
+  if (input.refs.pullRequestNumber !== undefined) {
+    out.pullRequestNumber = input.refs.pullRequestNumber;
+  }
+  if (input.refs.approvalRecordId !== undefined) {
+    out.approvalRecordId = input.refs.approvalRecordId;
+  }
+  return out;
+}
+
+function buildImageCreativeObjectStorySpec(action: Extract<PlanAction, { kind: "create_creative" }>, imageHash: string): Record<string, unknown> {
+  if (!action.pageId) throw new Error("create_creative requires pageId for Meta Graph apply");
+  if (!action.linkUrl) throw new Error("create_creative image link ad requires linkUrl for Meta Graph apply");
+  const linkData: Record<string, unknown> = {
+    image_hash: imageHash,
+    link: action.linkUrl,
+    message: action.body ?? action.primaryText ?? "",
+  };
+  const title = action.title ?? action.headline;
+  if (title) linkData.name = title;
+  if (action.description) linkData.description = action.description;
+  if (action.callToAction && action.callToAction !== "NO_BUTTON") {
+    linkData.call_to_action = {
+      type: action.callToAction,
+      value: { link: action.linkUrl },
+    };
+  }
+  return {
+    page_id: action.pageId,
+    ...(action.instagramUserId ? { instagram_user_id: action.instagramUserId } : {}),
+    link_data: linkData,
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -684,16 +879,20 @@ export class FailClosedApplyExecutor implements MetaActionExecutor {
 
 export interface CliApplyExecutorOptions {
   runner: MetaCliRunner;
+  metaAdapter: MetaAdapter;
   resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
   resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
 }
 
 export class CliApplyExecutor implements MetaActionExecutor {
   private readonly runner: MetaCliRunner;
+  private readonly metaAdapter: MetaAdapter;
   private readonly resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
   private readonly resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
+  private readonly createdCreativeExternalIds = new Map<string, string>();
   constructor(opts: CliApplyExecutorOptions) {
     this.runner = opts.runner;
+    this.metaAdapter = opts.metaAdapter;
     this.resolveAdAccountId = opts.resolveAdAccountId;
     this.resolveAdAccountCurrency = opts.resolveAdAccountCurrency;
   }
@@ -703,12 +902,13 @@ export class CliApplyExecutor implements MetaActionExecutor {
       (this.resolveAdAccountCurrency
         ? await this.resolveAdAccountCurrency(input.action.account)
         : null) ?? "USD";
-    const args = planActionToCliArgs(input.action, accountCurrency);
+    const action = this.rewriteActionRefs(input.action);
+    const args = planActionToCliArgs(action, accountCurrency);
     if (!args) {
       return {
         status: "skipped",
-        message: `unsupported action kind ${input.action.kind} (not in META_CLI_SUPPORTED_OPERATIONS)`,
-        logPayload: { reason: "unsupported_action", actionKind: input.action.kind },
+        message: `unsupported action kind ${action.kind} (not in META_CLI_SUPPORTED_OPERATIONS)`,
+        logPayload: { reason: "unsupported_action", actionKind: action.kind },
       };
     }
     // regression fix: Apply 経路の MetaCli invocation refs に approvalRecordId を
@@ -727,11 +927,19 @@ export class CliApplyExecutor implements MetaActionExecutor {
     if (typeof approvalRecordId === "string" && approvalRecordId.length > 0) {
       refs.approvalRecordId = approvalRecordId;
     }
+    const graphRefs: GraphApplyRefs = {
+      refType: "apply_job",
+      refId: input.context.applyJobId,
+      pullRequestNumber: input.context.prNumber,
+      ...(typeof approvalRecordId === "string" && approvalRecordId.length > 0
+        ? { approvalRecordId }
+        : {}),
+    };
     const invocation: MetaCliInvocation = {
-      accountKey: input.action.account,
+      accountKey: action.account,
       adAccountId: this.resolveAdAccountId
-        ? await this.resolveAdAccountId(input.action.account)
-        : input.action.account,
+        ? await this.resolveAdAccountId(action.account)
+        : action.account,
       args: args.args,
       refs,
     };
@@ -742,6 +950,16 @@ export class CliApplyExecutor implements MetaActionExecutor {
     // 失敗ステージ固有のフィールド (mode/stage/errorName/verification 等) を envelope の
     // 上にマージする。
     const sanitizedCommand = `meta-ads-cli ${args.args.join(" ")}`;
+
+    if (action.kind === "create_creative") {
+      return this.executeGraphCreateCreative({
+        action,
+        invocation,
+        refs: graphRefs,
+        args,
+        sanitizedCommand,
+      });
+    }
 
     // regression fix: Meta token が無い / 期限切れ / 復号失敗 の場合、
     // runner.run() は loadTokenForAccount から MetaCliMissingTokenError /
@@ -767,7 +985,7 @@ export class CliApplyExecutor implements MetaActionExecutor {
           exitClass: "unknown_error",
           stderr: detail,
           binary: null,
-          accountKey: input.action.account,
+          accountKey: action.account,
           sanitizedCommand,
           sanitizedArgs: args.args,
           pullRequestNumber: input.context.prNumber,
@@ -812,7 +1030,7 @@ export class CliApplyExecutor implements MetaActionExecutor {
           exitClass: "auth_error",
           stderr: detail,
           binary: null,
-          accountKey: input.action.account,
+          accountKey: action.account,
           sanitizedCommand,
           sanitizedArgs: args.args,
           pullRequestNumber: input.context.prNumber,
@@ -868,7 +1086,7 @@ export class CliApplyExecutor implements MetaActionExecutor {
     // ここで externalId が undefined のままだと create_* を fail-closed して
     // ads_hierarchy に null externalId 行を作らないため、抽出可否がそのまま
     // Activate 経路の可用性を決める。
-    if (status === "success" && isCreateRequiringExternalId(input.action.kind)) {
+    if (status === "success" && isCreateRequiringExternalId(action.kind)) {
       const ext = extractExternalIdFromCliStdout(result.stdout);
       if (ext) out.externalId = ext;
     }
@@ -901,6 +1119,180 @@ export class CliApplyExecutor implements MetaActionExecutor {
       };
     }
     return out;
+  }
+
+  private rewriteActionRefs(action: PlanAction): PlanAction {
+    if (action.kind !== "create_ad") return action;
+    const resolved = this.createdCreativeExternalIds.get(`${action.account}:${action.creativeRef}`);
+    return resolved ? { ...action, creativeRef: resolved } : action;
+  }
+
+  private async executeGraphCreateCreative(input: {
+    action: Extract<PlanAction, { kind: "create_creative" }>;
+    invocation: MetaCliInvocation;
+    refs: GraphApplyRefs;
+    args: { args: string[]; resource: string; verb: string };
+    sanitizedCommand: string;
+  }): Promise<ExecuteActionResult> {
+    const startedAt = new Date();
+    const accountKey = input.action.account;
+    const adAccountId = input.invocation.adAccountId ?? accountKey;
+    const finish = () => new Date();
+    const duration = (finishedAt: Date) => finishedAt.getTime() - startedAt.getTime();
+    try {
+      const lease = await this.metaAdapter.loadAccessTokenPlaintext();
+      if (!lease) throw new MetaCliMissingTokenError(accountKey);
+      if (input.action.mediaType !== "image" || !input.action.storageKey) {
+        throw new MetaGraphApplyError({
+          message: "Meta Graph creative apply currently requires image media with storageKey",
+          exitClass: "api_error",
+          payload: { mediaType: input.action.mediaType, hasStorageKey: Boolean(input.action.storageKey) },
+        });
+      }
+      const preflight = await this.validateCreativeIdentity({
+        accessToken: lease.accessToken,
+        adAccountId,
+        pageId: input.action.pageId ?? null,
+        instagramUserId: input.action.instagramUserId ?? null,
+      });
+      const imagePath = fileArg(input.action.storageKey);
+      const uploaded = await postGraphMultipart(
+        `${adAccountId}/adimages`,
+        lease.accessToken,
+        {},
+        { field: "source", path: imagePath }
+      );
+      const imageHash = extractImageHash(uploaded.json);
+      if (!imageHash) {
+        throw new MetaGraphApplyError({
+          message: "Meta Graph adimages response did not include an image hash",
+          exitClass: "unknown_error",
+          status: uploaded.status,
+          payload: uploaded.json as JsonValue,
+        });
+      }
+      const objectStorySpec = buildImageCreativeObjectStorySpec(input.action, imageHash);
+      const created = await postGraphJson(`${adAccountId}/adcreatives`, lease.accessToken, {
+        name: input.action.name,
+        object_story_spec: JSON.stringify(objectStorySpec),
+      });
+      const externalId = extractId(created.json);
+      if (!externalId) {
+        throw new MetaGraphApplyError({
+          message: "Meta Graph adcreatives response did not include id",
+          exitClass: "unknown_error",
+          status: created.status,
+          payload: created.json as JsonValue,
+        });
+      }
+      this.createdCreativeExternalIds.set(`${accountKey}:${input.action.creativeId}`, externalId);
+      const finishedAt = finish();
+      return {
+        status: "success",
+        message: `meta graph creatives create succeeded (${externalId})`,
+        externalId,
+        logPayload: graphLogPayload({
+          accountKey,
+          action: input.action,
+          sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
+          sanitizedArgs: input.args.args,
+          refs: input.refs,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          durationMs: duration(finishedAt),
+          exitClass: "success",
+          stdout: JSON.stringify({ id: externalId }),
+          response: created.json as JsonValue,
+          preflight: preflight as JsonValue,
+        }),
+      };
+    } catch (err) {
+      const finishedAt = finish();
+      if (
+        err instanceof MetaCliMissingTokenError ||
+        err instanceof MetaTokenExpiredError ||
+        err instanceof MetaAdapterUnauthenticatedError
+      ) {
+        const detail = err.message;
+        return {
+          status: "auth_error",
+          message: `meta graph creatives create aborted before request: ${detail}`,
+          logPayload: graphLogPayload({
+            accountKey,
+            action: input.action,
+            sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
+            sanitizedArgs: input.args.args,
+            refs: input.refs,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: duration(finishedAt),
+            exitClass: "auth_error",
+            stderr: detail,
+          }),
+          notify: { auditAction: "oauth.meta.reauth_required", detail },
+        };
+      }
+      if (err instanceof MetaGraphApplyError) {
+        const rec = recommendActionForExit(err.exitClass);
+        const status: ExecuteActionResult["status"] =
+          err.exitClass === "auth_error"
+            ? "auth_error"
+            : err.exitClass === "rate_limit_error"
+              ? "rate_limit_error"
+              : err.exitClass === "api_error"
+                ? "api_error"
+                : "unknown_error";
+        const out: ExecuteActionResult = {
+          status,
+          message: `meta graph creatives create failed: ${err.message}`,
+          logPayload: graphLogPayload({
+            accountKey,
+            action: input.action,
+            sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
+            sanitizedArgs: input.args.args,
+            refs: input.refs,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: duration(finishedAt),
+            exitClass: err.exitClass,
+            stderr: err.message,
+            statusCode: err.status,
+            response: err.payload,
+          }),
+        };
+        if (rec.kind === "retry_with_backoff") {
+          const attempt = 0;
+          out.retry = {
+            delayMs: Math.min(rec.maxBackoffMs, rec.initialBackoffMs * Math.pow(2, attempt)),
+            maxAttempts: rec.maxAttempts,
+          };
+        } else if (
+          rec.kind === "notify_reauth" ||
+          rec.kind === "notify_api_error" ||
+          rec.kind === "fail_fast_notify"
+        ) {
+          out.notify = { auditAction: rec.auditAction, detail: rec.reason };
+        }
+        return out;
+      }
+      throw err;
+    }
+  }
+
+  private async validateCreativeIdentity(input: {
+    accessToken: string;
+    adAccountId: string;
+    pageId: string | null;
+    instagramUserId: string | null;
+  }): Promise<Record<string, JsonValue>> {
+    const report = await fetchMetaAssetReadiness({
+      accessToken: input.accessToken,
+      adAccountId: input.adAccountId,
+      pageId: input.pageId,
+      instagramUserId: input.instagramUserId,
+      limit: 100,
+    });
+    return report as unknown as Record<string, JsonValue>;
   }
 }
 
@@ -1027,6 +1419,7 @@ export async function resolveApplyExecutor(
   return {
     executor: new CliApplyExecutor({
       runner,
+      metaAdapter: adapter,
       ...(opts.resolveAdAccountId ? { resolveAdAccountId: opts.resolveAdAccountId } : {}),
       ...(opts.resolveAdAccountCurrency
         ? { resolveAdAccountCurrency: opts.resolveAdAccountCurrency }

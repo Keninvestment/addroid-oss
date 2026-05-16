@@ -174,13 +174,12 @@ export async function POST(
   //
   // ここで失敗すれば adapter.mergePullRequest を呼ばずに 500 を返す
   // (= GitHub に対する副作用は起きない)。成功すれば、後段の `github_poll` が
-  // 当該 PR の merge transition を検知した時点で `findLatestPrApprovalDecision`
-  // が "approved" を返すため、`auto_approved` を被せずに web_merge attribution
-  // が保存される (packages/queue/src/github-poll.ts 側の対応と対をなす)。
+  // 当該 PR の merge transition を検知した時点で `github_poll` が同じ headSha の
+  // web_merge 承認を確認し、execute_apply を enqueue する。
   //
   // 監査・承認の永続化が GitHub merge の前段にあることで、「audit が無いまま
-  // GitHub だけ merge され、後段の github_poll が `addroid` の auto_approved
-  // を書いて Apply pipeline が走ってしまう」失敗モードを遮断する。
+  // GitHub だけ merge され、AdDroid 承認なしに Apply pipeline が走ってしまう」
+  // 失敗モードを遮断する。
   let preMergeApprovalId: string;
   try {
     const result = await prisma.$transaction(async (tx) => {

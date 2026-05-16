@@ -73,6 +73,7 @@ export default async function CreativeSubmitPage({
             />
           ) : (
             <DashboardChatPanel
+              surface="creative-submit"
               title="クリエイティブ入稿チャット"
               description="キャンペーン作成、広告セット作成、既存広告セットへの広告作成を会話で進めます。足りない情報はエージェントが確認します。"
               emptyText="素材を添付して「この画像で既存広告セットに広告を作って」や「新規キャンペーンから作りたい」と入力してください。Meta への反映は GitHub PR の承認後です。"

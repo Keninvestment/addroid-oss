@@ -14,10 +14,34 @@ const BASE_REPO = {
   defaultBranch: "main",
   etag: null as string | null,
   lastModified: null as string | null,
-  // 既定 protected: 既存のテストはこの状態で書かれている。protection 不在ケースは
-  // 専用テストで `branchProtectionApplied: false` に上書きする (regression fix)。
-  branchProtectionApplied: true,
 };
+
+async function seedApprovedPr(
+  store: FakeGithubPollStore,
+  number: number,
+  headSha: string,
+  source = "web_merge"
+) {
+  await store.upsertPullRequest({
+    repoId: BASE_REPO.repoId,
+    number,
+    title: `approved ${number}`,
+    state: "open",
+    headSha,
+    baseRef: "main",
+    htmlUrl: `https://example.invalid/${number}`,
+    mergedAt: null,
+  });
+  const seeded = store.prs.get(`${BASE_REPO.repoId}#${number}`)!;
+  await store.recordPrApproval({
+    workspaceId: "ws-1",
+    pullRequestId: seeded.id,
+    approvedBy: source === "slack_merge" ? "slack:U123" : "user:web-ui",
+    decision: "approved",
+    comment: "interactive approval",
+    metadata: { decisionSource: source, headSha, prNumber: number },
+  });
+}
 
 test("runGithubPollOnce returns no_repo when ops repo is not registered", async () => {
   const store = new FakeGithubPollStore();
@@ -56,6 +80,7 @@ test("runGithubPollOnce records 304 not_modified and persists polling state", as
 test("runGithubPollOnce upserts PRs and enqueues execute_apply only for newly merged PRs", async () => {
   const store = new FakeGithubPollStore();
   store.setOpsRepo({ ...BASE_REPO });
+  await seedApprovedPr(store, 2, "sha-2");
   const boss = new FakeBoss();
   boss.defaultJobId = "pgboss-7";
   const adapter = new FakeGithubAdapter({
@@ -107,11 +132,11 @@ test("runGithubPollOnce upserts PRs and enqueues execute_apply only for newly me
   assert.equal(store.mergeAudits[0]!.prNumber, 2);
   assert.equal(store.mergeAudits[0]!.headSha, "sha-2");
   assert.equal(store.mergeAudits[0]!.jobId, "pgboss-7");
-  // approval_records: auto_approved row alongside the merge audit (implementation item).
+  // approval_records: the original interactive approval is preserved.
   assert.equal(store.prApprovals.length, 1);
   assert.equal(store.prApprovals[0]!.workspaceId, "ws-1");
-  assert.equal(store.prApprovals[0]!.decision, "auto_approved");
-  assert.equal(store.prApprovals[0]!.approvedBy, "addroid");
+  assert.equal(store.prApprovals[0]!.decision, "approved");
+  assert.equal(store.prApprovals[0]!.approvedBy, "user:web-ui");
   assert.equal(
     (store.prApprovals[0]!.metadata as { prNumber: number }).prNumber,
     2
@@ -124,6 +149,7 @@ test("runGithubPollOnce upserts PRs and enqueues execute_apply only for newly me
 test("runGithubPollOnce does not re-enqueue already-merged PRs on subsequent polls", async () => {
   const store = new FakeGithubPollStore();
   store.setOpsRepo({ ...BASE_REPO });
+  await seedApprovedPr(store, 9, "sha-9");
   const boss = new FakeBoss();
   // first poll: PR is merged → enqueue
   // second poll: same PR still merged → no enqueue
@@ -190,13 +216,11 @@ test("runGithubPollOnce returns adapter_unavailable when the adapter throws", as
   assert.equal(store.pollingStates[0]!.lastStatusCode, 0);
 });
 
-// regression fix: branch protection (= approval-enforcement) が ops repo に
-// 適用されていない状態では、merged PR を検知しても execute_apply を起動せず、
-// audit_logs / execution_logs に block を残す。
-test("runGithubPollOnce blocks execute_apply when branch protection is not applied", async () => {
+test("runGithubPollOnce treats direct GitHub merge as approval when AdDroid approval is missing", async () => {
   const store = new FakeGithubPollStore();
-  store.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: false });
+  store.setOpsRepo({ ...BASE_REPO });
   const boss = new FakeBoss();
+  boss.defaultJobId = "pgboss-github-merge";
   const adapter = new FakeGithubAdapter({
     results: [
       {
@@ -204,12 +228,13 @@ test("runGithubPollOnce blocks execute_apply when branch protection is not appli
         pullRequests: [
           {
             number: 42,
-            title: "merged without protection",
+            title: "merged without addroid approval",
             state: "merged",
             headSha: "sha-42",
             baseRef: "main",
             htmlUrl: "https://example.invalid/42",
             mergedAt: "2026-05-01T00:00:00.000Z",
+            mergedBy: "octo-user",
           },
         ],
       },
@@ -224,38 +249,33 @@ test("runGithubPollOnce blocks execute_apply when branch protection is not appli
   });
   assert.equal(summary.status, "polled");
   assert.equal(summary.newlyMerged, 1);
-  assert.equal(summary.blockedUnapproved, 1);
-  assert.deepEqual(summary.enqueuedJobIds, []);
-  // execute_apply must NOT be enqueued
-  assert.equal(boss.sent.length, 0);
-  // No apply_jobs row, no merge audit (success path artifacts)
-  assert.equal(store.applyJobs.length, 0);
-  assert.equal(store.mergeAudits.length, 0);
-  // The block is recorded
-  assert.equal(store.blockedApplies.length, 1);
-  assert.equal(store.blockedApplies[0]!.reason, "unprotected_branch");
-  assert.equal(store.blockedApplies[0]!.prNumber, 42);
-  assert.equal(store.blockedApplies[0]!.headSha, "sha-42");
-  assert.equal(store.blockedApplies[0]!.workspaceId, "ws-1");
-  // approval_records: auto_blocked row alongside the block audit (implementation item).
+  assert.equal(summary.blockedUnapproved, 0);
+  assert.deepEqual(summary.enqueuedJobIds, ["pgboss-github-merge"]);
+  assert.equal(boss.sent.length, 1);
+  assert.equal(store.applyJobs.length, 1);
+  assert.equal(store.mergeAudits.length, 1);
+  assert.equal(store.blockedApplies.length, 0);
+  // approval_records: GitHub direct merge is recorded as an approved boundary.
   assert.equal(store.prApprovals.length, 1);
   assert.equal(store.prApprovals[0]!.workspaceId, "ws-1");
-  assert.equal(store.prApprovals[0]!.decision, "auto_blocked");
-  assert.equal(store.prApprovals[0]!.approvedBy, "addroid");
-  assert.equal(
-    (store.prApprovals[0]!.metadata as { reason: string }).reason,
-    "unprotected_branch"
-  );
+  assert.equal(store.prApprovals[0]!.decision, "approved");
+  assert.equal(store.prApprovals[0]!.approvedBy, "github:octo-user");
+  const approvalMeta = store.prApprovals[0]!.metadata as {
+    decisionSource: string;
+    headSha: string;
+    mergedBy: string;
+  };
+  assert.equal(approvalMeta.decisionSource, "github_merge");
+  assert.equal(approvalMeta.headSha, "sha-42");
+  assert.equal(approvalMeta.mergedBy, "octo-user");
 });
 
-// regression fix: 上流 (improvement_pr の policy / audit、UI/CLI 拒否) が当該 PR
-// に対して既に `auto_blocked` (or `rejected`) を残している場合、merge 検出時点で
-// 新規 `auto_approved` を書き込むと latestApprovalDecision が反転して
-// execute_apply が承認境界を迂回するため、enqueue を拒否し、新規 approval も
-// 書き込まずに上流決定を保存する。
+// 上流 (improvement_pr の policy / audit、UI/CLI 拒否) が当該 PR に対して既に
+// `auto_blocked` (or `rejected`) を残している場合、merge 検出時点で enqueue を
+// 拒否し、新規 approval も書き込まずに上流決定を保存する。
 test("runGithubPollOnce blocks enqueue and preserves prior auto_blocked approval across merge", async () => {
   const store = new FakeGithubPollStore();
-  store.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: true });
+  store.setOpsRepo({ ...BASE_REPO });
   const boss = new FakeBoss();
   const adapter = new FakeGithubAdapter({
     results: [
@@ -323,22 +343,16 @@ test("runGithubPollOnce blocks enqueue and preserves prior auto_blocked approval
   );
   assert.equal(store.blockedApplies[0]!.prNumber, 21);
   // Critical: the prior auto_blocked row must remain the latest decision.
-  // No fresh auto_approved row may be written.
   assert.equal(store.prApprovals.length, 1);
   assert.equal(store.prApprovals[0]!.decision, "auto_blocked");
 });
 
-// regression fix: Web UI 経路の "web_merge" approval (decisionSource=web_merge)
-// は GitHub merge 前に書き込まれ、`approval_records.decision="approved"` として
-// 永続化される。後段の github_poll が同 PR の merge transition を検知したとき
-// (= branch protection を経た merged PR) に新たな `auto_approved` を上書きする
-// と web_merge attribution が失われ、「audit が無いまま GitHub だけ merge され
-// 後段で `addroid` が auto_approve してしまう」失敗モードを再現できてしまう。
-// したがって、prior `approved` が存在する場合は execute_apply を enqueue しつつ
-// 新規 approval は書かず、上流の approval 行を latest として保存する。
-test("runGithubPollOnce preserves prior approved (web_merge) attribution and does not overwrite with auto_approved", async () => {
+// Web UI 経路の "web_merge" approval (decisionSource=web_merge) は GitHub merge 前に
+// 書き込まれ、`approval_records.decision="approved"` として永続化される。後段の
+// github_poll は同じ headSha の承認を確認したときだけ execute_apply を enqueue する。
+test("runGithubPollOnce enqueues from prior approved web_merge with matching headSha", async () => {
   const store = new FakeGithubPollStore();
-  store.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: true });
+  store.setOpsRepo({ ...BASE_REPO });
   const boss = new FakeBoss();
   boss.defaultJobId = "pgboss-web-merge-1";
   const adapter = new FakeGithubAdapter({
@@ -380,7 +394,12 @@ test("runGithubPollOnce preserves prior approved (web_merge) attribution and doe
     approvedBy: "user:web-ui",
     decision: "approved",
     comment: "Web UI からマージ要求 (pre_merge)",
-    metadata: { decisionSource: "web_merge", phase: "pre_merge", prNumber: 31 },
+    metadata: {
+      decisionSource: "web_merge",
+      phase: "pre_merge",
+      prNumber: 31,
+      headSha: "sha-31",
+    },
   });
 
   const summary = await runGithubPollOnce({
@@ -400,7 +419,7 @@ test("runGithubPollOnce preserves prior approved (web_merge) attribution and doe
   // merge audit も従来通り 1 行残す。
   assert.equal(store.mergeAudits.length, 1);
   assert.equal(store.mergeAudits[0]!.prNumber, 31);
-  // Critical: 新規の auto_approved を被せない。latest は web_merge の `approved` のまま。
+  // Critical: 新規 approval は被せない。latest は web_merge の `approved` のまま。
   assert.equal(store.prApprovals.length, 1);
   assert.equal(store.prApprovals[0]!.decision, "approved");
   assert.equal(store.prApprovals[0]!.approvedBy, "user:web-ui");
@@ -415,7 +434,7 @@ test("runGithubPollOnce preserves prior approved (web_merge) attribution and doe
 // を起動せず、`report_only_mode` を理由に block を残す。
 test("runGithubPollOnce blocks enqueue when workspace mode is report_only and no override allows mutation", async () => {
   const store = new FakeGithubPollStore();
-  store.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: true });
+  store.setOpsRepo({ ...BASE_REPO });
   store.setExecutionModeContext({
     workspaceMode: "report_only",
     accountOverrides: [null, null],
@@ -474,7 +493,8 @@ test("runGithubPollOnce blocks enqueue when workspace mode is report_only and no
 // では fail-closed しない (= apply-executor の per-account 再評価に委ねる)。
 test("runGithubPollOnce enqueues when at least one account override allows mutation under report_only workspace", async () => {
   const store = new FakeGithubPollStore();
-  store.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: true });
+  store.setOpsRepo({ ...BASE_REPO });
+  await seedApprovedPr(store, 73, "sha-73");
   store.setExecutionModeContext({
     workspaceMode: "report_only",
     accountOverrides: [null, "auto_apply"],
@@ -514,54 +534,52 @@ test("runGithubPollOnce enqueues when at least one account override allows mutat
   assert.equal(store.applyJobs.length, 1);
   assert.equal(store.blockedApplies.length, 0);
   assert.equal(store.prApprovals.length, 1);
-  assert.equal(store.prApprovals[0]!.decision, "auto_approved");
+  assert.equal(store.prApprovals[0]!.decision, "approved");
 });
 
-// regression fix: protection が適用された ops repo では、従来どおり enqueue する。
-// (既存の "upserts PRs and enqueues" テストを補強する gate コントロール用テスト)
-test("runGithubPollOnce enqueues only when branchProtectionApplied is true", async () => {
-  const protectedStore = new FakeGithubPollStore();
-  protectedStore.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: true });
-  const unprotectedStore = new FakeGithubPollStore();
-  unprotectedStore.setOpsRepo({ ...BASE_REPO, branchProtectionApplied: false });
+test("runGithubPollOnce records github_merge when previous approval headSha differs from merged PR headSha", async () => {
+  const store = new FakeGithubPollStore();
+  store.setOpsRepo({ ...BASE_REPO });
+  await seedApprovedPr(store, 7, "old-sha");
+  const boss = new FakeBoss();
+  boss.defaultJobId = "pgboss-direct-current";
 
-  const merged = {
-    notModified: false as const,
-    pullRequests: [
-      {
-        number: 7,
-        title: "m",
-        state: "merged" as const,
-        headSha: "sha-7",
-        baseRef: "main",
-        htmlUrl: "https://example.invalid/7",
-        mergedAt: "2026-05-01T00:00:00.000Z",
-      },
-    ],
+  const summary = await runGithubPollOnce({
+    boss,
+    store,
+    adapter: new FakeGithubAdapter({
+      results: [
+        {
+          notModified: false,
+          pullRequests: [
+            {
+              number: 7,
+              title: "m",
+              state: "merged",
+              headSha: "sha-7",
+              baseRef: "main",
+              htmlUrl: "https://example.invalid/7",
+              mergedAt: "2026-05-01T00:00:00.000Z",
+              mergedBy: "octo-user",
+            },
+          ],
+        },
+      ],
+    }),
+    workspaceId: "ws-1",
+  });
+
+  assert.equal(summary.blockedUnapproved, 0);
+  assert.deepEqual(summary.enqueuedJobIds, ["pgboss-direct-current"]);
+  assert.equal(store.applyJobs.length, 1);
+  assert.equal(store.blockedApplies.length, 0);
+  assert.equal(store.prApprovals.length, 2);
+  assert.equal(store.prApprovals.at(-1)!.decision, "approved");
+  assert.equal(store.prApprovals.at(-1)!.approvedBy, "github:octo-user");
+  const meta = store.prApprovals.at(-1)!.metadata as {
+    decisionSource: string;
+    previousApprovalHeadSha: string;
   };
-
-  const protectedSummary = await runGithubPollOnce({
-    boss: new FakeBoss(),
-    store: protectedStore,
-    adapter: new FakeGithubAdapter({ results: [merged] }),
-    workspaceId: "ws-1",
-  });
-  const unprotectedSummary = await runGithubPollOnce({
-    boss: new FakeBoss(),
-    store: unprotectedStore,
-    adapter: new FakeGithubAdapter({ results: [merged] }),
-    workspaceId: "ws-1",
-  });
-
-  assert.equal(protectedSummary.blockedUnapproved, 0);
-  assert.equal(protectedStore.applyJobs.length, 1);
-  assert.equal(protectedStore.blockedApplies.length, 0);
-  assert.equal(protectedStore.prApprovals.length, 1);
-  assert.equal(protectedStore.prApprovals[0]!.decision, "auto_approved");
-
-  assert.equal(unprotectedSummary.blockedUnapproved, 1);
-  assert.equal(unprotectedStore.applyJobs.length, 0);
-  assert.equal(unprotectedStore.blockedApplies.length, 1);
-  assert.equal(unprotectedStore.prApprovals.length, 1);
-  assert.equal(unprotectedStore.prApprovals[0]!.decision, "auto_blocked");
+  assert.equal(meta.decisionSource, "github_merge");
+  assert.equal(meta.previousApprovalHeadSha, "old-sha");
 });

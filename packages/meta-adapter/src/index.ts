@@ -57,6 +57,15 @@ export {
   type MetaMeProfile,
 } from "./api.js";
 export {
+  buildReadinessMessages,
+  fetchMetaAssetReadiness,
+  formatMetaAssetReadinessSummary,
+  type FetchMetaAssetReadinessOptions,
+  type MetaAssetIdentityCandidate,
+  type MetaAssetReadinessCheck,
+  type MetaAssetReadinessReport,
+} from "./readiness.js";
+export {
   InMemoryMetaTokenStore,
   type MetaOAuthTokenRecord,
   type MetaOAuthTokenStore,

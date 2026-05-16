@@ -1176,7 +1176,8 @@ function mapAuditDecisionToApprovalRecord(
   decision: ImprovementPrAuditDecision
 ): "auto_approved" | "auto_blocked" | null {
   // Schema allowed values: approved | rejected | auto_blocked | auto_approved.
-  // `approval_required` は branch protection 由来の必須レビューに委ねるため、
+  // `approval_required` は AdDroid の Web UI / CLI / Slack 承認、または GitHub merge
+  // に委ねるため、
   // approval_records には行を残さない (UI は不在を "required" として描画する)。
   switch (decision) {
     case "auto_approved":

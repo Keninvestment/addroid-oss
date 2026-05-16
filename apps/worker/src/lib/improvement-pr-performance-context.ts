@@ -665,11 +665,11 @@ function extractCreativeSnippet(value: unknown):
       readSpecString(creative, "pageId") ??
       readSpecString(value, "pageId") ??
       readNestedRawString(value, ["raw", "creative", "object_story_spec", "page_id"]),
-    instagramActorId:
-      readSpecString(creative, "instagramActorId") ??
-      readSpecString(value, "instagramActorId") ??
-      readNestedRawString(value, ["raw", "creative", "instagram_actor_id"]) ??
-      readNestedRawString(value, ["raw", "creative", "object_story_spec", "instagram_actor_id"]),
+    instagramUserId:
+      readSpecString(creative, "instagramUserId") ??
+      readSpecString(value, "instagramUserId") ??
+      readNestedRawString(value, ["raw", "creative", "instagram_user_id"]) ??
+      readNestedRawString(value, ["raw", "creative", "object_story_spec", "instagram_user_id"]),
     storageRef: readSpecString(value, "storageRef"),
     provider: readSpecString(value, "provider"),
     model: readSpecString(value, "model"),

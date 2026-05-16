@@ -12,6 +12,7 @@ export interface PullRequestSummary {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  mergedBy?: string | null;
 }
 
 export interface PullRequestPollResult {
@@ -63,8 +64,6 @@ export interface BootstrapOpsRepoResult {
   bootstrappedAt: string;
   /** template から書き出したファイル数 (audit 用)。 */
   filesCommitted: number;
-  /** branch protection を設定したか。設定不可だった場合は false。 */
-  branchProtectionApplied: boolean;
 }
 
 export interface CreatePullRequestFile {
@@ -146,7 +145,7 @@ export interface GithubAdapter {
   completeOAuth(params: { code: string; state: string }): Promise<OAuthConnection>;
 
   /**
-   * private な ops リポジトリを作成し、ops-template を初期コミットして branch protection を設定する。
+   * private な ops リポジトリを作成し、ops-template を初期コミットする。
    * ハードコードされた owner を使わず、OAuth 接続済みアカウントの権限で作成する。
    */
   bootstrapOpsRepo(input: BootstrapOpsRepoInput): Promise<BootstrapOpsRepoResult>;
@@ -165,7 +164,7 @@ export interface GithubAdapter {
   /**
    * Web UI からの "PR をマージする (Web UI)" 操作で呼ばれる。GitHub merge API
    * (PUT /repos/{owner}/{repo}/pulls/{number}/merge) を呼び、merge commit sha を
-   * 返す。merge 不可 (state=open のままレビュー未完了 / branch protection 拒否 /
+   * 返す。merge 不可 (state=open のままコンフリクト /
    * conflict 等) は `GithubMergeFailedError` を throw する。
    */
   mergePullRequest(input: MergePullRequestInput): Promise<MergePullRequestResult>;

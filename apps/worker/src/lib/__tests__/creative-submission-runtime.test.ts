@@ -18,6 +18,7 @@ import {
   createStandaloneCreativeGeneration,
   normalizeCreativeSubmissionInput,
 } from "../creative-submission-runtime.js";
+import { normalizeCreativePromotionBatchInput } from "../creative-promotion-runtime.js";
 
 test("createCreativeSubmissionProposal writes creative/ad draft through GitOps PR only", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-ops-"));
@@ -122,6 +123,246 @@ test("createCreativeSubmissionProposal can create a new adset under an existing 
   }
 });
 
+test("createCreativeSubmissionProposal infers page and Instagram IDs from existing brand creatives", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-identity-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const brandPath = path.join(rootDir, "ads/accounts/primary/brand.yaml");
+    fs.writeFileSync(
+      brandPath,
+      fs
+        .readFileSync(brandPath, "utf8")
+        .replace(
+          "creatives: []",
+          [
+            "creatives:",
+            "  - id: previous",
+            "    name: Previous",
+            "    mediaType: text",
+            "    pageId: \"281900655012835\"",
+            "    instagramUserId: \"17841465387326763\"",
+          ].join("\n")
+        )
+    );
+    const github = new FakeGithubAdapter();
+    await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "cli-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "inferred",
+        adName: "Inferred Ad",
+        headline: "Inferred",
+        primaryText: "Use existing identity.",
+        campaignId: "cmp_existing",
+        adsetId: "as_existing",
+        mediaType: "text",
+      },
+    });
+
+    const diff = github.created[0]!.files[0]!.diff;
+    assert.match(diff, /id: inferred/);
+    assert.match(diff, /pageId: "281900655012835"/);
+    assert.match(diff, /instagramUserId: "17841465387326763"/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal migrates legacy instagramActorId while creating the PR", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-legacy-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const brandPath = path.join(rootDir, "ads/accounts/primary/brand.yaml");
+    fs.writeFileSync(
+      brandPath,
+      fs
+        .readFileSync(brandPath, "utf8")
+        .replace(
+          "creatives: []",
+          [
+            "creatives:",
+            "  - id: legacy",
+            "    name: Legacy",
+            "    mediaType: text",
+            "    pageId: \"281900655012835\"",
+            "    instagramActorId: \"17841465387326763\"",
+          ].join("\n")
+        )
+    );
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "new-after-legacy",
+        adName: "New After Legacy Ad",
+        headline: "New",
+        primaryText: "Create after legacy migration.",
+        campaignId: "cmp_existing",
+        adsetId: "as_existing",
+        mediaType: "text",
+      },
+    });
+
+    assert.equal(result.planOk, true);
+    const diff = github.created[0]!.files[0]!.diff;
+    assert.doesNotMatch(diff, /instagramActorId/);
+    assert.match(diff, /instagramUserId: "17841465387326763"/);
+    assert.match(diff, /id: new-after-legacy/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal adopts an existing Meta campaign and creates a new adset", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-adopt-campaign-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "new-set-profile",
+        adName: "New Set Profile Ad",
+        headline: "New Set",
+        primaryText: "既存キャンペーンに新規セットで入稿",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        linkUrl: "http://instagram.com/shishasin2022kumamoto",
+        callToAction: "OPEN_LINK",
+        campaignId: "120228334025190756",
+        campaignName: "CP_SIN熊本店 縦長 - 動画 - プロフ誘導2 - CP予算",
+        adsetName: "新規広告セット",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        dailyBudget: 500,
+        countries: ["JP"],
+        mediaType: "text",
+      },
+    });
+
+    assert.equal(result.planOk, true);
+    assert.match(result.planSummary, /creates=3/);
+    const pr = github.created[0]!;
+    assert.match(pr.files[0]!.diff, /id: "120228334025190756"/);
+    assert.match(pr.files[0]!.diff, /importedExisting: true/);
+    assert.match(pr.files[0]!.diff, /externalId: "120228334025190756"/);
+    assert.match(pr.files[0]!.diff, /name: 新規広告セット/);
+    assert.match(pr.files[0]!.diff, /optimizationGoal: LINK_CLICKS/);
+    assert.match(pr.files[0]!.diff, /billingEvent: IMPRESSIONS/);
+    assert.match(pr.files[0]!.diff, /dailyBudget: 500/);
+    assert.match(pr.files[0]!.diff, /creativeRef: new-set-profile/);
+    assert.match(pr.body, /New campaign: `no`/);
+    assert.match(pr.body, /New adset: `yes`/);
+    assert.match(pr.body, /Adopted existing campaign: `yes`/);
+    assert.match(pr.body, /Adopted existing adset: `no`/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal adopts an existing Meta campaign/adset when brand YAML is missing them", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-adopt-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "profile-link",
+        adName: "Profile Link Ad",
+        headline: "Profile Link",
+        primaryText: "プロフィールをチェック",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        linkUrl: "http://instagram.com/shishasin2022kumamoto",
+        callToAction: "OPEN_LINK",
+        campaignId: "120228334025190756",
+        adsetId: "120228334025180756",
+        customEventType: "LEAD",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        mediaType: "text",
+      },
+    });
+
+    assert.equal(result.planOk, true);
+    assert.match(result.planSummary, /creates=2/);
+    const pr = github.created[0]!;
+    assert.match(pr.files[0]!.diff, /id: "120228334025190756"/);
+    assert.match(pr.files[0]!.diff, /importedExisting: true/);
+    assert.match(pr.files[0]!.diff, /externalId: "120228334025180756"/);
+    assert.match(pr.files[0]!.diff, /creativeRef: profile-link/);
+    assert.doesNotMatch(pr.files[0]!.diff, /customEventType:/);
+    assert.doesNotMatch(pr.files[0]!.diff, /optimizationGoal:/);
+    assert.doesNotMatch(pr.files[0]!.diff, /billingEvent:/);
+    assert.match(pr.body, /Adopted existing campaign: `yes`/);
+    assert.match(pr.body, /Adopted existing adset: `yes`/);
+    assert.match(pr.body, /does not create or update those parent objects/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("normalizeCreativePromotionBatchInput drops null optional values", () => {
+  const input = normalizeCreativePromotionBatchInput({
+    creativeId: "4356ead2-8f2e-4cb9-a0f2-cfb0055c8666",
+    campaignId: "120228334025190756",
+    adsetId: "120228334025180756",
+    customEventType: null,
+    callToAction: null,
+    objective: null,
+    urgency: null,
+  });
+
+  assert.equal(input.customEventType, undefined);
+  assert.equal(input.callToAction, undefined);
+  assert.equal(input.objective, undefined);
+  assert.equal(input.urgency, undefined);
+});
+
 test("normalizeCreativeSubmissionInput accepts account-currency budget fields", () => {
   const input = normalizeCreativeSubmissionInput({
     creativeName: "jpy-sale",
@@ -134,6 +375,54 @@ test("normalizeCreativeSubmissionInput accepts account-currency budget fields", 
   });
 
   assert.equal(input.dailyBudget, 500);
+});
+
+test("createCreativeSubmissionProposal surfaces dry-run failure details", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-dryrun-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    await assert.rejects(
+      createCreativeSubmissionProposal({
+        prisma: fakePrisma() as never,
+        githubAdapter: github as unknown as GithubAdapter,
+        workspaceId: "ws_1",
+        actor: "test",
+        source: "web-chat",
+        env: {
+          ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+          ADDROID_HOME: homeDir,
+        },
+        input: {
+          accountKey: "primary",
+          creativeName: "bad-budget",
+          adName: "Bad Budget Ad",
+          headline: "Bad Budget",
+          primaryText: "dry-run details",
+          campaignName: "Bad Budget Campaign",
+          adsetName: "Bad Budget Adset",
+          objective: "OUTCOME_TRAFFIC",
+          optimizationGoal: "LINK_CLICKS",
+          billingEvent: "IMPRESSIONS",
+          dailyBudget: 0,
+          mediaType: "text",
+        },
+      }),
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        assert.match(message, /dry-run で問題が見つかったため PR は作成しません/);
+        assert.match(message, /この dry-run は Meta CLI ではなく/);
+        assert.match(message, /原因:/);
+        assert.match(message, /initial dailyBudget must be > 0/);
+        return true;
+      }
+    );
+    assert.equal(github.created.length, 0);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
 });
 
 test("normalizeCreativeSubmissionInput preserves Instagram profile Meta values", () => {

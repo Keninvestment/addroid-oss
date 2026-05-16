@@ -777,7 +777,6 @@ async function seedPrFixture(prisma) {
       owner: FIXTURE_REPO_OWNER,
       name: FIXTURE_REPO_NAME,
       defaultBranch: "main",
-      branchProtectionApplied: false,
     },
   });
   await prisma.workspace.update({

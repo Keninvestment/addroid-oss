@@ -146,6 +146,7 @@ export default async function DashboardPage() {
       <div className="page-body">
         <div className="col-span-12">
           <DashboardChatPanel
+            surface="dashboard"
             emptyText="「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「参考画像を添付してクリエイティブを生成」などを入力できます。"
             examples={[
               "日次レポートを取得して",

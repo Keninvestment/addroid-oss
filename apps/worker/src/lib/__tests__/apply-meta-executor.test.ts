@@ -12,6 +12,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 
@@ -98,6 +101,23 @@ function makeSpawn(scripts: ScriptedRun[], log: SpawnLog[]) {
 // ---------------------------------------------------------------------
 
 const TOKEN = "EAA-test-token-1234567890ABCDEFGHIJ";
+const META_ADAPTER: MetaAdapter = {
+  beginOAuth: async (): Promise<MetaBeginOAuthResult> => ({ authorizationUrl: "", state: "" }),
+  completeOAuth: async (): Promise<MetaOAuthConnection> => {
+    throw new Error("not used");
+  },
+  refreshLongLivedToken: async (): Promise<MetaRefreshResult> => {
+    throw new Error("not used");
+  },
+  loadAccessTokenPlaintext: async (): Promise<MetaAccessTokenLease> => ({
+    accessToken: TOKEN,
+    scopes: [],
+    expiresAt: null,
+    accountIdentifier: "test",
+  }),
+  fetchBusinesses: async (): Promise<MetaBusiness[]> => [],
+  fetchAdAccounts: async (): Promise<MetaAdAccount[]> => [],
+};
 
 function ctx(
   overrides: Partial<ApplyJobContext> = {}
@@ -189,7 +209,7 @@ test("CliApplyExecutor.executeAction: success uses MetaCliRunner.run and toExecu
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -255,6 +275,7 @@ test("CliApplyExecutor.executeAction: converts budgets using the ad account curr
   const runner = makeRunner([{ stdout: "ok\n", stderr: "", exitCode: 0 }], log);
   const executor = new CliApplyExecutor({
     runner,
+    metaAdapter: META_ADAPTER,
     resolveAdAccountCurrency: async () => "JPY",
   });
   const result = await executor.executeAction({
@@ -285,7 +306,7 @@ test("CliApplyExecutor.executeAction: create_campaign success extracts externalI
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -307,7 +328,7 @@ test("CliApplyExecutor.executeAction: create_adset success extracts numeric id f
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: {
       kind: "create_adset",
@@ -337,7 +358,7 @@ test("CliApplyExecutor.executeAction: create_* success without parseable id leav
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -364,7 +385,7 @@ test("CliApplyExecutor.executeAction: auth_error maps status and surfaces reauth
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -402,7 +423,7 @@ test("CliApplyExecutor.executeAction: api_error maps to api_error status with me
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -438,7 +459,7 @@ test("CliApplyExecutor.executeAction: unknown_error attaches meta.cli_unknown_er
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -467,7 +488,7 @@ test("CliApplyExecutor.executeAction: rate_limit_error attaches exponential back
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -485,6 +506,101 @@ test("CliApplyExecutor.executeAction: rate_limit_error attaches exponential back
   assert.equal(result.retry!.delayMs, 10_000);
 });
 
+test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_id and rewrites following ad creativeRef", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "addroid-creative-test-"));
+  const imagePath = path.join(tmp, "creative.png");
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+  try {
+    await fs.writeFile(imagePath, Buffer.from("not-a-real-png"));
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      calls.push({ url, method, body: init?.body });
+      if (url.includes("/instagram_accounts")) {
+        return Response.json({ data: [{ id: "17841465387326763", username: "sin" }] });
+      }
+      if (url.includes("/281900655012835?")) {
+        return Response.json(
+          { error: { code: 200, message: "page role not readable in this token" } },
+          { status: 403 }
+        );
+      }
+      if (url.includes("/adsets?")) {
+        return Response.json({
+          data: [{ id: "as-1", promoted_object: { page_id: "281900655012835" } }],
+        });
+      }
+      if (url.includes("/adimages")) {
+        return Response.json({ images: { "creative.png": { hash: "img-hash-1" } } });
+      }
+      if (url.includes("/adcreatives")) {
+        const params = new URLSearchParams(String(init?.body ?? ""));
+        const spec = JSON.parse(params.get("object_story_spec") ?? "{}") as Record<string, unknown>;
+        assert.equal(spec.instagram_user_id, "17841465387326763");
+        assert.equal(Object.prototype.hasOwnProperty.call(spec, "instagram_actor_id"), false);
+        return Response.json({ id: "999000111222333" });
+      }
+      return Response.json({ error: { code: 100, message: "unexpected" } }, { status: 400 });
+    }) as typeof fetch;
+
+    const log: SpawnLog[] = [];
+    const runner = makeRunner([{ stdout: '{"id":"1200000000001"}\n', stderr: "", exitCode: 0 }], log);
+    const executor = new CliApplyExecutor({
+      runner,
+      metaAdapter: META_ADAPTER,
+      resolveAdAccountId: async () => "act_786887980003986",
+    });
+    const creative = await executor.executeAction({
+      action: {
+        kind: "create_creative",
+        account: "act_786887980003986",
+        creativeId: "cr-1",
+        name: "Creative 1",
+        mediaType: "image",
+        pageId: "281900655012835",
+        linkUrl: "https://example.com",
+        primaryText: "body",
+        headline: "headline",
+        callToAction: "LEARN_MORE",
+        instagramUserId: "17841465387326763",
+        storageKey: imagePath,
+      },
+      context: ctx(),
+      attempt: 0,
+    });
+    assert.equal(creative.status, "success");
+    assert.equal(creative.externalId, "999000111222333");
+    assert.equal(log.length, 0, "create_creative should not spawn the legacy CLI");
+
+    const ad = await executor.executeAction({
+      action: {
+        kind: "create_ad",
+        account: "act_786887980003986",
+        campaignId: "cmp-1",
+        adsetId: "as-1",
+        adId: "ad-1",
+        name: "Ad 1",
+        creativeRef: "cr-1",
+        initialState: "paused",
+      },
+      context: ctx(),
+      attempt: 0,
+    });
+    assert.equal(ad.status, "success");
+    assert.equal(log.length, 1);
+    const creativeFlagIndex = log[0]!.args.indexOf("--creative-id");
+    assert.deepEqual(log[0]!.args.slice(creativeFlagIndex, creativeFlagIndex + 2), [
+      "--creative-id",
+      "999000111222333",
+    ]);
+    assert.ok(calls.some((call) => call.url.includes("/adcreatives")));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------
 // CliApplyExecutor — unsupported PlanAction kind is fail-closed (skipped)
 // ---------------------------------------------------------------------
@@ -492,7 +608,7 @@ test("CliApplyExecutor.executeAction: rate_limit_error attaches exponential back
 test("CliApplyExecutor.executeAction: unsupported PlanAction kind is skipped without spawning CLI", async () => {
   const log: SpawnLog[] = [];
   const runner = makeRunner([], log); // no scripted runs — must not be invoked
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
 
   const deletePseudoAction = {
     kind: "delete_campaign",
@@ -530,7 +646,7 @@ test("CliApplyExecutor.executeAction: tokens echoed by CLI are redacted in logPa
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
@@ -1083,7 +1199,7 @@ test("CliApplyExecutor.executeAction: success propagates context.approvalRecordI
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx({ approvalRecordId: "appr-xyz-001" }),
@@ -1116,7 +1232,7 @@ test("CliApplyExecutor.executeAction: missing context.approvalRecordId omits the
     ],
     log
   );
-  const executor = new CliApplyExecutor({ runner });
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
   const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(), // approvalRecordId 未設定

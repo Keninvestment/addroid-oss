@@ -13,7 +13,11 @@
 
 import { enqueueApplyJob, type ApplyJobBoss } from "./apply.js";
 import { resolveExecutionMode } from "./execution-mode.js";
-import type { GithubPollStore, QueueGithubAdapter } from "./store.js";
+import type {
+  GithubPollStore,
+  PrApprovalEvidence,
+  QueueGithubAdapter,
+} from "./store.js";
 
 export interface RunGithubPollOptions {
   boss: ApplyJobBoss;
@@ -34,10 +38,7 @@ export interface GithubPollSummary {
   prCount?: number;
   newlyMerged?: number;
   enqueuedJobIds?: string[];
-  /**
-   * merged PR を検知したが branch protection 不在のため execute_apply enqueue を
-   * 拒否した件数 (regression fix)。`newlyMerged - blockedUnapproved = enqueue 件数`。
-   */
+  /** merged PR を検知したが AdDroid 承認境界を満たさず enqueue を拒否した件数。 */
   blockedUnapproved?: number;
   detail?: string;
 }
@@ -117,15 +118,10 @@ export async function runGithubPollOnce(
     });
     if (upsert.transitionedToMerged) {
       newlyMerged++;
-      // regression fix: 上流ワークフロー (improvement_pr の policy / audit、
-      // または UI/CLI からの拒否) が当該 PR に対して既に `auto_blocked` /
-      // `rejected` の approval_records を残している場合、merge 検出時点で
-      // 新規 `auto_approved` を書き込むと `loadApplyApprovalSnapshot` の
-      // `latestApprovalDecision` が反転し execute_apply が承認境界を迂回する。
-      // 上流決定を merge を跨いで保存するため、ここで fail-closed する。
-      const priorDecision = await opts.store.findLatestPrApprovalDecision({
+      const approval = await opts.store.findLatestPrApproval({
         pullRequestId: upsert.id,
       });
+      const priorDecision = approval?.decision ?? null;
       if (
         priorDecision === "auto_blocked" ||
         priorDecision === "rejected"
@@ -140,14 +136,12 @@ export async function runGithubPollOnce(
           reason: "prior_blocked_approval",
           detail: `当該 PR には既に approval_records.decision="${priorDecision}" が存在するため、merge 検出時点で execute_apply を起動しません (上流の承認決定を保存)。`,
         });
-        // 新規 `auto_approved` は書き込まない: latestApprovalDecision が
-        // 反転して execute_apply が承認境界を迂回するため。
         continue;
       }
       // regression fix: workspace + 全 active ad_account が `report_only` に
       // 解決される場合、Meta mutation 経路自体が契約上禁止されている。merge
-      // 検出時点で execute_apply を enqueue させず、`unprotected_branch` /
-      // `prior_blocked_approval` と同じ三段監査 (apply_blocked + execution_log
+      // 検出時点で execute_apply を enqueue させず、他の未承認ブロックと同じ
+      // 三段監査 (apply_blocked + execution_log
       // + approval_records=auto_blocked) を残す。1 件でも mutate 可能な
       // override があるときは executor 側 per-account ガードに任せる。
       if (isWorkspaceReportOnlyHardLock) {
@@ -180,36 +174,32 @@ export async function runGithubPollOnce(
         });
         continue;
       }
-      // regression fix: branch protection (= approval-enforcement 境界) が ops repo
-      // に適用されていない場合、PR が "merged" でも人間レビューを経た保証がない。
-      // the current implementation 制約「All Meta mutation must originate from approved GitOps state」
-      // を満たすため、execute_apply の enqueue を拒否し audit_logs に残す。
-      if (!repo.branchProtectionApplied) {
+      const approvalToUse = await ensureApprovalForMergedPr({
+        store: opts.store,
+        workspaceId: opts.workspaceId,
+        pullRequestId: upsert.id,
+        prNumber: pr.number,
+        headSha: pr.headSha,
+        htmlUrl: pr.htmlUrl,
+        mergedBy: pr.mergedBy ?? null,
+        approval,
+      });
+      if (!approvalToUse.ok) {
         blockedUnapproved++;
-        await opts.store.recordApplyBlocked({
-          workspaceId: opts.workspaceId,
-          pullRequestId: upsert.id,
-          prNumber: pr.number,
-          headSha: pr.headSha,
-          htmlUrl: pr.htmlUrl,
-          reason: "unprotected_branch",
-          detail:
-            "ops repo の branch protection が未適用のため、approval enforcement なしで merge された PR から execute_apply を起動しません。",
-        });
-        // approval_records にも 1 行残す (audit_logs / execution_logs と三段で
-        // PR の承認境界を追跡可能にする — this implementation)。
         await opts.store.recordPrApproval({
           workspaceId: opts.workspaceId,
           pullRequestId: upsert.id,
           approvedBy: "addroid",
           decision: "auto_blocked",
-          comment:
-            "ops repo の branch protection 未適用のため execute_apply を拒否しました。",
+          comment: "AdDroid の承認境界を確認できないため execute_apply を拒否しました。",
           metadata: {
             prNumber: pr.number,
             headSha: pr.headSha,
             htmlUrl: pr.htmlUrl,
-            reason: "unprotected_branch",
+            reason: approvalToUse.reason,
+            approvalRecordId: approval?.id ?? null,
+            approvalHeadSha: approval?.headSha ?? null,
+            approvalDecisionSource: approval?.decisionSource ?? null,
           },
         });
         continue;
@@ -232,36 +222,6 @@ export async function runGithubPollOnce(
         jobId: enqueued.jobId,
         applyJobId: enqueued.applyJobId,
       });
-      // approval_records:
-      //   - 既に `approved` (= Web UI の web_merge / 将来的な CLI の cli_merge 由来)
-      //     が記録されている PR には、新しい `auto_approved` を被せない。
-      //     `latestApprovalDecision` を `addroid` 由来の auto_approved に上書きすると
-      //     web_merge attribution が失われ、「audit が無いまま GitHub だけ merge され
-      //     後段の github_poll が auto_approve してしまう」失敗モードを再現できて
-      //     しまう (regression fix)。上流の approval 行をそのまま latest に保つ。
-      //   - prior decision が存在しない場合 (= 純粋な GitHub merge 経由) は従来どおり
-      //     branch protection を「approval enforcement を満たした」自動承認として
-      //     記録する。audit_logs (apply.enqueued) / execution_logs (github_poll) と
-      //     三段で残す。
-      if (priorDecision === "approved") {
-        // 上流 approval (web_merge 等) を保存する。新しい auto_approved は書かない。
-      } else {
-        await opts.store.recordPrApproval({
-          workspaceId: opts.workspaceId,
-          pullRequestId: upsert.id,
-          approvedBy: "addroid",
-          decision: "auto_approved",
-          comment:
-            "branch protection を経た merged PR を検知し、execute_apply を enqueue しました。",
-          metadata: {
-            prNumber: pr.number,
-            headSha: pr.headSha,
-            htmlUrl: pr.htmlUrl,
-            jobId: enqueued.jobId,
-            applyJobId: enqueued.applyJobId,
-          },
-        });
-      }
     }
   }
 
@@ -273,6 +233,75 @@ export async function runGithubPollOnce(
     enqueuedJobIds,
     blockedUnapproved,
   };
+}
+
+type EnsureApprovalResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "approval_record_failed";
+    };
+
+async function ensureApprovalForMergedPr(input: {
+  store: GithubPollStore;
+  workspaceId: string;
+  pullRequestId: string;
+  prNumber: number;
+  headSha: string;
+  htmlUrl: string;
+  mergedBy: string | null;
+  approval: PrApprovalEvidence | null;
+}): Promise<EnsureApprovalResult> {
+  if (
+    input.approval?.decision === "approved" &&
+    input.approval.headSha === input.headSha &&
+    isAcceptedApprovalSource(input.approval.decisionSource)
+  ) {
+    return { ok: true };
+  }
+  const actor = input.mergedBy ? `github:${input.mergedBy}` : "github:unknown";
+  try {
+    await input.store.recordPrApproval({
+      workspaceId: input.workspaceId,
+      pullRequestId: input.pullRequestId,
+      approvedBy: actor,
+      decision: "approved",
+      comment: "GitHub で merged になった PR を承認として記録しました。",
+      metadata: {
+        decisionSource: "github_merge",
+        prNumber: input.prNumber,
+        headSha: input.headSha,
+        htmlUrl: input.htmlUrl,
+        mergedBy: input.mergedBy,
+        previousApprovalRecordId: input.approval?.id ?? null,
+        previousApprovalDecision: input.approval?.decision ?? null,
+        previousApprovalHeadSha: input.approval?.headSha ?? null,
+        previousApprovalDecisionSource: input.approval?.decisionSource ?? null,
+      },
+    });
+    return { ok: true };
+  } catch {
+    await input.store.recordApplyBlocked({
+      workspaceId: input.workspaceId,
+      pullRequestId: input.pullRequestId,
+      prNumber: input.prNumber,
+      headSha: input.headSha,
+      htmlUrl: input.htmlUrl,
+      reason: "approval_record_failed",
+      detail:
+        "GitHub merge を承認として記録できなかったため、execute_apply を起動しません。",
+    });
+    return { ok: false, reason: "approval_record_failed" };
+  }
+}
+
+function isAcceptedApprovalSource(source: string | null): boolean {
+  return (
+    source === "web_merge" ||
+    source === "cli_merge" ||
+    source === "slack_merge" ||
+    source === "github_merge"
+  );
 }
 
 /**

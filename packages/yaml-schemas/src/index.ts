@@ -332,6 +332,8 @@ export const AdsetSchema = z
       .regex(ID_REGEX, "adset id は小文字英数字 / アンダースコア / ハイフン (先頭は英数字)"),
     name: z.string().min(1),
     initialState: z.enum(["paused", "active"]).default("paused"),
+    externalId: z.string().min(1).optional(),
+    importedExisting: z.boolean().optional(),
     /** adset 単位で予算を切り直す場合のみ。未指定なら親 campaign 予算で配信。 */
     budget: BudgetSchema.optional(),
     optimizationGoal: AdsetOptimizationGoalSchema.optional(),
@@ -382,7 +384,7 @@ export const CreativeSchema = z
     body: z.string().min(1).optional(),
     linkUrl: z.string().url().optional(),
     description: z.string().min(1).optional(),
-    instagramActorId: z.string().min(1).optional(),
+    instagramUserId: z.string().min(1).optional(),
     images: z.array(z.string().min(1)).max(10).optional(),
     videos: z.array(z.string().min(1)).max(10).optional(),
     titles: z.array(z.string().min(1)).max(5).optional(),
@@ -473,6 +475,8 @@ export const CampaignSchema = z
      * `addroid activate` 相当の別経路で active 化させる。
      */
     initialState: z.enum(["paused", "active"]).default("paused"),
+    externalId: z.string().min(1).optional(),
+    importedExisting: z.boolean().optional(),
     budget: BudgetSchema,
     adsetBudgetSharing: z.boolean().optional(),
     adsets: z.array(AdsetSchema).default([]),
@@ -604,6 +608,7 @@ export function assertInitialCampaignsArePaused(
   for (let i = 0; i < yaml.campaigns.length; i += 1) {
     const c = yaml.campaigns[i]!;
     if (previousIds.has(c.id)) continue;
+    if (c.importedExisting === true) continue;
     if (c.initialState !== "paused") {
       throw new AdsValidationError(
         `campaigns[${i}] (${c.id}) must have initialState: "paused" on first apply`,
@@ -1198,6 +1203,7 @@ export function loadAndValidateOpsRepo(
       // 既存キャンペーンは previous budget と比較、新規キャンペーンは previous=null。
       for (let i = 0; i < brand.campaigns.length; i += 1) {
         const c = brand.campaigns[i]!;
+        if (c.importedExisting === true) continue;
         const prev = previousCampaignsById.get(c.id) ?? null;
         try {
           assertBudgetChangeIsSafe(prev ? prev.budget : null, c.budget);

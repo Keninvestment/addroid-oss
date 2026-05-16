@@ -39,7 +39,7 @@ interface MetaCreativeSpec {
   callToAction?: string;
   linkUrl?: string;
   pageId?: string;
-  instagramActorId?: string;
+  instagramUserId?: string;
 }
 
 interface GraphPage {
@@ -362,7 +362,7 @@ async function fetchGraphRows(
             "campaign_id",
             "adset_id",
             "updated_time",
-            "creative{id,name,title,body,call_to_action_type,object_url,template_url,object_story_spec,thumbnail_url,image_url,video_id,effective_object_story_id,instagram_actor_id,instagram_permalink_url}",
+            "creative{id,name,title,body,call_to_action_type,object_url,template_url,object_story_spec,thumbnail_url,image_url,video_id,effective_object_story_id,instagram_user_id,instagram_permalink_url}",
           ].join(",");
   let url = new URL(
     `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${accountId}/${edge}`
@@ -528,9 +528,9 @@ function normalizeMetaCreative(rawAd: Record<string, unknown>): MetaCreativeSpec
     callToAction: callToAction ?? undefined,
     linkUrl: linkUrl ?? undefined,
     pageId: readNestedString(objectStorySpec, ["page_id"]) ?? undefined,
-    instagramActorId:
-      readString(rawCreative.instagram_actor_id) ??
-      readNestedString(objectStorySpec, ["instagram_actor_id"]) ??
+    instagramUserId:
+      readString(rawCreative.instagram_user_id) ??
+      readNestedString(objectStorySpec, ["instagram_user_id"]) ??
       undefined,
   };
   return Object.values(out).some((value) => value !== undefined) ? out : null;

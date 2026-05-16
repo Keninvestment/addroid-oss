@@ -486,6 +486,7 @@ export default async function CreativeDetailPage({
           ) : (
             <div className="creative-promotion-chat">
               <DashboardChatPanel
+                surface={`creative-detail:${row.id}`}
                 title="入稿PRチャット"
                 description="選択中のCreativeを使った入稿PR作成を会話で進めます。足りない配信先情報はエージェントが確認します。"
                 emptyText="既存広告セットに入れる、新しい広告セットでテストする、新規キャンペーンから作る、などを入力してください。"

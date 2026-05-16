@@ -52,11 +52,14 @@ import {
   buildAppAccessToken,
   debugToken,
   fetchAdAccounts,
+  fetchMetaAssetReadiness,
   fetchMeProfile,
+  formatMetaAssetReadinessSummary,
   MetaAdapterNotImplementedError,
   MetaOAuthStateMismatchError,
   MetaOAuthExchangeError,
   type MetaAdAccount,
+  type MetaAssetReadinessReport,
   type MetaOAuthConnection,
 } from "@addroid/meta-adapter";
 import {
@@ -1237,11 +1240,6 @@ function lazyGithubApiClient(accessToken: string) {
     ) {
       return (await resolve()).commitTemplateFiles(input);
     },
-    async setBranchProtection(
-      input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["setBranchProtection"]>[0]
-    ) {
-      return (await resolve()).setBranchProtection(input);
-    },
     async listPullRequests(
       input: Parameters<Awaited<ReturnType<typeof createDefaultGithubApiClient>>["listPullRequests"]>[0]
     ) {
@@ -1285,7 +1283,6 @@ async function bootstrapOpsRepoFromCli(
       name: string;
       defaultBranch: string;
       filesCommitted: number;
-      branchProtectionApplied: boolean;
       localDir: string | null;
     }
   | { status: "skipped"; reason: string; localDir?: string | null }
@@ -1339,7 +1336,6 @@ async function bootstrapOpsRepoFromCli(
     defaultBranch: result.defaultBranch,
     bootstrappedAt: new Date(result.bootstrappedAt),
     filesCommitted: result.filesCommitted,
-    branchProtectionApplied: result.branchProtectionApplied,
   });
   const checkout = await ensureOpsRepoLocalCheckout({
     prisma: prisma as never,
@@ -1351,7 +1347,6 @@ async function bootstrapOpsRepoFromCli(
     name: result.name,
     defaultBranch: result.defaultBranch,
     filesCommitted: result.filesCommitted,
-    branchProtectionApplied: result.branchProtectionApplied,
     localDir: checkout?.rootDir ?? null,
   };
 }
@@ -1502,6 +1497,11 @@ async function runAuthMetaToken(
       workspace.id,
       adAccounts as readonly MetaAdAccount[]
     );
+    const assetReadiness = await buildMetaAssetReadinessSummaries({
+      accessToken,
+      adAccounts,
+      fetchImpl,
+    });
     const defaultAccount =
       parsed.selectDefault && synced.accounts.length > 0
         ? await chooseAndSetMetaDefault(prisma, workspace.id, synced.accounts)
@@ -1523,6 +1523,7 @@ async function runAuthMetaToken(
           adAccountsRegistered: synced.registered,
           adAccountsUpdated: synced.updated,
           missingRecommendedScopes: missingScopes,
+          assetReadiness: summarizeAssetReadinessForAudit(assetReadiness),
         },
       },
     });
@@ -1541,6 +1542,7 @@ async function runAuthMetaToken(
             defaultAccount,
             scopes,
             missingRecommendedScopes: missingScopes,
+            assetReadiness,
             expiresAt: expiresAt?.toISOString() ?? null,
           },
           null,
@@ -1564,6 +1566,7 @@ async function runAuthMetaToken(
           `  warning       : 推奨権限が不足している可能性があります (${missingScopes.join(", ")})\n`
         );
       }
+      writeAssetReadinessBlock(assetReadiness);
       process.stdout.write("  token         : encrypted (oauth_tokens.accessTokenCiphertext)\n");
     }
     return 0;
@@ -1629,6 +1632,14 @@ async function runAuthMetaOAuth(parsed: ParsedMetaArgs): Promise<number> {
       workspace.id,
       connection.adAccounts as readonly MetaAdAccount[]
     );
+    const lease = await adapterSelection.adapter.loadAccessTokenPlaintext();
+    const assetReadiness = lease
+      ? await buildMetaAssetReadinessSummaries({
+          accessToken: lease.accessToken,
+          adAccounts: connection.adAccounts,
+          fetchImpl: fetch,
+        })
+      : [];
     const defaultAccount =
       parsed.selectDefault && synced.accounts.length > 0
         ? await chooseAndSetMetaDefault(prisma, workspace.id, synced.accounts)
@@ -1646,6 +1657,7 @@ async function runAuthMetaOAuth(parsed: ParsedMetaArgs): Promise<number> {
             registered: synced.registered,
             updated: synced.updated,
             defaultAccount,
+            assetReadiness,
           },
           null,
           2
@@ -1660,6 +1672,7 @@ async function runAuthMetaOAuth(parsed: ParsedMetaArgs): Promise<number> {
       process.stdout.write(
         `  default       : ${defaultAccount?.metaAccountId ?? defaultAccount?.key ?? "unset"}\n`
       );
+      writeAssetReadinessBlock(assetReadiness);
     }
     return 0;
   } catch (err) {
@@ -1832,6 +1845,52 @@ function openUrl(url: string): void {
         : "xdg-open";
   const args = platform === "win32" ? ["/c", "start", "", url] : [url];
   spawnSync(cmd, args, { stdio: "ignore" });
+}
+
+async function buildMetaAssetReadinessSummaries(opts: {
+  accessToken: string;
+  adAccounts: readonly MetaAdAccount[];
+  fetchImpl: typeof fetch;
+}): Promise<MetaAssetReadinessReport[]> {
+  const checks = opts.adAccounts.slice(0, 10).map((account) =>
+    fetchMetaAssetReadiness({
+      accessToken: opts.accessToken,
+      adAccountId: account.metaAccountId,
+      fetchImpl: opts.fetchImpl,
+      limit: 50,
+    })
+  );
+  return await Promise.all(checks);
+}
+
+function writeAssetReadinessBlock(readiness: readonly MetaAssetReadinessReport[]): void {
+  if (readiness.length === 0) return;
+  process.stdout.write("  asset check   :\n");
+  for (const report of readiness) {
+    const identityCount = report.candidates.filter(
+      (candidate) => candidate.pageId || candidate.instagramUserId
+    ).length;
+    process.stdout.write(
+      `    - ${formatMetaAssetReadinessSummary(report)} identities=${identityCount}\n`
+    );
+  }
+  const blocked = readiness.filter((report) => !report.ok);
+  if (blocked.length > 0) {
+    const first = blocked[0]!;
+    process.stdout.write(`  next action   : ${first.messages[0] ?? "Meta のアセット権限を確認してください。"}\n`);
+  }
+}
+
+function summarizeAssetReadinessForAudit(
+  readiness: readonly MetaAssetReadinessReport[]
+): Record<string, unknown>[] {
+  return readiness.map((report) => ({
+    adAccountId: report.adAccountId,
+    ok: report.ok,
+    status: report.status,
+    candidateCount: report.candidates.length,
+    messages: report.messages,
+  }));
 }
 
 async function chooseAndSetMetaDefault(

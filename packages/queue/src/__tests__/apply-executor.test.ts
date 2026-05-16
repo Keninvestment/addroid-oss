@@ -191,9 +191,11 @@ test("runExecuteApply: snapshot.approvalRecordId is propagated into ExecuteActio
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: true,
-    latestApprovalDecision: "auto_approved",
+    pullRequestHeadSha: "sha-approved",
+    latestApprovalDecision: "approved",
     approvalRecordId: "appr-from-snapshot-123",
+    approvalRecordHeadSha: "sha-approved",
+    approvalDecisionSource: "web_merge",
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -227,12 +229,14 @@ test("runExecuteApply: snapshot without approvalRecordId leaves context.approval
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
   // snapshot 自体は revalidation を通過する happy-path 構成だが、approvalRecordId は
-  // null (= 取得側がまだ approvalRecordId を埋めていない後方互換ケース)。
+  // null。
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: true,
-    latestApprovalDecision: "auto_approved",
+    pullRequestHeadSha: "sha-approved",
+    latestApprovalDecision: "approved",
     approvalRecordId: null,
+    approvalRecordHeadSha: "sha-approved",
+    approvalDecisionSource: "web_merge",
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -794,9 +798,8 @@ test("runExecuteApply: missing apply_job context fails fast with no_context reas
 // ---------------------------------------------------------------------
 // regression fix: execute-time GitOps revalidation
 //
-// enqueue 時に branch protection を経由して auto_approved になっていても、
-// 実行段階で「PR が merged ではない / protection が外れた / approval_records が
-// 無い / 最新 approval が rejected/auto_blocked」のいずれかに該当する場合、
+// enqueue 後でも、実行段階で「PR が merged ではない / approval_records が無い /
+// 最新 approval が rejected/auto_blocked / headSha が一致しない」のいずれかに該当する場合、
 // Meta mutation 経路に到達する前に fail-closed して audit に残すこと。
 // ---------------------------------------------------------------------
 
@@ -805,9 +808,11 @@ test("runExecuteApply: stale apply_job whose PR is no longer merged is blocked b
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "closed",
-    branchProtectionApplied: true,
-    latestApprovalDecision: "auto_approved",
+    pullRequestHeadSha: "sha-approved",
+    latestApprovalDecision: "approved",
     approvalRecordId: "appr-stale-pr",
+    approvalRecordHeadSha: "sha-approved",
+    approvalDecisionSource: "web_merge",
     mergedAt: null,
   });
 
@@ -847,14 +852,16 @@ test("runExecuteApply: stale apply_job whose PR is no longer merged is blocked b
   );
 });
 
-test("runExecuteApply: ops repo without branch protection at execution time blocks the apply", async () => {
+test("runExecuteApply: approval headSha mismatch at execution time blocks the apply", async () => {
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: false,
-    latestApprovalDecision: "auto_approved",
-    approvalRecordId: "appr-no-protection",
+    pullRequestHeadSha: "sha-current",
+    latestApprovalDecision: "approved",
+    approvalRecordId: "appr-mismatch",
+    approvalRecordHeadSha: "sha-old",
+    approvalDecisionSource: "web_merge",
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -876,7 +883,7 @@ test("runExecuteApply: ops repo without branch protection at execution time bloc
   assert.equal(executor.calls.length, 0);
   assert.equal(store.runningCalls.length, 0);
   const auditMeta = store.audits[0]!.metadata as { reason: string };
-  assert.equal(auditMeta.reason, "branch_protection_revoked");
+  assert.equal(auditMeta.reason, "approval_head_sha_mismatch");
   assert.equal(store.audits[0]!.action, "apply.blocked_unapproved");
 });
 
@@ -885,9 +892,11 @@ test("runExecuteApply: manually inserted apply_job without an approval_record fa
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: true,
+    pullRequestHeadSha: "sha-approved",
     latestApprovalDecision: null,
     approvalRecordId: null,
+    approvalRecordHeadSha: null,
+    approvalDecisionSource: null,
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -916,9 +925,11 @@ test("runExecuteApply: latest approval_records.decision='auto_blocked' blocks ex
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: true,
+    pullRequestHeadSha: "sha-approved",
     latestApprovalDecision: "auto_blocked",
     approvalRecordId: "appr-blocked",
+    approvalRecordHeadSha: "sha-approved",
+    approvalDecisionSource: "web_merge",
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -1431,14 +1442,16 @@ test("runExecuteApply: hierarchy upsert failure logs warn execution_log but does
   assert.match(payload.errorMessage, /simulated DB outage/);
 });
 
-test("runExecuteApply: revalidation passes when PR is merged + protected + auto_approved (happy path stays succeeded)", async () => {
+test("runExecuteApply: revalidation passes when PR is merged with matching accepted approval", async () => {
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
   store.setApprovalSnapshot(APPLY_JOB_ID, {
     pullRequestState: "merged",
-    branchProtectionApplied: true,
-    latestApprovalDecision: "auto_approved",
+    pullRequestHeadSha: "sha-approved",
+    latestApprovalDecision: "approved",
     approvalRecordId: "appr-happy",
+    approvalRecordHeadSha: "sha-approved",
+    approvalDecisionSource: "web_merge",
     mergedAt: new Date("2026-05-01T00:00:00Z"),
   });
 
@@ -1471,6 +1484,36 @@ test("runExecuteApply: revalidation passes when PR is merged + protected + auto_
     store.audits.filter((a) => a.action === "apply.blocked_unapproved").length,
     0
   );
+});
+
+test("runExecuteApply: revalidation accepts github_merge approval source", async () => {
+  const store = new FakeApplyJobStore();
+  store.setContext(APPLY_JOB_ID, ctx());
+  store.setApprovalSnapshot(APPLY_JOB_ID, {
+    pullRequestState: "merged",
+    pullRequestHeadSha: "sha-github",
+    latestApprovalDecision: "approved",
+    approvalRecordId: "appr-github",
+    approvalRecordHeadSha: "sha-github",
+    approvalDecisionSource: "github_merge",
+    mergedAt: new Date("2026-05-01T00:00:00Z"),
+  });
+  const loader = new FakeAdsLoader(
+    loadResult([{ accountKey: "primary", next: brand("paused"), previous: null }])
+  );
+  const executor = new FakeMetaActionExecutor();
+
+  const summary = await runExecuteApply({
+    applyJobId: APPLY_JOB_ID,
+    workspaceId: WORKSPACE_ID,
+    store,
+    loader,
+    executor,
+  });
+
+  assert.equal(summary.state, "succeeded");
+  assert.equal(executor.calls.length, 1);
+  assert.equal(executor.calls[0]!.context.approvalRecordId, "appr-github");
 });
 
 // ---------------------------------------------------------------------

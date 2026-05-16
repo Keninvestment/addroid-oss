@@ -6,6 +6,7 @@
 
 import { NextResponse } from "next/server";
 import {
+  fetchMetaAssetReadiness,
   MetaAdapterUnauthenticatedError,
 } from "@addroid/meta-adapter";
 import { prisma } from "../../../../../lib/prisma";
@@ -104,6 +105,17 @@ export async function POST() {
         registered += 1;
       }
     }
+    const assetReadiness = lease
+      ? await Promise.all(
+          adAccounts.slice(0, 10).map((account) =>
+            fetchMetaAssetReadiness({
+              accessToken: lease.accessToken,
+              adAccountId: account.metaAccountId,
+              limit: 50,
+            })
+          )
+        )
+      : [];
     return NextResponse.json({
       ok: true,
       businesses: businesses.length,
@@ -112,6 +124,7 @@ export async function POST() {
       updated,
       businessError,
       accountRows,
+      assetReadiness,
     });
   } catch (err) {
     const status = err instanceof MetaAdapterUnauthenticatedError ? 401 : 500;

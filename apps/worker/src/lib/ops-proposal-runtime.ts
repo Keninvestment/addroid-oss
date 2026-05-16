@@ -109,7 +109,7 @@ export async function createOpsChangeProposal(opts: {
     accountKey,
   });
   if (!plan.ok) {
-    throw new Error(`dry-run で問題が見つかったため PR は作成しません: ${summarizePlan(plan)}`);
+    throw new Error(formatDryRunFailure(plan));
   }
 
   const title = proposalTitle(opts.input.intent, account?.displayName ?? accountKey, changes);
@@ -328,7 +328,7 @@ function validateWithTempCheckout(input: {
     fs.writeFileSync(dest, extractAddedContentFromDiff(input.file.diff), "utf8");
     return runPlanForRoot({
       rootDir: tmp,
-      baseDir: input.baseDir,
+      baseDir: input.baseDir ?? input.rootDir,
       accountFilter: input.accountKey,
     });
   } finally {
@@ -339,6 +339,39 @@ function validateWithTempCheckout(input: {
 function summarizePlan(plan: ReturnType<typeof runPlanForRoot>): string {
   const counts = plan.totalCounts;
   return `creates=${counts.creates} updates=${counts.updates} deletes=${counts.deletes} errors=${counts.errors + plan.validationErrors.length} warnings=${counts.warnings + plan.validationWarnings.length}`;
+}
+
+function formatDryRunFailure(plan: ReturnType<typeof runPlanForRoot>): string {
+  const details = dryRunFailureDetails(plan);
+  return [
+    `dry-run で問題が見つかったため PR は作成しません: ${summarizePlan(plan)}`,
+    "この dry-run は Meta CLI ではなく、ops repo の一時コピーにPR差分を当てて YAML 検証と実行計画生成だけを行います。Meta には接続・反映していません。",
+    ...(details.length > 0 ? ["原因:", ...details.map((line) => `- ${line}`)] : []),
+  ].join("\n");
+}
+
+function dryRunFailureDetails(plan: ReturnType<typeof runPlanForRoot>): string[] {
+  const lines: string[] = [];
+  for (const err of plan.validationErrors.slice(0, 8)) {
+    lines.push(`${err.file}${err.pointer ? ` ${err.pointer}` : ""}: ${err.message}`);
+  }
+  for (const account of plan.perAccount) {
+    for (const finding of account.findings.filter((f) => f.level === "error").slice(0, 8)) {
+      lines.push(
+        `${account.account}${finding.pointer ? ` ${finding.pointer}` : ""}: ${finding.message}`
+      );
+    }
+  }
+  const total =
+    plan.validationErrors.length +
+    plan.perAccount.reduce(
+      (sum, account) => sum + account.findings.filter((f) => f.level === "error").length,
+      0
+    );
+  if (total > lines.length) {
+    lines.push(`ほか ${total - lines.length} 件のエラーがあります。`);
+  }
+  return lines;
 }
 
 function proposalTitle(intent: string, accountLabel: string, changes: string[]): string {

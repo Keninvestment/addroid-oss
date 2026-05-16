@@ -162,7 +162,6 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
             owner: true,
             name: true,
             defaultBranch: true,
-            branchProtectionApplied: true,
           },
         },
         approvalRecords: {
@@ -267,16 +266,6 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
     { label: "Base", value: <InlineCode>{pr.baseRef}</InlineCode> },
     { label: "変更ID", value: <InlineCode>{pr.headSha}</InlineCode> },
     {
-      label: "Branch protection",
-      value: (
-        <StatusBadge
-          state={pr.repo.branchProtectionApplied ? "ok" : "warn"}
-        >
-          {pr.repo.branchProtectionApplied ? "applied" : "not applied"}
-        </StatusBadge>
-      ),
-    },
-    {
       label: "Latest decision",
       value: (
         <StatusBadge state={approvalState(latestDecision)}>
@@ -293,10 +282,10 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
       ),
     },
     {
-      label: "Polled",
+      label: "作成日時",
       value: (
         <span className="tabular mono">
-          {formatDateTime(pr.polledAt, { timeZone: pageDisplayTimeZone })}
+          {formatDateTime(pr.createdAt, { timeZone: pageDisplayTimeZone })}
         </span>
       ),
     },
@@ -508,7 +497,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           )}
         </Panel>
 
-        <Panel title="承認して反映待ちにする" subtitle="確認ダイアログを通して実行します">
+        <Panel title="承認または否決" subtitle="確認ダイアログを通して実行します">
           {!canMerge ? (
             <EmptyState
               title="この PR は Web UI からマージできません。"
@@ -522,7 +511,6 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
               prTitle={pr.title}
               repoFullName={`${pr.repo.owner}/${pr.repo.name}`}
               expectedHeadSha={pr.headSha}
-              branchProtectionApplied={pr.repo.branchProtectionApplied}
               htmlUrl={pr.htmlUrl}
             />
           )}

@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 
-import { __testReadChatLine, runChatCommand } from "../commands/chat.js";
+import {
+  __testReadChatLine,
+  __testReadChatSessionSelection,
+  runChatCommand,
+} from "../commands/chat.js";
 import type {
   LLMCompletionRequest,
   LLMCompletionResult,
@@ -130,6 +134,49 @@ test("rich chat prompt は Shift+Enter を改行、Enter を送信として扱�
   input.write("\r");
 
   assert.equal(await answerPromise, "hello\nworld");
+  assert.equal(input.rawMode, false);
+});
+
+test("rich chat prompt は /re の候補に resume と report を表示する", async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const answerPromise = __testReadChatLine(input, output);
+
+  input.write("/re");
+  await Promise.resolve();
+
+  assert.match(output.output, /\/resume/);
+  assert.match(output.output, /\/report/);
+
+  input.write("\r");
+  assert.equal(await answerPromise, "/resume");
+  assert.equal(input.rawMode, false);
+});
+
+test("resume selector は上下キーで会話を選択して Enter で確定する", async () => {
+  const input = new FakeTtyInput();
+  const output = new FakeTtyOutput();
+  const sessions = [
+    {
+      id: "session-a",
+      title: "cli: 最初の会話",
+      updatedAt: "2026-05-16T10:00:00.000Z",
+      count: 1,
+    },
+    {
+      id: "session-b",
+      title: "dashboard: 次の会話",
+      updatedAt: "2026-05-16T11:00:00.000Z",
+      count: 2,
+    },
+  ];
+  const selectionPromise = __testReadChatSessionSelection(sessions, input, output);
+
+  input.write("\u001b[B");
+  input.write("\r");
+
+  assert.deepEqual(await selectionPromise, sessions[1]);
+  assert.match(output.output, /dashboard: 次の会話/);
   assert.equal(input.rawMode, false);
 });
 

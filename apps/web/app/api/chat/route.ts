@@ -1,12 +1,36 @@
 import { NextResponse } from "next/server";
 import path from "node:path";
 import { LocalDiskStorage } from "@addroid/config";
-import { runWebAgentChat } from "../../../lib/agent-chat";
+import {
+  listWebChatSessions,
+  loadWebChatSessionMessages,
+  runWebAgentChat,
+} from "../../../lib/agent-chat";
 
 export const dynamic = "force-dynamic";
 
 interface Body {
   input?: unknown;
+  sessionId?: unknown;
+  surface?: unknown;
+}
+
+export async function GET(request: Request) {
+  const url = new URL(request.url);
+  const sessionId = url.searchParams.get("sessionId");
+  if (sessionId) {
+    const result = await loadWebChatSessionMessages(sessionId).catch((err) => ({
+      ok: false,
+      error: (err as Error).message,
+    }));
+    if ("error" in result) return NextResponse.json(result, { status: 400 });
+    return NextResponse.json({ ok: true, ...result });
+  }
+  const sessions = await listWebChatSessions({
+    surface: url.searchParams.get("surface"),
+    limit: Number.parseInt(url.searchParams.get("limit") ?? "30", 10),
+  });
+  return NextResponse.json({ ok: true, sessions });
 }
 
 export async function POST(request: Request) {
@@ -20,6 +44,8 @@ export async function POST(request: Request) {
   const result = await runWebAgentChat(input, {
     userInput: parsed.userInput,
     referenceImagePaths: parsed.referenceImagePaths,
+    sessionId: parsed.sessionId,
+    surface: parsed.surface,
   }).catch((err) => ({
     ok: false,
     message: "",
@@ -36,12 +62,16 @@ async function parseChatRequest(request: Request): Promise<{
   input: string;
   userInput: string;
   referenceImagePaths?: string[];
+  sessionId?: string;
+  surface?: string;
 }> {
   const contentType = request.headers.get("content-type") ?? "";
   if (contentType.includes("multipart/form-data")) {
     const form = await request.formData();
     const rawInput = form.get("input");
     const rawContext = form.get("contextPrefix");
+    const rawSessionId = form.get("sessionId");
+    const rawSurface = form.get("surface");
     const input = typeof rawInput === "string" ? rawInput : "";
     const contextPrefix = typeof rawContext === "string" ? rawContext : "";
     const files = form.getAll("files").filter((item): item is File => item instanceof File);
@@ -59,6 +89,8 @@ async function parseChatRequest(request: Request): Promise<{
       input: [contextPrefix, input, attachmentContext].filter(Boolean).join("\n\n"),
       userInput: input,
       referenceImagePaths: storedPaths,
+      sessionId: typeof rawSessionId === "string" ? rawSessionId : undefined,
+      surface: typeof rawSurface === "string" ? rawSurface : undefined,
     };
   }
   let payload: Body;
@@ -68,7 +100,12 @@ async function parseChatRequest(request: Request): Promise<{
     throw new Error("Request body must be JSON or multipart/form-data.");
   }
   const input = typeof payload.input === "string" ? payload.input : "";
-  return { input, userInput: input };
+  return {
+    input,
+    userInput: input,
+    sessionId: typeof payload.sessionId === "string" ? payload.sessionId : undefined,
+    surface: typeof payload.surface === "string" ? payload.surface : undefined,
+  };
 }
 
 async function storeChatAttachments(files: File[]): Promise<string[]> {

@@ -10,8 +10,10 @@
 
 import { NextResponse } from "next/server";
 import {
+  fetchMetaAssetReadiness,
   MetaOAuthStateMismatchError,
 } from "@addroid/meta-adapter";
+import { Prisma } from "@addroid/db";
 import { prisma } from "../../../../../lib/prisma";
 import {
   ensureWebWorkspace,
@@ -43,6 +45,7 @@ export async function GET(request: Request) {
 
   // Persist business cache + register ad accounts.
   let registered = 0;
+  let assetReadiness: unknown[] = [];
   try {
     const ws = await ensureWebWorkspace();
     setMetaBusinessCache({
@@ -88,6 +91,19 @@ export async function GET(request: Request) {
         registered += 1;
       }
     }
+    const { adapter } = await getActiveMetaAdapter();
+    const lease = await adapter.loadAccessTokenPlaintext().catch(() => null);
+    if (lease) {
+      assetReadiness = await Promise.all(
+        connection.adAccounts.slice(0, 10).map((account) =>
+          fetchMetaAssetReadiness({
+            accessToken: lease.accessToken,
+            adAccountId: account.metaAccountId,
+            limit: 50,
+          })
+        )
+      );
+    }
     // 1 件しかない場合のみ自動で既定にする。複数ある場合は UI で明示選択する。
     const wsRow = await prisma.workspace.findUnique({
       where: { id: ws.id },
@@ -121,6 +137,7 @@ export async function GET(request: Request) {
           adAccountsFetched: connection.adAccounts.length,
           adAccountsRegistered: registered,
           adAccountsUpdated: updated,
+          assetReadiness: assetReadiness as Prisma.InputJsonValue,
         },
       },
     });
@@ -134,6 +151,10 @@ export async function GET(request: Request) {
   const next = new URL(connection.adAccounts.length > 1 ? "/accounts/select" : "/accounts", url);
   next.searchParams.set("oauth", "connected");
   next.searchParams.set("accounts", String(registered));
+  next.searchParams.set(
+    "assetCheck",
+    assetReadiness.some((report) => isReadinessBlocked(report)) ? "attention" : "ok"
+  );
   return NextResponse.redirect(next, { status: 302 });
 }
 
@@ -153,5 +174,14 @@ function shouldRefreshDisplayName(account: {
     account.displayName.trim().length === 0 ||
     account.displayName === account.key ||
     account.displayName === account.metaAccountId
+  );
+}
+
+function isReadinessBlocked(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "ok" in value &&
+    (value as { ok?: unknown }).ok === false
   );
 }

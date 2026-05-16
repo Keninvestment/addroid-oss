@@ -48,7 +48,7 @@ test("MockGithubAdapter.bootstrapOpsRepo requires an OAuth connection first", as
   );
 });
 
-test("MockGithubAdapter.bootstrapOpsRepo records ops repo with template files and branch protection", async () => {
+test("MockGithubAdapter.bootstrapOpsRepo records ops repo with template files", async () => {
   const store = new InMemoryOAuthTokenStore();
   const adapter = new MockGithubAdapter({ tokenStore: store, mockAccount: "test-mock" });
   const begin = await adapter.beginOAuth();
@@ -57,7 +57,6 @@ test("MockGithubAdapter.bootstrapOpsRepo records ops repo with template files an
   assert.equal(result.owner, "test-mock");
   assert.equal(result.name, "addroid-ops");
   assert.equal(result.defaultBranch, "main");
-  assert.equal(result.branchProtectionApplied, true);
   assert.equal(result.filesCommitted, 5);
   const snap = adapter.inspectRepo({
     owner: result.owner,

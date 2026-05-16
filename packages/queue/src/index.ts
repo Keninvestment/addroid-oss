@@ -55,6 +55,8 @@ export {
   type RecordApplyJobInput,
   type RecordApplyBlockedInput,
   type RecordMergeAuditInput,
+  type PrApprovalDecision,
+  type PrApprovalEvidence,
   type RecordPrApprovalInput,
   type UpsertCronScheduleInput,
   type StartCronRunInput,

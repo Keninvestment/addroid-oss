@@ -109,9 +109,73 @@ test("loadForApply fails closed when localDir HEAD differs from context.headSha"
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "unavailable");
     assert.equal(out.accounts.length, 0);
-    assert.match(out.detail ?? "", /does not match approved PR headSha/);
+    assert.match(out.detail ?? "", /approved commit is not available locally/);
   } finally {
     cleanup();
+  }
+});
+
+test("loadForApply reads an approved PR head from a materialized commit when main HEAD differs", async () => {
+  const current = fixtureRepo();
+  const approved = fixtureRepo();
+  let cleanedMaterialized = false;
+  try {
+    const otherSha = "0000000000000000000000000000000000000000";
+    const loader = new LocalDirAdsLoader({
+      localDir: current.dir,
+      expectedRepoId: REPO_ID,
+      readHeadSha: async () => otherSha,
+      commitExists: async (_dir, sha) => sha === HEAD_SHA,
+      materializeCommit: async (_dir, sha) => {
+        assert.equal(sha, HEAD_SHA);
+        return {
+          dir: approved.dir,
+          cleanup: async () => {
+            cleanedMaterialized = true;
+          },
+        };
+      },
+    });
+    const out = await loader.loadForApply({ context: ctx() });
+    assert.equal(out.source, "local_dir");
+    assert.equal(out.accounts.length, 1);
+    assert.equal(out.accounts[0]!.accountKey, "primary");
+    assert.equal(cleanedMaterialized, true);
+    assert.match(out.detail ?? "", /approved PR head/);
+  } finally {
+    current.cleanup();
+    approved.cleanup();
+  }
+});
+
+test("loadForApply derives previous state from the approved commit parent when baseDir is unset", async () => {
+  const current = fixtureRepo();
+  const approved = fixtureRepo();
+  const parent = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "ads/accounts/primary/brand.yaml": VALID_BRAND.replace("displayName: \"Primary\"", "displayName: \"Previous\""),
+  });
+  const parentSha = "1111111111111111111111111111111111111111";
+  try {
+    const loader = new LocalDirAdsLoader({
+      localDir: current.dir,
+      expectedRepoId: REPO_ID,
+      readHeadSha: async () => "0000000000000000000000000000000000000000",
+      commitExists: async (_dir, sha) => sha === HEAD_SHA || sha === parentSha,
+      readParentSha: async (_dir, sha) => (sha === HEAD_SHA ? parentSha : null),
+      materializeCommit: async (_dir, sha) => ({
+        dir: sha === parentSha ? parent.dir : approved.dir,
+        cleanup: async () => undefined,
+      }),
+    });
+    const out = await loader.loadForApply({ context: ctx() });
+    assert.equal(out.source, "local_dir");
+    assert.equal(out.accounts[0]!.previous?.account.displayName, "Previous");
+  } finally {
+    current.cleanup();
+    approved.cleanup();
+    parent.cleanup();
   }
 });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BusyLabel, LoadingDots } from "../components/ui/AsyncFeedback";
 import { useToast } from "../components/ui/Toast";
 
@@ -24,6 +24,7 @@ interface ApiResponse {
   message?: string;
   executions?: ApiExecution[];
   error?: string;
+  sessionId?: string;
 }
 
 interface Message {
@@ -31,6 +32,15 @@ interface Message {
   role: "user" | "assistant";
   text: string;
   executions?: ApiExecution[];
+}
+
+interface ChatSessionSummary {
+  id: string;
+  surface: string;
+  title: string;
+  lastMessage: string;
+  turnCount: number;
+  updatedAt: string;
 }
 
 interface DashboardChatPanelProps {
@@ -43,6 +53,7 @@ interface DashboardChatPanelProps {
   contextPrefix?: string;
   allowAttachments?: boolean;
   initialInput?: string;
+  surface?: string;
 }
 
 export function DashboardChatPanel({
@@ -55,15 +66,19 @@ export function DashboardChatPanel({
   contextPrefix,
   allowAttachments = false,
   initialInput,
+  surface = "dashboard",
 }: DashboardChatPanelProps) {
   const toast = useToast();
   const [input, setInput] = useState(initialInput ?? "");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [files, setFiles] = useState<File[]>([]);
+  const [sessionId, setSessionId] = useState(() => readOrCreateSessionId(surface));
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const composingRef = useRef(false);
   const suppressNextEnterRef = useRef(false);
   const latestMessageRef = useRef<HTMLDivElement | null>(null);
+  const initialSessionLoadedRef = useRef(false);
 
   const suggestions = useMemo(() => {
     const needle = input.trim();
@@ -71,6 +86,49 @@ export function DashboardChatPanel({
     if (needle.length > 0) return [];
     return [...examples];
   }, [busy, examples, input, messages.length]);
+
+  const refreshSessions = useCallback(async () => {
+    const res = await fetch("/api/chat?limit=30");
+    const body = (await res.json().catch(() => ({}))) as { sessions?: ChatSessionSummary[] };
+    setSessions(body.sessions ?? []);
+  }, []);
+
+  const loadSession = useCallback(
+    async (nextSessionId: string, options?: { force?: boolean }) => {
+      if (!nextSessionId || (!options?.force && nextSessionId === sessionId)) return;
+      const res = await fetch(`/api/chat?sessionId=${encodeURIComponent(nextSessionId)}`);
+      const body = (await res.json().catch(() => ({}))) as {
+        messages?: Array<Message & { createdAt?: string }>;
+        error?: string;
+      };
+      if (!res.ok || body.error) {
+        toast.push({
+          variant: "error",
+          title: "会話履歴を開けません",
+          description: body.error,
+        });
+        return;
+      }
+      setSessionId(nextSessionId);
+      window.localStorage.setItem(storageKey(surface), nextSessionId);
+      setMessages(
+        (body.messages ?? []).map((message) => ({
+          id: message.id || makeId(),
+          role: message.role,
+          text: message.text,
+          executions: message.executions,
+        }))
+      );
+    },
+    [sessionId, surface, toast]
+  );
+
+  useEffect(() => {
+    if (initialSessionLoadedRef.current || !sessionId) return;
+    initialSessionLoadedRef.current = true;
+    void refreshSessions();
+    void loadSession(sessionId, { force: true });
+  }, [loadSession, refreshSessions, sessionId]);
 
   useEffect(() => {
     const target = latestMessageRef.current;
@@ -104,6 +162,8 @@ export function DashboardChatPanel({
         input: text,
         contextPrefix,
         files,
+        sessionId,
+        surface,
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
       const executions = body.executions ?? [];
@@ -124,6 +184,11 @@ export function DashboardChatPanel({
           executions,
         },
       ]);
+      if (body.sessionId && body.sessionId !== sessionId) {
+        setSessionId(body.sessionId);
+        window.localStorage.setItem(storageKey(surface), body.sessionId);
+      }
+      void refreshSessions();
       if (!res.ok || error || executions.some((e) => e.status === "error")) {
         toast.push({
           variant: "error",
@@ -150,7 +215,35 @@ export function DashboardChatPanel({
           <h2>{title}</h2>
           <p>{description}</p>
         </div>
-        <span className="agent-chat__badge">{badge}</span>
+        <div className="agent-chat__actions">
+          <select
+            aria-label="会話履歴"
+            value={sessionId}
+            onChange={(e) => {
+              const value = e.target.value;
+              if (value === "__new__") {
+                const next = makeId();
+                setSessionId(next);
+                setMessages([]);
+                window.localStorage.setItem(storageKey(surface), next);
+                return;
+              }
+              void loadSession(value);
+            }}
+            disabled={busy || !sessionId}
+          >
+            <option value={sessionId}>{messages.length ? "現在の会話" : "新しい会話"}</option>
+            <option value="__new__">新しい会話を開始</option>
+            {sessions
+              .filter((session) => session.id !== sessionId)
+              .map((session) => (
+                <option key={session.id} value={session.id}>
+                  {session.surface === surface ? session.title : `[${session.surface}] ${session.title}`}
+                </option>
+              ))}
+          </select>
+          <span className="agent-chat__badge">{badge}</span>
+        </div>
       </div>
       <div className="agent-chat__messages" aria-busy={busy}>
         {messages.length === 0 ? (
@@ -291,10 +384,14 @@ async function sendChatRequest(input: {
   input: string;
   contextPrefix?: string;
   files: File[];
+  sessionId: string;
+  surface: string;
 }): Promise<Response> {
   if (input.files.length > 0 || input.contextPrefix) {
     const form = new FormData();
     form.set("input", input.input);
+    form.set("sessionId", input.sessionId);
+    form.set("surface", input.surface);
     if (input.contextPrefix) form.set("contextPrefix", input.contextPrefix);
     for (const file of input.files) form.append("files", file);
     return fetch("/api/chat", { method: "POST", body: form });
@@ -302,8 +399,25 @@ async function sendChatRequest(input: {
   return fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input: input.input }),
+    body: JSON.stringify({
+      input: input.input,
+      sessionId: input.sessionId,
+      surface: input.surface,
+    }),
   });
+}
+
+function storageKey(surface: string): string {
+  return `addroid.chat.session.${surface}`;
+}
+
+function readOrCreateSessionId(surface: string): string {
+  if (typeof window === "undefined") return "";
+  const stored = window.localStorage.getItem(storageKey(surface));
+  if (stored) return stored;
+  const next = makeId();
+  window.localStorage.setItem(storageKey(surface), next);
+  return next;
 }
 
 function makeId(): string {

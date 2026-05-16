@@ -128,13 +128,6 @@ class LazyGithubApiClient implements GithubApiClient {
   }): Promise<{ commitSha: string; filesCommitted: number }> {
     return (await this.resolve()).commitTemplateFiles(input);
   }
-  async setBranchProtection(input: {
-    owner: string;
-    repo: string;
-    branch: string;
-  }): Promise<{ applied: boolean; reason?: string }> {
-    return (await this.resolve()).setBranchProtection(input);
-  }
   async listPullRequests(input: {
     owner: string;
     repo: string;

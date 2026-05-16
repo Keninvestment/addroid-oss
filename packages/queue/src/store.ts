@@ -77,13 +77,20 @@ export interface OpsRepoSnapshot {
   defaultBranch: string;
   etag: string | null;
   lastModified: string | null;
-  /**
-   * bootstrap 時に branch protection (required reviews) が実際に適用できたか。
-   * false の場合、merged PR は人間レビューを経ていない可能性があるため、
-   * runGithubPollOnce は execute_apply の enqueue を拒否し、`recordApplyBlocked`
-   * で audit_logs に残す (regression fix)。
-   */
-  branchProtectionApplied: boolean;
+}
+
+export type PrApprovalDecision =
+  | "approved"
+  | "rejected"
+  | "auto_blocked"
+  | "auto_approved";
+
+export interface PrApprovalEvidence {
+  id: string;
+  decision: PrApprovalDecision;
+  approvedBy: string;
+  headSha: string | null;
+  decisionSource: string | null;
 }
 
 export interface RecordPollingStateInput {
@@ -103,6 +110,7 @@ export interface UpsertPullRequestInput {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  mergedBy?: string | null;
 }
 
 export interface RecordApplyJobInput {
@@ -128,14 +136,11 @@ export interface RecordMergeAuditInput {
 }
 
 /**
- * merged PR が検知されたが、approval-enforcement 境界 (branch protection) が
- * ops repo 上で実際に適用されていないため execute_apply の enqueue を拒否した
- * ことを記録する境界 (regression fix)。
+ * merged PR が検知されたが、AdDroid の承認境界を確認できないため execute_apply
+ * の enqueue を拒否したことを記録する境界。
  *
  * the current implementation 制約「All Meta mutation must originate from approved GitOps state」
- * を満たすため、protection 不在時は apply path を通さない。Free プランで
- * private repo の場合に該当することがあり、その場合は public 化または
- * paid plan への移行を案内する。
+ * を満たすため、同じ headSha に対する承認レコードが無い場合は apply path を通さない。
  */
 export interface RecordApplyBlockedInput {
   workspaceId: string;
@@ -144,21 +149,26 @@ export interface RecordApplyBlockedInput {
   headSha: string;
   htmlUrl: string;
   /**
-   * - `unprotected_branch` : ops repo に branch protection が適用されていない
-   *   ため approval enforcement の証拠が無く merge を信用できない (regression fix)。
+   * - `missing_addroid_approval` : 承認レコードが無く、GitHub merge も承認として
+   *   記録できなかった。
+   * - `approval_head_sha_mismatch` : 承認レコードの headSha と merged PR の headSha
+   *   が一致しない。
+   * - `invalid_approval_source` : 承認レコードが対応済み承認ルート由来ではない。
+   * - `approval_record_failed` : GitHub merge を承認として記録できなかった。
    * - `prior_blocked_approval` : 当該 PR には既に `auto_blocked` (もしくは
    *   `rejected`) の approval_records が存在する (improvement_pr ワークフローで
    *   policy / audit が報告した結果や、UI / CLI からの拒否)。merge 検出時点で
-   *   新規 `auto_approved` を書き込むと `loadApplyApprovalSnapshot` の
-   *   `latestApprovalDecision` が反転し execute_apply が承認境界を迂回するため、
-   *   fail-closed させる (regression fix)。
+   *   fail-closed させ、上流決定を保存する。
    * - `report_only_mode` : workspace.executionMode が `report_only` で、かつ
    *   どの active ad_account の `modeOverride` も `report_only` を覆していない。
    *   契約上「report_only never mutates Meta」なので merge 検出時点で
    *   execute_apply の enqueue を拒否する (regression fix)。
    */
   reason:
-    | "unprotected_branch"
+    | "missing_addroid_approval"
+    | "approval_head_sha_mismatch"
+    | "invalid_approval_source"
+    | "approval_record_failed"
     | "prior_blocked_approval"
     | "report_only_mode";
   /** sanitized 1 行説明 (UI/監査ビュー向け)。 */
@@ -174,12 +184,10 @@ export interface RecordApplyBlockedInput {
  * の 1 行 + `execution_logs` の `github_poll` ステップと組み合わせて GitOps の
  * 承認境界を 3 重に記録するために使う。
  *
- * - `decision="auto_approved"` : 既存ポリシー (branch protection) を経由して
- *   merged 状態を観測し、execute_apply の enqueue を許可した。
- * - `decision="auto_blocked"`  : merged だが branch protection が未適用で
- *   approval enforcement の証拠が無いため enqueue を拒否した。
- * - `decision="approved"` / `"rejected"` は将来の手動承認 UI 用に予約。
- *   the current implementation では使わない。
+ * - `decision="approved"` : Web UI / CLI / Slack / GitHub などで承認された。
+ * - `decision="rejected"` : 対話型に否決された。
+ * - `decision="auto_blocked"` : merged だが AdDroid 承認境界を満たさないため
+ *   enqueue を拒否した。
  */
 export interface RecordPrApprovalInput {
   workspaceId: string;
@@ -244,30 +252,24 @@ export interface GithubPollStore {
   recordApplyJob(input: RecordApplyJobInput): Promise<{ id: string }>;
   recordMergeAudit(input: RecordMergeAuditInput): Promise<void>;
   /**
-   * branch protection 不在 (= approval-enforcement 不在) のため、merged PR の
-   * execute_apply enqueue を拒否したことを audit_logs / execution_logs に残す。
-   * apply_jobs は作成しない (regression fix)。
+   * AdDroid の承認境界を満たさない merged PR の execute_apply enqueue を拒否した
+   * ことを audit_logs / execution_logs に残す。apply_jobs は作成しない。
    */
   recordApplyBlocked(input: RecordApplyBlockedInput): Promise<void>;
   /**
-   * PR 単位の承認決定を `approval_records` に 1 行記録する。merge 検知時は
-   * `auto_approved` / `auto_blocked` のどちらかが必ず書かれる (audit_logs と
-   * 二段で残るため、UI からの追跡可能性を確保する)。
+   * PR 単位の承認決定を `approval_records` に 1 行記録する。
    */
   recordPrApproval(input: RecordPrApprovalInput): Promise<void>;
   /**
-   * regression fix: 当該 PR の最新 `approval_records.decision` を返す。
+   * 当該 PR の最新 `approval_records` を返す。
    *
    * `loadApplyApprovalSnapshot` と同じく `createdAt desc` で 1 行のみ参照する
-   * (PR は 1:N の決定履歴を持つ)。 merge 検出時に `auto_blocked` / `rejected`
-   * を確認できれば、fresh な `auto_approved` を書き込む前に fail-closed して
-   * `report_only` / `auto_blocked` の上流決定を merge を跨いで保存できる。
+   * (PR は 1:N の決定履歴を持つ)。merge 検出時に `approved` と同じ headSha
+   * を確認できたときだけ execute_apply を enqueue する。
    */
-  findLatestPrApprovalDecision(input: {
+  findLatestPrApproval(input: {
     pullRequestId: string;
-  }): Promise<
-    "approved" | "rejected" | "auto_blocked" | "auto_approved" | null
-  >;
+  }): Promise<PrApprovalEvidence | null>;
 }
 
 // ---------------------------------------------------------------------
@@ -330,16 +332,17 @@ export type ApplyAuditAction =
  * Execute-time revalidation snapshot (regression fix)。
  *
  * `runExecuteApply` は実行直前に「現在の」ops repo / PR / approval_records 状態を
- * このスナップショットで再取得する。enqueue 時には auto_approved だった PR でも、
- * その後 protection が外された / PR が closed に戻された / approval が rejected に
- * 上書きされた場合は実行段階で fail-closed させる。手で `apply_jobs` 行を作って
- * もこのチェックを通らない限り Meta mutation 経路に到達しない。
+ * このスナップショットで再取得する。その後 PR が closed に戻された / approval が
+ * rejected に上書きされた / approval headSha と PR headSha がズレた場合は
+ * 実行段階で fail-closed させる。
+ * 手で `apply_jobs` 行を作ってもこのチェックを通らない限り Meta mutation 経路に
+ * 到達しない。
  */
 export interface ApplyApprovalSnapshot {
   /** 現在の PR state ("open" / "closed" / "merged")。null なら PR 行が消えている。 */
   pullRequestState: "open" | "closed" | "merged";
-  /** PR が紐付く ops repo の現在の branch protection 状態。 */
-  branchProtectionApplied: boolean;
+  /** 現在の PR head SHA。AdDroid 承認が同じ変更に対するものか検証する。 */
+  pullRequestHeadSha: string;
   /**
    * 当該 PR に対する最新の approval_records.decision。null なら 1 行も存在しない
    * (= 手で apply_jobs を挿入したケース)。
@@ -350,6 +353,10 @@ export interface ApplyApprovalSnapshot {
     | "auto_blocked"
     | "auto_approved"
     | null;
+  /** 最新 approval_records.metadata.headSha。無い場合は null。 */
+  approvalRecordHeadSha: string | null;
+  /** 最新 approval_records.metadata.decisionSource。無い場合は null。 */
+  approvalDecisionSource: string | null;
   /**
    * regression fix: 当該 PR の最新 `approval_records.id`。
    * `runExecuteApply` がこれを `ApplyJobContext.approvalRecordId` に焼き付け、
@@ -489,6 +496,7 @@ export interface QueuePullRequestSummary {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  mergedBy?: string | null;
 }
 
 export interface QueuePollResult {

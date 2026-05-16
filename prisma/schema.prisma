@@ -529,10 +529,6 @@ model GithubRepo {
   name                    String
   defaultBranch           String    @default("main")
   bootstrappedAt          DateTime?
-  // bootstrap 時に branch protection が実際に GitHub 側へ適用できたか。
-  // false (Free プランの private repo 等で 403/422) の場合、merged PR 検知から
-  // execute_apply への enqueue は github-poll 側でブロックされる。
-  branchProtectionApplied Boolean   @default(false)
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
 

@@ -17,12 +17,12 @@ export interface MergePrButtonProps {
   prTitle: string;
   repoFullName: string;
   expectedHeadSha: string;
-  branchProtectionApplied: boolean;
   htmlUrl: string | null;
 }
 
-interface MergeResponse {
+interface DecisionResponse {
   ok?: boolean;
+  action?: "approve" | "reject";
   merged?: boolean;
   sha?: string;
   message?: string;
@@ -35,10 +35,10 @@ export function MergePrButton({
   prTitle,
   repoFullName,
   expectedHeadSha,
-  branchProtectionApplied,
   htmlUrl,
 }: MergePrButtonProps) {
-  const [open, setOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [rejectOpen, setRejectOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const router = useRouter();
@@ -57,7 +57,7 @@ export function MergePrButton({
         },
         body: JSON.stringify({ expectedHeadSha }),
       });
-      const body = (await res.json().catch(() => ({}))) as MergeResponse;
+      const body = (await res.json().catch(() => ({}))) as DecisionResponse;
       if (!res.ok || !body.ok) {
         const errMessage =
           body.error ?? body.message ?? `HTTP ${res.status}: マージに失敗しました`;
@@ -76,7 +76,7 @@ export function MergePrButton({
           ? `変更ID=${body.sha.slice(0, 12)} · 次の確認で反映処理に進みます`
           : "承認を記録しました",
       });
-      setOpen(false);
+      setMergeOpen(false);
       router.refresh();
     } catch (err) {
       const msg = (err as Error).message;
@@ -84,6 +84,51 @@ export function MergePrButton({
       push({
         variant: "error",
         title: `PR #${prNumber} の承認に失敗しました`,
+        description: msg,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleReject() {
+    if (busy) return;
+    setBusy(true);
+    setInlineError(null);
+    try {
+      const res = await fetch(`/api/approvals/${prNumber}/reject`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-AdDroid-Web-Action": "1",
+        },
+        body: JSON.stringify({ expectedHeadSha }),
+      });
+      const body = (await res.json().catch(() => ({}))) as DecisionResponse;
+      if (!res.ok || !body.ok) {
+        const errMessage =
+          body.error ?? body.message ?? `HTTP ${res.status}: 否決に失敗しました`;
+        setInlineError(errMessage);
+        push({
+          variant: "error",
+          title: `PR #${prNumber} の否決に失敗しました`,
+          description: errMessage,
+        });
+        return;
+      }
+      push({
+        variant: "success",
+        title: `PR #${prNumber} を否決しました`,
+        description: "この変更から反映処理は起動しません",
+      });
+      setRejectOpen(false);
+      router.refresh();
+    } catch (err) {
+      const msg = (err as Error).message;
+      setInlineError(msg);
+      push({
+        variant: "error",
+        title: `PR #${prNumber} の否決に失敗しました`,
         description: msg,
       });
     } finally {
@@ -106,30 +151,31 @@ export function MergePrButton({
           className="btn btn--caution"
           onClick={() => {
             setInlineError(null);
-            setOpen(true);
+            setMergeOpen(true);
           }}
           disabled={busy}
         >
           承認して反映待ちにする
         </button>
+        <button
+          type="button"
+          className="btn btn--danger"
+          onClick={() => {
+            setInlineError(null);
+            setRejectOpen(true);
+          }}
+          disabled={busy}
+        >
+          否決する
+        </button>
         <span style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)" }}>
-          承認後、次の確認で安全な反映処理に進みます。即時配信開始はしません。
+          承認後は反映待ち、否決後は反映停止として記録します。
         </span>
       </div>
-      {!branchProtectionApplied ? (
-        <div className="banner" data-state="warn" style={{ marginBottom: 0 }}>
-          <span className="banner__title">保護設定が未適用です</span>
-          <span>
-            GitHub の保護設定が未完了のため、承認後の反映処理は拒否されます。
-            接続と健康状態を確認してください。
-          </span>
-        </div>
-      ) : null}
-
       <ConfirmDialog
-        open={open}
+        open={mergeOpen}
         onClose={() => {
-          if (!busy) setOpen(false);
+          if (!busy) setMergeOpen(false);
         }}
         onConfirm={handleConfirm}
         busy={busy}
@@ -153,16 +199,66 @@ export function MergePrButton({
                 変更ID: <InlineCode>{expectedHeadSha.slice(0, 12)}</InlineCode>
               </li>
               <li>
-                保護設定:{" "}
-                <InlineCode>
-                  {branchProtectionApplied ? "適用済み" : "未適用"}
-                </InlineCode>
+                反映処理: <InlineCode>次の確認で開始</InlineCode>
+              </li>
+              {htmlUrl ? (
+                <li>
+                  GitHub:{" "}
+                  <a
+                    href={htmlUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mono"
+                  >
+                    {htmlUrl}
+                  </a>
+                </li>
+              ) : null}
+            </ul>
+            {inlineError ? (
+              <div
+                role="alert"
+                style={{
+                  padding: "var(--space-3)",
+                  border: "1px solid var(--color-status-error)",
+                  background: "var(--color-status-error-subtle)",
+                  color: "var(--color-status-error)",
+                  borderRadius: "var(--radius-sm)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "0.8125rem",
+                }}
+              >
+                {inlineError}
+              </div>
+            ) : null}
+          </div>
+        }
+      />
+      <ConfirmDialog
+        open={rejectOpen}
+        onClose={() => {
+          if (!busy) setRejectOpen(false);
+        }}
+        onConfirm={handleReject}
+        busy={busy}
+        confirmLabel="否決する"
+        confirmVariant="danger"
+        title="この変更を否決しますか？"
+        description={
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            <div>
+              否決すると approval_records に rejected を記録し、この PR からの反映処理を
+              起動しません。
+            </div>
+            <ul style={{ margin: 0, paddingLeft: "1.25rem", lineHeight: 1.7 }}>
+              <li>
+                リポジトリ: <InlineCode>{repoFullName}</InlineCode>
               </li>
               <li>
-                反映処理:{" "}
-                <InlineCode>
-                  {branchProtectionApplied ? "次の確認で開始" : "拒否されます"}
-                </InlineCode>
+                PR: <InlineCode>#{prNumber}</InlineCode> {prTitle}
+              </li>
+              <li>
+                変更ID: <InlineCode>{expectedHeadSha.slice(0, 12)}</InlineCode>
               </li>
               {htmlUrl ? (
                 <li>

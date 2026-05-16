@@ -10,9 +10,8 @@
 //     で都度復号する。プロセスメモリにはメソッド呼び出しのスコープでのみ存在させる。
 //   - ハードコードされた owner/org を使わない。`bootstrapOpsRepo` は OAuth 接続済み
 //     アカウント (GET /user.login) を owner として使う。
-//   - branch protection は private repo 作成直後に PUT /branches/{branch}/protection
-//     を 1 回設定する。GitHub Free プランでは public repo でしか branch protection が
-//     設定できないため、403 を返された場合は `branchProtectionApplied=false` で続行。
+//   - GitHub branch protection には依存しない。AdDroid の対話型承認レコードを
+//     apply の承認境界にするため、private repo / GitHub Free でも運用できる。
 
 import { buildOpsTemplate, type OpsTemplateFile } from "@addroid/ops-template";
 import {
@@ -74,11 +73,6 @@ export interface GithubApiClient {
     message: string;
     files: OpsTemplateFile[];
   }): Promise<{ commitSha: string; filesCommitted: number }>;
-  setBranchProtection(input: {
-    owner: string;
-    repo: string;
-    branch: string;
-  }): Promise<{ applied: boolean; reason?: string }>;
   listPullRequests(input: {
     owner: string;
     repo: string;
@@ -230,18 +224,12 @@ export class OctokitGithubAdapter implements GithubAdapter {
       message: "chore(addroid): bootstrap ops repository template",
       files,
     });
-    const protection = await api.setBranchProtection({
-      owner: repo.owner,
-      repo: repo.name,
-      branch: repo.defaultBranch,
-    });
     return {
       owner: repo.owner,
       name: repo.name,
       defaultBranch: repo.defaultBranch,
       bootstrappedAt: new Date().toISOString(),
       filesCommitted: commit.filesCommitted,
-      branchProtectionApplied: protection.applied,
     };
   }
 
@@ -566,30 +554,6 @@ class OctokitApiClient implements GithubApiClient {
     return { commitSha: commitNew.data.sha, filesCommitted: input.files.length };
   }
 
-  async setBranchProtection(input: {
-    owner: string;
-    repo: string;
-    branch: string;
-  }): Promise<{ applied: boolean; reason?: string }> {
-    try {
-      await this.octokit.rest.repos.updateBranchProtection({
-        owner: input.owner,
-        repo: input.repo,
-        branch: input.branch,
-        required_status_checks: null,
-        enforce_admins: false,
-        required_pull_request_reviews: { required_approving_review_count: 1 },
-        restrictions: null,
-      });
-      return { applied: true };
-    } catch (err) {
-      // GitHub Free の private repo は branch protection 不可 → 403/422。
-      // skeleton では fail-soft し、UI に reason を表示する。
-      const reason = err instanceof Error ? err.message : String(err);
-      return { applied: false, reason };
-    }
-  }
-
   async listPullRequests(input: {
     owner: string;
     repo: string;
@@ -624,6 +588,7 @@ class OctokitApiClient implements GithubApiClient {
         baseRef: String((pr["base"] as Record<string, unknown> | undefined)?.["ref"] ?? "main"),
         htmlUrl: String(pr["html_url"] ?? ""),
         mergedAt: (pr["merged_at"] as string | null) ?? null,
+        mergedBy: readLogin(pr["merged_by"]),
       }));
       const out: {
         status: number;
@@ -832,4 +797,10 @@ function normalizeState(pr: Record<string, unknown>): "open" | "closed" | "merge
   const s = String(pr["state"] ?? "open");
   if (s === "closed") return "closed";
   return "open";
+}
+
+function readLogin(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const login = (value as Record<string, unknown>).login;
+  return typeof login === "string" && login.trim() ? login : null;
 }

@@ -16,6 +16,7 @@ import type {
   GithubPollStore,
   MarkApplyFinishedInput,
   MarkApplyRunningInput,
+  PrApprovalDecision,
   RecordApplyAuditInput,
   RecordApplyBlockedInput,
   RecordApplyJobInput,
@@ -33,6 +34,25 @@ import type {
   NotificationAuditInput,
   NotificationAuditWriter,
 } from "@addroid/config";
+
+function normalizePrApprovalDecision(value: string | null): PrApprovalDecision | null {
+  return value === "approved" ||
+    value === "rejected" ||
+    value === "auto_blocked" ||
+    value === "auto_approved"
+    ? value
+    : null;
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readJsonString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
 
 // ---------------------------------------------------------------------
 // workspace bootstrap (worker 起動時に config.yaml の slug で upsert する)
@@ -93,7 +113,6 @@ export interface PersistOpsRepoBootstrapInput {
   defaultBranch: string;
   bootstrappedAt: Date;
   filesCommitted: number;
-  branchProtectionApplied: boolean;
 }
 
 export async function persistOpsRepoBootstrap(
@@ -105,14 +124,12 @@ export async function persistOpsRepoBootstrap(
     update: {
       defaultBranch: input.defaultBranch,
       bootstrappedAt: input.bootstrappedAt,
-      branchProtectionApplied: input.branchProtectionApplied,
     },
     create: {
       owner: input.owner,
       name: input.name,
       defaultBranch: input.defaultBranch,
       bootstrappedAt: input.bootstrappedAt,
-      branchProtectionApplied: input.branchProtectionApplied,
     },
     select: { id: true },
   });
@@ -129,7 +146,6 @@ export async function persistOpsRepoBootstrap(
       ref: `${input.owner}/${input.name}@${input.defaultBranch}`,
       metadata: {
         filesCommitted: input.filesCommitted,
-        branchProtectionApplied: input.branchProtectionApplied,
       },
     },
   });
@@ -268,7 +284,6 @@ export function createGithubPollStore(prisma: PrismaClient): GithubPollStore {
           owner: true,
           name: true,
           defaultBranch: true,
-          branchProtectionApplied: true,
           pollingState: { select: { etag: true, lastModified: true } },
         },
       });
@@ -280,7 +295,6 @@ export function createGithubPollStore(prisma: PrismaClient): GithubPollStore {
         defaultBranch: repo.defaultBranch,
         etag: repo.pollingState?.etag ?? null,
         lastModified: repo.pollingState?.lastModified ?? null,
-        branchProtectionApplied: repo.branchProtectionApplied,
       };
     },
 
@@ -423,25 +437,28 @@ export function createGithubPollStore(prisma: PrismaClient): GithubPollStore {
       });
     },
 
-    async findLatestPrApprovalDecision(input: { pullRequestId: string }) {
-      // regression fix: 当該 PR の `approval_records` を createdAt 降順で 1 行
-      // だけ取り、上流ワークフロー (improvement_pr の policy / audit や UI/CLI
-      // 拒否) が残した最新決定を merge 検出時に確認できるようにする。
+    async findLatestPrApproval(input: { pullRequestId: string }) {
       const latest = await prisma.approvalRecord.findFirst({
         where: { pullRequestId: input.pullRequestId },
         orderBy: { createdAt: "desc" },
-        select: { decision: true },
+        select: {
+          id: true,
+          decision: true,
+          approvedBy: true,
+          metadata: true,
+        },
       });
       const decision = latest?.decision ?? null;
-      if (
-        decision === "approved" ||
-        decision === "rejected" ||
-        decision === "auto_blocked" ||
-        decision === "auto_approved"
-      ) {
-        return decision;
-      }
-      return null;
+      const normalized = normalizePrApprovalDecision(decision);
+      if (!latest || !normalized) return null;
+      const metadata = readJsonObject(latest.metadata);
+      return {
+        id: latest.id,
+        decision: normalized,
+        approvedBy: latest.approvedBy,
+        headSha: readJsonString(metadata.headSha),
+        decisionSource: readJsonString(metadata.decisionSource),
+      };
     },
   };
 }
@@ -527,24 +544,20 @@ export function createApplyJobStore(
             select: {
               id: true,
               state: true,
+              headSha: true,
               mergedAt: true,
-              repo: {
-                select: {
-                  branchProtectionApplied: true,
-                },
-              },
             },
           },
         },
       });
-      if (!row?.pullRequest || !row.pullRequest.repo) return null;
+      if (!row?.pullRequest) return null;
       const latest = await prisma.approvalRecord.findFirst({
         where: { pullRequestId: row.pullRequest.id },
         orderBy: { createdAt: "desc" },
         // regression fix: id も同時に取得し、Apply 経路 (runExecuteApply →
         // CliApplyExecutor → MetaCliInvocation.refs.approvalRecordId) が
         // 個々の Meta CLI 実行ログを承認境界に紐付けられるようにする。
-        select: { id: true, decision: true },
+        select: { id: true, decision: true, metadata: true },
       });
       const stateRaw = row.pullRequest.state;
       const pullRequestState: "open" | "closed" | "merged" =
@@ -561,9 +574,13 @@ export function createApplyJobStore(
           : null;
       return {
         pullRequestState,
-        branchProtectionApplied: row.pullRequest.repo.branchProtectionApplied,
+        pullRequestHeadSha: row.pullRequest.headSha,
         latestApprovalDecision,
         approvalRecordId: latest?.id ?? null,
+        approvalRecordHeadSha: readJsonString(readJsonObject(latest?.metadata).headSha),
+        approvalDecisionSource: readJsonString(
+          readJsonObject(latest?.metadata).decisionSource
+        ),
         mergedAt: row.pullRequest.mergedAt,
       };
     },

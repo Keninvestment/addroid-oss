@@ -42,17 +42,15 @@ interface FakeApiCalls {
     files: OpsTemplateFile[];
     message: string;
   }[];
-  protections: { owner: string; repo: string; branch: string }[];
   polls: { owner: string; repo: string; etag?: string }[];
 }
 
 class FakeApiClient implements GithubApiClient {
-  calls: FakeApiCalls = { templateCommits: [], protections: [], polls: [] };
+  calls: FakeApiCalls = { templateCommits: [], polls: [] };
   constructor(
     private readonly accessToken: string,
     private readonly login: string,
     private readonly options: {
-      protectionWillFail?: boolean;
       pollScript?: PollScriptEntry[];
     } = {}
   ) {}
@@ -81,14 +79,6 @@ class FakeApiClient implements GithubApiClient {
   }) {
     this.calls.templateCommits.push({ ...input });
     return { commitSha: "fake-sha", filesCommitted: input.files.length };
-  }
-
-  async setBranchProtection(input: { owner: string; repo: string; branch: string }) {
-    this.calls.protections.push({ ...input });
-    if (this.options.protectionWillFail) {
-      return { applied: false, reason: "test-forbidden" };
-    }
-    return { applied: true };
   }
 
   async createPullRequest(input: {
@@ -163,7 +153,6 @@ const BOOTSTRAP_INPUT = {
 
 function makeAdapter(opts: {
   login?: string;
-  protectionWillFail?: boolean;
   pollScript?: PollScriptEntry[];
 } = {}) {
   const tokenStore = new InMemoryOAuthTokenStore();
@@ -175,7 +164,6 @@ function makeAdapter(opts: {
     crypto,
     apiClientFactory: (accessToken) => {
       lastApi = new FakeApiClient(accessToken, opts.login ?? "octo-test-user", {
-        ...(opts.protectionWillFail !== undefined ? { protectionWillFail: opts.protectionWillFail } : {}),
         ...(opts.pollScript !== undefined ? { pollScript: opts.pollScript } : {}),
       });
       return lastApi;
@@ -209,7 +197,7 @@ test("OctokitGithubAdapter.completeOAuth encrypts the access token before persis
   assert.equal(/^gho_/.test(stored?.accessTokenCiphertext ?? ""), false);
 });
 
-test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the template files, and applies branch protection", async () => {
+test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo and commits the template files", async () => {
   const { adapter, getLastApi } = makeAdapter({ login: "octo-test-user" });
   const begin = await adapter.beginOAuth();
   await adapter.completeOAuth({ code: "c", state: begin.state });
@@ -218,7 +206,6 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the 
   assert.equal(result.name, "addroid-ops");
   assert.equal(result.defaultBranch, "main");
   assert.equal(result.filesCommitted, 7);
-  assert.equal(result.branchProtectionApplied, true);
   const api = getLastApi();
   assert.ok(api);
   assert.equal(api?.calls.createdRepo?.isPrivate, true);
@@ -234,7 +221,6 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo, commits the 
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
   ].sort());
-  assert.equal(api?.calls.protections.length, 1);
 });
 
 test("OctokitGithubAdapter.bootstrapOpsRepo includes brand.yaml for all initially synced ad accounts", async () => {
@@ -254,14 +240,6 @@ test("OctokitGithubAdapter.bootstrapOpsRepo includes brand.yaml for all initiall
   assert.ok(paths.includes("ads/accounts/primary/brand.yaml"));
   assert.ok(paths.includes("ads/accounts/act_222/brand.yaml"));
   assert.ok(paths.includes("ads/accounts/act_333/brand.yaml"));
-});
-
-test("OctokitGithubAdapter.bootstrapOpsRepo reports branch protection failure as fail-soft", async () => {
-  const { adapter } = makeAdapter({ login: "octo-test-user", protectionWillFail: true });
-  const begin = await adapter.beginOAuth();
-  await adapter.completeOAuth({ code: "c", state: begin.state });
-  const result = await adapter.bootstrapOpsRepo(BOOTSTRAP_INPUT);
-  assert.equal(result.branchProtectionApplied, false);
 });
 
 test("OctokitGithubAdapter.bootstrapOpsRepo refuses without a connected token", async () => {

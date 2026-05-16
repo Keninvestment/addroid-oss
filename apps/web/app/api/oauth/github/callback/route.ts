@@ -77,7 +77,6 @@ export async function GET(request: Request) {
         defaultBranch: result.defaultBranch,
         bootstrappedAt: new Date(result.bootstrappedAt),
         filesCommitted: result.filesCommitted,
-        branchProtectionApplied: result.branchProtectionApplied,
       });
       await ensureWebOpsRepoCheckout(ws.id);
     }

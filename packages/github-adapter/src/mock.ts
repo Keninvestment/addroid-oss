@@ -51,7 +51,7 @@ export class MockGithubAdapter implements GithubAdapter {
   private readonly mockAccount: string;
   private readonly fakeCiphertextSeed: string;
   private prSequence: PullRequestSummary[][];
-  private repos = new Map<string, { spec: OpsRepoSpec; bootstrappedAt: string; files: number; protectionApplied: boolean; prState: PullRequestSummary[] }>();
+  private repos = new Map<string, { spec: OpsRepoSpec; bootstrappedAt: string; files: number; prState: PullRequestSummary[] }>();
   private etagCounter = 0;
   private lastEtag: string;
   private pendingState: string | null = null;
@@ -118,7 +118,6 @@ export class MockGithubAdapter implements GithubAdapter {
       spec,
       bootstrappedAt,
       files: fileCount,
-      protectionApplied: true,
       prState: [],
     });
     return {
@@ -127,7 +126,6 @@ export class MockGithubAdapter implements GithubAdapter {
       defaultBranch,
       bootstrappedAt,
       filesCommitted: fileCount,
-      branchProtectionApplied: true,
     };
   }
 

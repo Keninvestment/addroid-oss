@@ -58,7 +58,12 @@ import type {
   LLMProvider,
 } from "@addroid/llm-provider";
 import type { PrismaClient } from "@addroid/db";
-import type { MetaAdapter } from "@addroid/meta-adapter";
+import {
+  fetchMetaAssetReadiness,
+  formatMetaAssetReadinessSummary,
+  type MetaAdapter,
+  type MetaAssetReadinessReport,
+} from "@addroid/meta-adapter";
 import { executeActivate } from "./activate-runtime.js";
 import { type LoadedBudgetGuardPolicy, buildBudgetGuardSpendContext } from "./budget-guard-runtime.js";
 import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performance-context.js";
@@ -332,6 +337,7 @@ async function handleAccounts(
           : {}),
       };
     }
+    const readiness = await loadSlackMetaReadiness(deps, accounts);
     const lines = accounts
       .slice(0, 20)
       .map(
@@ -341,15 +347,17 @@ async function handleAccounts(
           (a.modeOverride ? ` mode_override=${a.modeOverride}` : "")
       );
     const more = accounts.length > 20 ? ` (+${accounts.length - 20} more)` : "";
+    const readinessLine = summarizeSlackReadiness(readiness);
     const text = summarizeMessage(
-      `Active ad_accounts (${accounts.length})${more}\n` + lines.join("\n")
+      `Active ad_accounts (${accounts.length})${more}${readinessLine ? `\n${readinessLine}` : ""}\n` +
+        lines.join("\n")
     );
     const url = deepLink(deps, "/accounts");
     return {
       state: "succeeded",
       text,
       ...(url ? { detailUrl: url } : {}),
-      metadata: { count: accounts.length },
+      metadata: { count: accounts.length, assetReadiness: readiness },
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -359,6 +367,33 @@ async function handleAccounts(
       errorCode: "accounts_query_failed",
     };
   }
+}
+
+async function loadSlackMetaReadiness(
+  deps: SlackCommandHandlersDeps,
+  accounts: readonly { key: string; metaAccountId: string | null }[]
+): Promise<MetaAssetReadinessReport[]> {
+  if (typeof deps.metaAdapter.loadAccessTokenPlaintext !== "function") return [];
+  const lease = await deps.metaAdapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease) return [];
+  return await Promise.all(
+    accounts.slice(0, 10).map((account) =>
+      fetchMetaAssetReadiness({
+        accessToken: lease.accessToken,
+        adAccountId: account.metaAccountId ?? account.key,
+        limit: 50,
+      })
+    )
+  );
+}
+
+function summarizeSlackReadiness(readiness: readonly MetaAssetReadinessReport[]): string {
+  if (readiness.length === 0) return "";
+  const blocked = readiness.filter((report) => !report.ok);
+  if (blocked.length > 0) {
+    return `meta_asset_check=attention ${blocked.length}/${readiness.length} ${blocked[0]!.messages[0] ?? formatMetaAssetReadinessSummary(blocked[0]!)}`;
+  }
+  return `meta_asset_check=ok ${readiness.length}/${readiness.length}`;
 }
 
 // ---------------------------------------------------------------------

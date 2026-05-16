@@ -136,16 +136,25 @@ export class FakeGithubPollStore implements GithubPollStore {
   async recordPrApproval(input: RecordPrApprovalInput) {
     this.prApprovals.push(input);
   }
-  async findLatestPrApprovalDecision(input: {
-    pullRequestId: string;
-  }): Promise<
-    "approved" | "rejected" | "auto_blocked" | "auto_approved" | null
-  > {
+  async findLatestPrApproval(input: { pullRequestId: string }) {
     // regression fix: 挿入順 (= createdAt 順) で最後に書かれた行を返す。
     for (let i = this.prApprovals.length - 1; i >= 0; i--) {
       const row = this.prApprovals[i]!;
       if (row.pullRequestId === input.pullRequestId) {
-        return row.decision;
+        const metadata =
+          row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+            ? (row.metadata as Record<string, unknown>)
+            : {};
+        return {
+          id: `approval-${i}`,
+          decision: row.decision,
+          approvedBy: row.approvedBy,
+          headSha: typeof metadata.headSha === "string" ? metadata.headSha : null,
+          decisionSource:
+            typeof metadata.decisionSource === "string"
+              ? metadata.decisionSource
+              : null,
+        };
       }
     }
     return null;
@@ -216,9 +225,8 @@ export class FakeApplyJobStore implements ApplyJobStore {
   contexts = new Map<string, ApplyJobContext>();
   /**
    * regression fix: 実行時 revalidation 用スナップショット。
-   * setContext された apply_job は既定で「merged + protected + auto_approved」と
-   * みなす (= 既存テストの happy path を維持)。stale / unapproved パスを試したい
-   * テストは `setApprovalSnapshot` で上書きする。
+   * setContext された apply_job は既定で「merged + matching accepted approval」と
+   * みなす。stale / unapproved パスを試したいテストは `setApprovalSnapshot` で上書きする。
    */
   approvalSnapshots = new Map<string, ApplyApprovalSnapshot>();
   /** approvalSnapshots を明示的に null に倒すための allow-list。 */
@@ -295,12 +303,14 @@ export class FakeApplyJobStore implements ApplyJobStore {
     if (!this.contexts.has(applyJobId)) return null;
     return {
       pullRequestState: "merged",
-      branchProtectionApplied: true,
-      latestApprovalDecision: "auto_approved",
+      pullRequestHeadSha: "sha-default",
+      latestApprovalDecision: "approved",
       // regression fix: 既定 happy-path snapshot にも approvalRecordId を載せる。
       // 値は apply_job ごとに決定的に組み立てる (テストが context 経由で参照する
       // ことを想定)。明示的に setApprovalSnapshot を呼ぶテストはこの値を上書きする。
       approvalRecordId: `appr-default-${applyJobId}`,
+      approvalRecordHeadSha: "sha-default",
+      approvalDecisionSource: "web_merge",
       mergedAt: new Date("2026-05-01T00:00:00Z"),
     };
   }

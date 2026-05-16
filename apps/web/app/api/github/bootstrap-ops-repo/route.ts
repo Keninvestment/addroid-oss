@@ -74,7 +74,6 @@ export async function POST(request: Request) {
       defaultBranch: result.defaultBranch,
       bootstrappedAt: new Date(result.bootstrappedAt),
       filesCommitted: result.filesCommitted,
-      branchProtectionApplied: result.branchProtectionApplied,
     });
     const checkout = await ensureWebOpsRepoCheckout(ws.id);
     return NextResponse.json({
@@ -83,7 +82,6 @@ export async function POST(request: Request) {
       name: result.name,
       defaultBranch: result.defaultBranch,
       filesCommitted: result.filesCommitted,
-      branchProtectionApplied: result.branchProtectionApplied,
       localDir: checkout.rootDir,
     });
   } catch (err) {

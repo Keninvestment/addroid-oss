@@ -2,6 +2,7 @@ import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import cronParser from "cron-parser";
 import {
   buildAgentContext,
@@ -10,6 +11,11 @@ import {
   type AgentContext,
   type AgentToolResult,
 } from "@addroid/agent-runtime";
+import {
+  fetchMetaAssetReadiness,
+  formatMetaAssetReadinessSummary,
+  type MetaAssetReadinessReport,
+} from "@addroid/meta-adapter";
 import {
   ensureAddroidPaths,
   getCryptoBoundary,
@@ -81,6 +87,10 @@ import {
   enqueueAgentTaskNow,
   scheduleAgentTaskNextRun,
 } from "../../worker/src/lib/agent-task-runtime";
+import {
+  decidePullRequestApproval,
+  type ApprovalDecisionAction,
+} from "../../worker/src/lib/approval-decision-runtime";
 
 export interface WebAgentExecution {
   display: string;
@@ -93,6 +103,7 @@ export interface WebAgentReply {
   ok: boolean;
   message: string;
   executions: WebAgentExecution[];
+  sessionId?: string;
 }
 
 export interface WebAgentChatOptions {
@@ -101,7 +112,33 @@ export interface WebAgentChatOptions {
   auditActor?: string;
   userInput?: string;
   referenceImagePaths?: string[];
+  sessionId?: string;
+  surface?: string;
 }
+
+export interface WebChatSessionSummary {
+  id: string;
+  surface: string;
+  title: string;
+  lastMessage: string;
+  turnCount: number;
+  updatedAt: string;
+}
+
+export interface WebChatSessionMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  executions?: WebAgentExecution[];
+  createdAt: string;
+}
+
+const CHAT_AUDIT_ACTION = "agent.chat";
+const CHAT_AUDIT_ACTIONS = [
+  CHAT_AUDIT_ACTION,
+  "agent.chat_via_web",
+  "agent.chat_via_cli",
+] as const;
 
 export async function runWebAgentChat(
   input: string,
@@ -112,6 +149,8 @@ export async function runWebAgentChat(
     return { ok: false, message: "入力が空です。", executions: [] };
   }
   const workspace = await ensureWebWorkspace();
+  const sessionId = normalizeSessionId(options.sessionId) ?? randomUUID();
+  const surface = normalizeChatSurface(options.surface);
   const selection = await selectLLMProviderForWorker(process.env, { prisma });
   const connection = await selection.provider.getConnection().catch(() => null);
   if (!connection && selection.choice !== "mock") {
@@ -127,7 +166,7 @@ export async function runWebAgentChat(
     ? baseAgentContext
     : appendWebChatMemoryToAgentContext(
         baseAgentContext,
-        await loadWebChatMemory(workspace.id)
+        await loadWebChatMemory(workspace.id, sessionId)
       );
   const executions: WebAgentExecution[] = [];
   let message = "";
@@ -142,7 +181,10 @@ export async function runWebAgentChat(
     );
     executions.push(execution);
     message = execution.message;
-    await recordAgentAudit(workspace.id, options.auditAction ?? "agent.chat_via_web", {
+    await recordAgentAudit(workspace.id, options.auditAction ?? CHAT_AUDIT_ACTION, {
+      sessionId,
+      surface,
+      channel: "web",
       input: userText,
       message,
       executions: executions.map((e) => ({
@@ -155,6 +197,7 @@ export async function runWebAgentChat(
       ok: execution.status === "ok",
       message,
       executions,
+      sessionId,
     };
   }
   const seenTools = new Set<string>();
@@ -192,8 +235,11 @@ export async function runWebAgentChat(
     }
     if (!executedAny) break;
   }
-  await recordAgentAudit(workspace.id, options.auditAction ?? "agent.chat_via_web", {
-    input: text,
+  await recordAgentAudit(workspace.id, options.auditAction ?? CHAT_AUDIT_ACTION, {
+    sessionId,
+    surface,
+    channel: "web",
+    input: userText || text,
     message,
     executions: executions.map((e) => ({
       display: e.display,
@@ -205,6 +251,7 @@ export async function runWebAgentChat(
     ok: executions.every((e) => e.status !== "error" && e.status !== "denied" && e.status !== "unsupported"),
     message,
     executions,
+    sessionId,
   };
 }
 
@@ -215,16 +262,21 @@ interface WebChatMemoryTurn {
   tools: string[];
 }
 
-async function loadWebChatMemory(workspaceId: string): Promise<WebChatMemoryTurn[]> {
+async function loadWebChatMemory(
+  workspaceId: string,
+  sessionId?: string
+): Promise<WebChatMemoryTurn[]> {
   const rows = await prisma.auditLog.findMany({
-    where: { workspaceId, action: "agent.chat_via_web" },
+    where: { workspaceId, action: { in: [...CHAT_AUDIT_ACTIONS] } },
     orderBy: { createdAt: "desc" },
-    take: 8,
-    select: { createdAt: true, metadata: true },
+    take: sessionId ? 500 : 8,
+    select: { id: true, createdAt: true, metadata: true },
   });
   return rows.reverse().flatMap((row) => {
     const metadata = row.metadata;
     if (!isRecord(metadata)) return [];
+    const rowSessionId = readOptionalString(metadata.sessionId) ?? row.id;
+    if (sessionId && rowSessionId !== sessionId) return [];
     const user = readOptionalString(metadata.input);
     if (!user) return [];
     const assistant = readOptionalString(metadata.message) ?? "";
@@ -238,6 +290,88 @@ async function loadWebChatMemory(workspaceId: string): Promise<WebChatMemoryTurn
     });
     return [{ createdAt: row.createdAt, user, assistant, tools }];
   });
+}
+
+export async function listWebChatSessions(input: {
+  surface?: string | null;
+  limit?: number;
+} = {}): Promise<WebChatSessionSummary[]> {
+  const workspace = await ensureWebWorkspace();
+  const surfaceFilter = input.surface ? normalizeChatSurface(input.surface) : null;
+  const rows = await prisma.auditLog.findMany({
+    where: { workspaceId: workspace.id, action: { in: [...CHAT_AUDIT_ACTIONS] } },
+    orderBy: { createdAt: "desc" },
+    take: 300,
+    select: { id: true, createdAt: true, metadata: true },
+  });
+  const sessions = new Map<string, WebChatSessionSummary>();
+  for (const row of rows) {
+    const metadata = row.metadata;
+    if (!isRecord(metadata)) continue;
+    const sessionId = readOptionalString(metadata.sessionId) ?? row.id;
+    const surface = normalizeChatSurface(readOptionalString(metadata.surface));
+    if (surfaceFilter && surface !== surfaceFilter) continue;
+    const inputText = readOptionalString(metadata.input) ?? "";
+    const message = readOptionalString(metadata.message) ?? "";
+    const existing = sessions.get(sessionId);
+    if (!existing) {
+      sessions.set(sessionId, {
+        id: sessionId,
+        surface,
+        title: summarizeChatTitle(inputText || message || "会話"),
+        lastMessage: summarizeChatTitle(message || inputText || "会話"),
+        turnCount: 1,
+        updatedAt: row.createdAt.toISOString(),
+      });
+    } else {
+      existing.turnCount += 1;
+      if (inputText && existing.title === "会話") {
+        existing.title = summarizeChatTitle(inputText);
+      }
+    }
+  }
+  return [...sessions.values()].slice(0, input.limit ?? 30);
+}
+
+export async function loadWebChatSessionMessages(
+  sessionId: string
+): Promise<{ sessionId: string; messages: WebChatSessionMessage[] }> {
+  const workspace = await ensureWebWorkspace();
+  const normalized = normalizeSessionId(sessionId);
+  if (!normalized) throw new Error("sessionId が不正です。");
+  const rows = await prisma.auditLog.findMany({
+    where: { workspaceId: workspace.id, action: { in: [...CHAT_AUDIT_ACTIONS] } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, createdAt: true, metadata: true },
+  });
+  const messages: WebChatSessionMessage[] = [];
+  for (const row of rows) {
+    const metadata = row.metadata;
+    if (!isRecord(metadata)) continue;
+    const rowSessionId = readOptionalString(metadata.sessionId) ?? row.id;
+    if (rowSessionId !== normalized) continue;
+    const user = readOptionalString(metadata.input);
+    const assistant = readOptionalString(metadata.message);
+    const executions = readExecutions(metadata.executions);
+    if (user) {
+      messages.push({
+        id: `${row.id}-user`,
+        role: "user",
+        text: user,
+        createdAt: row.createdAt.toISOString(),
+      });
+    }
+    if (assistant || executions.length > 0) {
+      messages.push({
+        id: `${row.id}-assistant`,
+        role: "assistant",
+        text: assistant ?? "",
+        executions,
+        createdAt: row.createdAt.toISOString(),
+      });
+    }
+  }
+  return { sessionId: normalized, messages };
 }
 
 function appendWebChatMemoryToAgentContext(
@@ -339,6 +473,8 @@ export async function executeWebAgentTool(
         };
       case "propose_ops_change":
         return await proposeOpsChangeTool(workspaceId, tool.toolArgs, tool.display);
+      case "decide_approval":
+        return await decideApprovalTool(workspaceId, tool.toolArgs, tool.display);
       case "propose_creative_submission":
         return await proposeCreativeSubmissionTool(
           workspaceId,
@@ -441,6 +577,37 @@ async function proposeOpsChangeTool(
     display,
     status: "ok",
     message: `GitOps PR #${result.prNumber} を作成しました。人間の承認・merge 後に反映されます。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function decideApprovalTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const prNumber = readRequiredPrNumber(args);
+  const action = normalizeApprovalDecision(args);
+  const mergeMethod = normalizeMergeMethod(args);
+  const selection = await getActiveGithubAdapter();
+  const result = await decidePullRequestApproval({
+    prisma,
+    githubAdapter: selection.adapter,
+    workspaceId,
+    prNumber,
+    action,
+    actor: "agent:web-chat",
+    decisionSource: action === "approve" ? "web_merge" : "web_reject",
+    ...(mergeMethod ? { mergeMethod } : {}),
+    ...(readOptionalString(args.comment) ? { comment: readOptionalString(args.comment)! } : {}),
+  });
+  return {
+    display,
+    status: "ok",
+    message:
+      action === "approve"
+        ? `PR #${result.prNumber} を承認しました。次の確認で反映処理に進みます。`
+        : `PR #${result.prNumber} を否決しました。反映処理は起動しません。`,
     data: result,
   };
 }
@@ -591,13 +758,15 @@ async function listAdAccountsTool(
       currency: true,
     },
   });
+  const assetReadiness = await loadMetaAssetReadiness(accounts);
+  const readinessNote = summarizeReadinessForUser(assetReadiness);
   return {
     display,
     status: "ok",
     message: accounts.length
-      ? `${accounts.length} 件の広告アカウントがあります。`
+      ? `${accounts.length} 件の広告アカウントがあります。${readinessNote ? ` ${readinessNote}` : ""}`
       : "広告アカウントが未登録です。/accounts から接続・同期してください。",
-    data: { accounts },
+    data: { accounts, assetReadiness },
   };
 }
 
@@ -701,18 +870,67 @@ async function syncAdAccountsTool(
     },
     "agent:web-chat"
   );
+  const assetReadiness = await loadMetaAssetReadiness(
+    adAccounts.map((account) => ({
+      metaAccountId: account.metaAccountId,
+      key: account.metaAccountId,
+      displayName: account.name,
+      currency: account.currency ?? null,
+    })),
+    lease.accessToken
+  );
   const defaultMessage =
     defaultSelection === "selected_single"
       ? "1件だけだったため、このアカウントを既定にしました。"
       : defaultSelection === "needs_user_choice"
         ? "複数アカウントがあるため、既定アカウントは自動変更していません。/accounts で選択してください。"
         : "既定アカウントは変更していません。";
+  const readinessNote = summarizeReadinessForUser(assetReadiness);
   return {
     display,
     status: "ok",
-    message: `Meta から広告アカウントを同期しました。取得 ${adAccounts.length} 件、新規 ${registered} 件、更新 ${updated} 件。${defaultMessage}`,
-    data: { businesses, adAccounts, registered, updated, defaultSelection },
+    message: `Meta から広告アカウントを同期しました。取得 ${adAccounts.length} 件、新規 ${registered} 件、更新 ${updated} 件。${defaultMessage}${readinessNote ? ` ${readinessNote}` : ""}`,
+    data: { businesses, adAccounts, registered, updated, defaultSelection, assetReadiness },
   };
+}
+
+async function loadMetaAssetReadiness(
+  accounts: readonly {
+    metaAccountId: string | null;
+    key: string;
+    displayName: string;
+    currency: string | null;
+  }[],
+  accessToken?: string
+): Promise<MetaAssetReadinessReport[]> {
+  const token =
+    accessToken ??
+    (await getActiveMetaAdapter()
+      .then(({ adapter, choice }) =>
+        choice === "stub" ? null : adapter.loadAccessTokenPlaintext()
+      )
+      .then((lease) => lease?.accessToken ?? null)
+      .catch(() => null));
+  if (!token) return [];
+  const reports = accounts
+    .slice(0, 10)
+    .map((account) =>
+      fetchMetaAssetReadiness({
+        accessToken: token,
+        adAccountId: account.metaAccountId ?? account.key,
+        limit: 50,
+      })
+    );
+  return await Promise.all(reports);
+}
+
+function summarizeReadinessForUser(readiness: readonly MetaAssetReadinessReport[]): string {
+  if (readiness.length === 0) return "";
+  const blocked = readiness.filter((report) => !report.ok);
+  if (blocked.length > 0) {
+    return `Meta権限の要確認が ${blocked.length} 件あります: ${blocked[0]!.messages[0] ?? formatMetaAssetReadinessSummary(blocked[0]!)}`;
+  }
+  return `Meta権限チェックは ${readiness.length} 件 OK です。`;
 }
 
 function shouldRefreshDisplayName(account: {
@@ -2169,10 +2387,92 @@ function readOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function normalizeSessionId(value: unknown): string | null {
+  const text = readOptionalString(value);
+  if (!text) return null;
+  return /^[A-Za-z0-9._:-]{6,120}$/.test(text) ? text : null;
+}
+
+function normalizeChatSurface(value: unknown): string {
+  const text = readOptionalString(value);
+  if (!text) return "dashboard";
+  return text.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 80) || "dashboard";
+}
+
+function summarizeChatTitle(value: string): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (!oneLine) return "会話";
+  return oneLine.length <= 64 ? oneLine : `${oneLine.slice(0, 64)}...`;
+}
+
+function readExecutions(value: unknown): WebAgentExecution[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): WebAgentExecution[] => {
+    if (!isRecord(item)) return [];
+    const display = readOptionalString(item.display);
+    const status = readOptionalString(item.status);
+    const message = readOptionalString(item.message);
+    if (
+      !display ||
+      !message ||
+      (status !== "ok" && status !== "error" && status !== "denied" && status !== "unsupported")
+    ) {
+      return [];
+    }
+    return [{ display, status, message }];
+  });
+}
+
 function readRequiredString(value: unknown, key: string): string {
   const text = readOptionalString(value);
   if (!text) throw new Error(`${key} が指定されていません。`);
   return text;
+}
+
+function readRequiredPrNumber(args: Record<string, unknown>): number {
+  const raw = args.prNumber ?? args.pr_number ?? args.number;
+  const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error("prNumber が指定されていません。");
+  }
+  return n;
+}
+
+function normalizeApprovalDecision(args: Record<string, unknown>): ApprovalDecisionAction {
+  const raw =
+    readOptionalString(args.decision) ??
+    readOptionalString(args.action) ??
+    readOptionalString(args.intent);
+  const normalized = raw?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (
+    normalized === "approve" ||
+    normalized === "approved" ||
+    normalized === "承認"
+  ) {
+    return "approve";
+  }
+  if (
+    normalized === "reject" ||
+    normalized === "rejected" ||
+    normalized === "deny" ||
+    normalized === "否決" ||
+    normalized === "却下"
+  ) {
+    return "reject";
+  }
+  throw new Error("decision は approve または reject を指定してください。");
+}
+
+function normalizeMergeMethod(
+  args: Record<string, unknown>
+): "merge" | "squash" | "rebase" | undefined {
+  const raw = readOptionalString(args.mergeMethod) ?? readOptionalString(args.merge_method);
+  if (!raw) return undefined;
+  const normalized = raw.toLowerCase();
+  if (normalized === "merge" || normalized === "squash" || normalized === "rebase") {
+    return normalized;
+  }
+  throw new Error("mergeMethod は merge / squash / rebase のいずれかです。");
 }
 
 function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProposalInput {

@@ -124,6 +124,17 @@ export async function ensureOpsRepoLocalCheckout(opts: {
   if (dirty) {
     return { ...resolved, cloned: false, synced: false };
   }
+  await runGitWithGithubToken(
+    [
+      "-C",
+      resolved.rootDir,
+      "fetch",
+      "origin",
+      branch,
+      "+refs/pull/*/head:refs/remotes/origin/pr/*",
+    ],
+    token
+  );
   await runGitWithGithubToken(["-C", resolved.rootDir, "pull", "--ff-only", "origin", branch], token);
   return { ...resolved, cloned: false, synced: true };
 }

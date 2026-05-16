@@ -251,6 +251,108 @@ test("buildExecutionPlan emits update_campaign when campaign budget changes agai
   assert.equal(plan.findings.length, 0);
 });
 
+test("buildExecutionPlan treats importedExisting campaign/adset as live parents", () => {
+  const brand = brandFor({
+    version: 1,
+    account: { key: "primary", displayName: "Primary" },
+    creatives: [
+      {
+        id: "creative-a",
+        name: "Creative A",
+        mediaType: "text",
+      },
+    ],
+    campaigns: [
+      {
+        id: "120228334025190756",
+        externalId: "120228334025190756",
+        importedExisting: true,
+        name: "Imported Campaign",
+        objective: "OUTCOME_TRAFFIC",
+        initialState: "paused",
+        budget: { dailyBudget: 1 },
+        adsets: [
+          {
+            id: "120228334025180756",
+            externalId: "120228334025180756",
+            importedExisting: true,
+            name: "Imported Adset",
+            targeting: { countries: [] },
+            ads: [
+              {
+                id: "new-ad",
+                name: "New Ad",
+                creativeRef: "creative-a",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const plan = buildExecutionPlan({ account: "primary", next: brand, previous: null });
+  assert.deepEqual(plan.actions.map((a) => a.kind), ["create_creative", "create_ad"]);
+  const ad = plan.actions.find((a): a is CreateAdAction => a.kind === "create_ad")!;
+  assert.equal(ad.campaignId, "120228334025190756");
+  assert.equal(ad.adsetId, "120228334025180756");
+  assert.equal(plan.findings.length, 0, JSON.stringify(plan.findings));
+});
+
+test("buildExecutionPlan can create a new adset under an importedExisting campaign", () => {
+  const brand = brandFor({
+    version: 1,
+    account: { key: "primary", displayName: "Primary" },
+    creatives: [
+      {
+        id: "creative-a",
+        name: "Creative A",
+        mediaType: "text",
+      },
+    ],
+    campaigns: [
+      {
+        id: "120228334025190756",
+        externalId: "120228334025190756",
+        importedExisting: true,
+        name: "Imported Campaign",
+        objective: "OUTCOME_TRAFFIC",
+        initialState: "paused",
+        budget: { dailyBudget: 1 },
+        adsets: [
+          {
+            id: "new-adset",
+            name: "New Adset",
+            optimizationGoal: "LINK_CLICKS",
+            billingEvent: "IMPRESSIONS",
+            budget: { dailyBudget: 500 },
+            targeting: { countries: ["JP"] },
+            ads: [
+              {
+                id: "new-ad",
+                name: "New Ad",
+                creativeRef: "creative-a",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  const plan = buildExecutionPlan({ account: "primary", next: brand, previous: null });
+  assert.deepEqual(plan.actions.map((a) => a.kind), [
+    "create_creative",
+    "create_adset",
+    "create_ad",
+  ]);
+  const adset = plan.actions.find((a): a is CreateAdsetAction => a.kind === "create_adset")!;
+  assert.equal(adset.campaignId, "120228334025190756");
+  assert.equal(adset.adsetId, "new-adset");
+  assert.equal(adset.budget?.dailyBudget, 500);
+  assert.equal(plan.findings.length, 0, JSON.stringify(plan.findings));
+});
+
 test("buildExecutionPlan emits delete_* in dependency-reverse order for a full removal (experiment -> ad -> adset -> campaign -> creative)", () => {
   const previous = brandFor({
     version: 1,

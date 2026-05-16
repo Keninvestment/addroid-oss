@@ -23,6 +23,8 @@
 // 触る純粋境界。git 取得は execFile (引数固定, no shell) を使う。
 
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -63,6 +65,63 @@ async function readGitHeadSha(dir: string): Promise<string | null> {
   }
 }
 
+async function gitCommitExists(dir: string, sha: string): Promise<boolean> {
+  try {
+    await execFileAsync("git", ["-C", dir, "cat-file", "-e", `${sha}^{commit}`], {
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readGitFirstParentSha(dir: string, sha: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", dir, "rev-parse", `${sha}^`], {
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    const parent = stdout.trim().toLowerCase();
+    return isFullSha(parent) ? parent : null;
+  } catch {
+    return null;
+  }
+}
+
+async function materializeGitCommit(dir: string, sha: string): Promise<{
+  dir: string;
+  cleanup: () => Promise<void>;
+}> {
+  const worktreeDir = await fsp.mkdtemp(path.join(os.tmpdir(), "addroid-apply-worktree-"));
+  let added = false;
+  try {
+    await execFileAsync(
+      "git",
+      ["-C", dir, "worktree", "add", "--detach", "--quiet", worktreeDir, sha],
+      { timeout: 30_000, maxBuffer: 1024 * 1024 }
+    );
+    added = true;
+    return {
+      dir: worktreeDir,
+      cleanup: async () => {
+        if (added) {
+          await execFileAsync(
+            "git",
+            ["-C", dir, "worktree", "remove", "--force", worktreeDir],
+            { timeout: 30_000, maxBuffer: 1024 * 1024 }
+          ).catch(() => undefined);
+        }
+        await fsp.rm(worktreeDir, { recursive: true, force: true }).catch(() => undefined);
+      },
+    };
+  } catch (err) {
+    await fsp.rm(worktreeDir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
 export interface LocalDirAdsLoaderOptions {
   /** ops repo の checkout 絶対パス。null/未指定なら "no source" を返す。 */
   localDir: string | null;
@@ -80,6 +139,12 @@ export interface LocalDirAdsLoaderOptions {
    * 呼び出すデフォルト実装を使う。
    */
   readHeadSha?: (dir: string) => Promise<string | null>;
+  commitExists?: (dir: string, sha: string) => Promise<boolean>;
+  readParentSha?: (dir: string, sha: string) => Promise<string | null>;
+  materializeCommit?: (dir: string, sha: string) => Promise<{
+    dir: string;
+    cleanup: () => Promise<void>;
+  }>;
 }
 
 export class LocalDirAdsLoader implements AdsLoader {
@@ -87,12 +152,21 @@ export class LocalDirAdsLoader implements AdsLoader {
   private readonly baseDir: string | null;
   private readonly expectedRepoId: string | null;
   private readonly readHeadSha: (dir: string) => Promise<string | null>;
+  private readonly commitExists: (dir: string, sha: string) => Promise<boolean>;
+  private readonly readParentSha: (dir: string, sha: string) => Promise<string | null>;
+  private readonly materializeCommit: (
+    dir: string,
+    sha: string
+  ) => Promise<{ dir: string; cleanup: () => Promise<void> }>;
 
   constructor(opts: LocalDirAdsLoaderOptions) {
     this.localDir = opts.localDir;
     this.baseDir = opts.baseDir ?? null;
     this.expectedRepoId = opts.expectedRepoId ?? null;
     this.readHeadSha = opts.readHeadSha ?? readGitHeadSha;
+    this.commitExists = opts.commitExists ?? gitCommitExists;
+    this.readParentSha = opts.readParentSha ?? readGitFirstParentSha;
+    this.materializeCommit = opts.materializeCommit ?? materializeGitCommit;
   }
 
   async loadForApply(input: AdsLoaderInput): Promise<AdsLoadResult> {
@@ -123,8 +197,9 @@ export class LocalDirAdsLoader implements AdsLoader {
         accounts: [],
       };
     }
-    // 2) headSha guard: localDir の git HEAD が approved PR の headSha と
-    //    一致しない場合は stale/未同期とみなし fail-closed。
+    // 2) headSha guard: approved PR の headSha と一致する tree だけを load する。
+    //    merge commit 方式では main の HEAD と PR headSha が一致しないため、
+    //    commit object がローカルにある場合は一時 worktree で承認済み head そのものを読む。
     if (!isFullSha(context.headSha)) {
       return {
         source: "unavailable",
@@ -140,43 +215,69 @@ export class LocalDirAdsLoader implements AdsLoader {
         accounts: [],
       };
     }
-    if (head !== context.headSha.toLowerCase()) {
-      return {
-        source: "unavailable",
-        detail: `local checkout HEAD (${head}) does not match approved PR headSha (${context.headSha}) for pr#${context.prNumber}; refusing to apply stale ops repo state.`,
-        accounts: [],
-      };
+    const approvedHead = context.headSha.toLowerCase();
+    let loadDir = this.localDir;
+    let cleanup: (() => Promise<void>) | null = null;
+    let previousDir = this.baseDir;
+    let previousCleanup: (() => Promise<void>) | null = null;
+    if (head !== approvedHead) {
+      if (!(await this.commitExists(this.localDir, approvedHead))) {
+        return {
+          source: "unavailable",
+          detail: `local checkout HEAD (${head}) does not match approved PR headSha (${context.headSha}) for pr#${context.prNumber}, and the approved commit is not available locally; refusing to apply stale ops repo state.`,
+          accounts: [],
+        };
+      }
+      const materialized = await this.materializeCommit(this.localDir, approvedHead);
+      loadDir = materialized.dir;
+      cleanup = materialized.cleanup;
+    }
+    if (!previousDir) {
+      const parentSha = await this.readParentSha(this.localDir, approvedHead);
+      if (parentSha && (await this.commitExists(this.localDir, parentSha))) {
+        const previous = await this.materializeCommit(this.localDir, parentSha);
+        previousDir = previous.dir;
+        previousCleanup = previous.cleanup;
+      }
     }
     // 3) 検証済 — 既存の YAML loader でロード。
-    const validation = loadAndValidateOpsRepo(this.localDir);
-    if (!validation.ok) {
+    try {
+      const validation = loadAndValidateOpsRepo(loadDir);
+      if (!validation.ok) {
+        return {
+          source: "unavailable",
+          detail: `ops repo at ${loadDir} failed validation (${validation.errors.length} errors)`,
+          accounts: [],
+        };
+      }
+      const previous =
+        previousDir && fs.existsSync(previousDir)
+          ? loadPreviousOpsRepoState(previousDir)
+          : null;
+      const accounts: AccountAdsState[] = validation.loaded.brands.map((b) => ({
+        accountKey: b.accountKey,
+        next: b.brand,
+        previous: previous?.brands.get(b.accountKey) ?? null,
+      }));
+      if (accounts.length === 0) {
+        return {
+          source: "unavailable",
+          detail: `${path.join(loadDir, DEFAULT_OPS_REPO_LAYOUT.accountsDir)} has no accounts`,
+          accounts: [],
+        };
+      }
       return {
-        source: "unavailable",
-        detail: `ops repo at ${this.localDir} failed validation (${validation.errors.length} errors)`,
-        accounts: [],
+        source: "local_dir",
+        detail:
+          head === approvedHead
+            ? `loaded ${accounts.length} account(s) from ${this.localDir} @ ${head}`
+            : `loaded ${accounts.length} account(s) from approved PR head ${approvedHead} using local checkout ${this.localDir} @ ${head}`,
+        accounts,
       };
+    } finally {
+      await cleanup?.();
+      await previousCleanup?.();
     }
-    const previous =
-      this.baseDir && fs.existsSync(this.baseDir)
-        ? loadPreviousOpsRepoState(this.baseDir)
-        : null;
-    const accounts: AccountAdsState[] = validation.loaded.brands.map((b) => ({
-      accountKey: b.accountKey,
-      next: b.brand,
-      previous: previous?.brands.get(b.accountKey) ?? null,
-    }));
-    if (accounts.length === 0) {
-      return {
-        source: "unavailable",
-        detail: `${path.join(this.localDir, DEFAULT_OPS_REPO_LAYOUT.accountsDir)} has no accounts`,
-        accounts: [],
-      };
-    }
-    return {
-      source: "local_dir",
-      detail: `loaded ${accounts.length} account(s) from ${this.localDir} @ ${head}`,
-      accounts,
-    };
   }
 }
 
