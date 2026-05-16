@@ -110,6 +110,7 @@ export default async function CronSchedulesPage() {
   const dbByName = new Map(registered.map((r) => [r.name, r]));
   const userVisiblePresets = CRON_PRESETS.filter((preset) =>
     [
+      "github_poll",
       "daily_report",
       "today_report",
       "budget_guard",
