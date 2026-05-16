@@ -27,7 +27,7 @@ jobs:
           set -euo pipefail
           mkdir -p .addroid-ci-deps
           cd .addroid-ci-deps
-          npm init -y >/dev/null
+          printf '{"name":"addroid-ci-deps","private":true}\n' > package.json
           npm install --no-audit --no-fund --silent js-yaml@4.1.0
       - name: Structural check (project.yaml, cron.yaml, brand.yaml)
         env:

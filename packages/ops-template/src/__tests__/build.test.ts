@@ -116,6 +116,8 @@ test("buildOpsTemplate workflow runs a self-contained structural check without d
     "workflow must not depend on resolving the private @addroid/cli package via npx"
   );
   assert.match(wf!.content, /js-yaml@/);
+  assert.match(wf!.content, /"name":"addroid-ci-deps"/);
+  assert.equal(wf!.content.includes("npm init -y"), false);
   assert.match(wf!.content, /Structural check \(project\.yaml, cron\.yaml, brand\.yaml\)/);
   assert.match(wf!.content, /\.addroid\/project\.yaml/);
   assert.match(wf!.content, /workflows\/cron\.yaml/);
