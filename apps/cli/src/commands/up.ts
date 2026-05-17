@@ -15,6 +15,7 @@
 //   - SIGINT/SIGTERM で graceful にツリー shutdown
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -65,7 +66,7 @@ type NextFactory = (opts: {
 // regression fix: worker / next の解決経路を関数に切り出し、E2E ハーネスから
 // `ADDROID_TEST_WORKER_RUNTIME_PATH` / `ADDROID_TEST_NEXT_FACTORY_PATH` 経由で
 // 差し替え可能にする。本番経路 (= env が未設定) では the current implementation の既定パス
-// (apps/worker/src/runtime.ts と `next` パッケージ) が解決される。これにより
+// (apps/worker/src/runtime.ts と apps/web 側の `next` パッケージ) が解決される。これにより
 // 「`addroid up` が preflight 通過後に worker を起動 → pid file 書き出し →
 // SIGTERM で worker.stop + cleanup」までを自動 smoke test で踏める。
 async function loadWorkerRuntimeModule(repoRoot: string): Promise<WorkerRuntimeModule> {
@@ -87,7 +88,7 @@ async function loadWorkerRuntimeModule(repoRoot: string): Promise<WorkerRuntimeM
   }
 }
 
-async function loadNextFactory(): Promise<NextFactory> {
+async function loadNextFactory(webDir: string): Promise<NextFactory> {
   const override = process.env.ADDROID_TEST_NEXT_FACTORY_PATH?.trim();
   if (override) {
     const url = pathToFileURL(path.resolve(override)).href;
@@ -95,7 +96,9 @@ async function loadNextFactory(): Promise<NextFactory> {
     const factory = (mod.default ?? (mod as unknown as NextFactory)) as NextFactory;
     return factory;
   }
-  const nextModule = (await import("next")) as typeof import("next");
+  const requireFromWeb = createRequire(path.join(webDir, "package.json"));
+  const nextEntry = requireFromWeb.resolve("next");
+  const nextModule = (await import(pathToFileURL(nextEntry).href)) as typeof import("next");
   const factory =
     (nextModule as unknown as { default?: typeof nextModule }).default ?? nextModule;
   return factory as unknown as NextFactory;
@@ -301,9 +304,7 @@ async function runShared(ctx: SharedContext): Promise<number> {
   // 2) Next.js を programmatic に起動 (apps/web をルートに)
   try {
     const webDir = path.join(ctx.repoRoot, "apps/web");
-    // 注: `next` は @addroid/web の依存として root node_modules に hoist される。
-    // CLI から直接 await import('next') すれば同じインスタンスが解決される。
-    const nextFactory = await loadNextFactory();
+    const nextFactory = await loadNextFactory(webDir);
     const dev = process.env.NODE_ENV !== "production";
     const app = nextFactory({
       dev,
@@ -564,7 +565,7 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
   // 2) Next.js を programmatic に in-process で起動
   try {
     const webDir = path.join(ctx.repoRoot, "apps/web");
-    const nextFactory = await loadNextFactory();
+    const nextFactory = await loadNextFactory(webDir);
     const dev = process.env.NODE_ENV !== "production";
     const app = nextFactory({
       dev,
