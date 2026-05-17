@@ -817,6 +817,11 @@ test('extractExternalIdFromCliStdout: regex fallback recognizes "id":"..." insid
   assert.equal(extractExternalIdFromCliStdout(stdout), "act_1/cmp_42");
 });
 
+test("extractExternalIdFromCliStdout: extracts id from Meta CLI table stdout", () => {
+  const stdout = "ID                \n------------------\n120244589795090756\n";
+  assert.equal(extractExternalIdFromCliStdout(stdout), "120244589795090756");
+});
+
 test("extractExternalIdFromCliStdout: empty / non-id stdout yields undefined (caller fails closed)", () => {
   assert.equal(extractExternalIdFromCliStdout(""), undefined);
   assert.equal(extractExternalIdFromCliStdout("\n\n"), undefined);

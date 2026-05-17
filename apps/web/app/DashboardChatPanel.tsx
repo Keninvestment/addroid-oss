@@ -54,6 +54,8 @@ interface DashboardChatPanelProps {
   allowAttachments?: boolean;
   initialInput?: string;
   surface?: string;
+  startNewSession?: boolean;
+  sessionResetKey?: string;
 }
 
 export function DashboardChatPanel({
@@ -67,18 +69,24 @@ export function DashboardChatPanel({
   allowAttachments = false,
   initialInput,
   surface = "dashboard",
+  startNewSession = true,
+  sessionResetKey = "",
 }: DashboardChatPanelProps) {
   const toast = useToast();
   const [input, setInput] = useState(initialInput ?? "");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [files, setFiles] = useState<File[]>([]);
-  const [sessionId, setSessionId] = useState(() => readOrCreateSessionId(surface));
+  const [sessionId, setSessionId] = useState("");
   const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
   const composingRef = useRef(false);
   const suppressNextEnterRef = useRef(false);
   const latestMessageRef = useRef<HTMLDivElement | null>(null);
-  const initialSessionLoadedRef = useRef(false);
+  const sessionIdRef = useRef("");
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   const suggestions = useMemo(() => {
     const needle = input.trim();
@@ -95,7 +103,7 @@ export function DashboardChatPanel({
 
   const loadSession = useCallback(
     async (nextSessionId: string, options?: { force?: boolean }) => {
-      if (!nextSessionId || (!options?.force && nextSessionId === sessionId)) return;
+      if (!nextSessionId || (!options?.force && nextSessionId === sessionIdRef.current)) return;
       const res = await fetch(`/api/chat?sessionId=${encodeURIComponent(nextSessionId)}`);
       const body = (await res.json().catch(() => ({}))) as {
         messages?: Array<Message & { createdAt?: string }>;
@@ -109,6 +117,7 @@ export function DashboardChatPanel({
         });
         return;
       }
+      sessionIdRef.current = nextSessionId;
       setSessionId(nextSessionId);
       window.localStorage.setItem(storageKey(surface), nextSessionId);
       setMessages(
@@ -120,15 +129,37 @@ export function DashboardChatPanel({
         }))
       );
     },
-    [sessionId, surface, toast]
+    [surface, toast]
   );
 
   useEffect(() => {
-    if (initialSessionLoadedRef.current || !sessionId) return;
-    initialSessionLoadedRef.current = true;
-    void refreshSessions();
-    void loadSession(sessionId, { force: true });
-  }, [loadSession, refreshSessions, sessionId]);
+    let cancelled = false;
+    const nextSessionId = startNewSession ? makeId() : readOrCreateSessionId(surface);
+    sessionIdRef.current = nextSessionId;
+    window.localStorage.setItem(storageKey(surface), nextSessionId);
+    window.queueMicrotask(() => {
+      if (cancelled) return;
+      setSessionId(nextSessionId);
+      setMessages([]);
+      setFiles([]);
+      setInput(initialInput ?? "");
+    });
+    window.queueMicrotask(() => {
+      if (cancelled) return;
+      void refreshSessions();
+      if (!startNewSession) void loadSession(nextSessionId, { force: true });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    initialInput,
+    loadSession,
+    refreshSessions,
+    sessionResetKey,
+    startNewSession,
+    surface,
+  ]);
 
   useEffect(() => {
     const target = latestMessageRef.current;
@@ -152,6 +183,7 @@ export function DashboardChatPanel({
     setInput("");
     setFiles([]);
     setBusy(true);
+    const activeSessionId = sessionIdRef.current || sessionId;
     const fileSummary = files.length > 0 ? `\n添付: ${files.map((f) => f.name).join(", ")}` : "";
     setMessages((prev) => [
       ...prev,
@@ -162,7 +194,7 @@ export function DashboardChatPanel({
         input: text,
         contextPrefix,
         files,
-        sessionId,
+        sessionId: activeSessionId,
         surface,
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
@@ -185,6 +217,7 @@ export function DashboardChatPanel({
         },
       ]);
       if (body.sessionId && body.sessionId !== sessionId) {
+        sessionIdRef.current = body.sessionId;
         setSessionId(body.sessionId);
         window.localStorage.setItem(storageKey(surface), body.sessionId);
       }
@@ -223,6 +256,7 @@ export function DashboardChatPanel({
               const value = e.target.value;
               if (value === "__new__") {
                 const next = makeId();
+                sessionIdRef.current = next;
                 setSessionId(next);
                 setMessages([]);
                 window.localStorage.setItem(storageKey(surface), next);

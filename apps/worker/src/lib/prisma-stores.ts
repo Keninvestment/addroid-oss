@@ -457,6 +457,7 @@ export function createGithubPollStore(prisma: PrismaClient): GithubPollStore {
         decision: normalized,
         approvedBy: latest.approvedBy,
         headSha: readJsonString(metadata.headSha),
+        mergeSha: readJsonString(metadata.mergeSha),
         decisionSource: readJsonString(metadata.decisionSource),
       };
     },
@@ -578,6 +579,7 @@ export function createApplyJobStore(
         latestApprovalDecision,
         approvalRecordId: latest?.id ?? null,
         approvalRecordHeadSha: readJsonString(readJsonObject(latest?.metadata).headSha),
+        approvalRecordMergeSha: readJsonString(readJsonObject(latest?.metadata).mergeSha),
         approvalDecisionSource: readJsonString(
           readJsonObject(latest?.metadata).decisionSource
         ),

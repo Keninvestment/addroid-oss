@@ -461,30 +461,27 @@ export default async function CreativeDetailPage({
           title="入稿PR"
           subtitle="この生成クリエイティブを GitOps PR にして、承認後にMetaへ反映"
         >
-          {row.pullRequest ? (
-            <EmptyState
-              title="すでにPRに紐づいています"
-              description={
-                <>
-                  PR #{row.pullRequest.number}
-                  {row.pullRequest.htmlUrl ? (
-                    <>
-                      :{" "}
-                      <a href={row.pullRequest.htmlUrl} target="_blank" rel="noreferrer">
-                        GitHubで確認
-                      </a>
-                    </>
-                  ) : null}
-                </>
-              }
-            />
-          ) : row.status === "qa_failed" ? (
+          {row.status === "qa_failed" ? (
             <EmptyState
               title="QA failed のためPR化できません"
               description="別variantを選ぶか、再生成してから入稿PRに回してください。"
             />
           ) : (
             <div className="creative-promotion-chat">
+              {row.pullRequest ? (
+                <p style={{ margin: 0, color: "var(--color-text-secondary)" }}>
+                  前回の入稿PR: PR #{row.pullRequest.number}
+                  {row.pullRequest.htmlUrl ? (
+                    <>
+                      {" "}
+                      <a href={row.pullRequest.htmlUrl} target="_blank" rel="noreferrer">
+                        GitHubで確認
+                      </a>
+                    </>
+                  ) : null}
+                  。同じCreativeを別キャンペーンや2回目の入稿に再利用できます。
+                </p>
+              ) : null}
               <DashboardChatPanel
                 surface={`creative-detail:${row.id}`}
                 title="入稿PRチャット"
@@ -507,10 +504,12 @@ export default async function CreativeDetailPage({
                   `status=${row.status}`,
                   `mediaType=${row.mediaType}`,
                   row.storagePath ? "hasMedia=true" : "hasMedia=false",
+                  row.pullRequest ? `previousSubmissionPr=${row.pullRequest.number}` : "previousSubmissionPr=false",
                   spec.adText?.headline ? `headline=${spec.adText.headline}` : null,
                   spec.adText?.primaryText ? `primaryText=${spec.adText.primaryText}` : null,
                   spec.adText?.description ? `description=${spec.adText.description}` : null,
                   spec.adText?.callToAction ? `callToAction=${spec.adText.callToAction}` : null,
+                  "このCreativeが過去の入稿PRに紐づいていても、別キャンペーンや2回目の入稿として再度PR化できます。",
                   "不足している placement、campaignId/adsetId、campaignName/adsetName、objective、予算、pageId、対応済み optimizationGoal、billingEvent、linkUrl、国ターゲティングはツール実行前に短く質問してください。",
                   "Meta へ直接変更せず、必ず GitOps PR と dry-run の経路を使ってください。",
                 ].filter(Boolean).join("\n")}

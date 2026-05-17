@@ -2243,6 +2243,7 @@ function printHelp() {
       "",
       "Notes:",
       "  - Meta の標準経路は Access Token 入力です。HTTPS callback URL は不要です。",
+      "  - 本番入稿には、token 発行元 Meta App の Privacy Policy URL 設定と Live / 公開モードが必要です。",
       "  - token 入力後は取得できた Ad Account を ad_accounts に同期し、CLI で既定アカウントを選択できます。",
       "  - OAuth callback は `addroid auth meta --oauth` の上級者向け経路として残しています。",
       "  - GitHub は CLI では GitHub CLI browser flow または Device Flow、Web UI では既存の OAuth Code Flow を使います。どちらも provider=github として暗号化保存します。",

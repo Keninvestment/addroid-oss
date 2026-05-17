@@ -150,7 +150,7 @@ export const AGENT_TOOL_MANIFEST = [
     effects: ["gitops-pr"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
     guidance:
-      "Use this for any production mutation intent. For 'CV0 campaign を停止', first inspect read-only data, then create a PR with intent:'pause' and campaign targets. Human merge is required.",
+      "Use this for any production mutation intent. For 'CV0 campaign を停止', first inspect read-only data, then create a PR with intent:'pause' and campaign targets. For budget_change, inspect the current campaign and adset budget fields first, then set targets with an explicit level:'campaign' or level:'adset'. If the user says campaign but the spend limit lives on an adset, target the adset; if campaign/adset budget ownership is unclear, ask before creating the PR. Human merge is required.",
   },
   {
     name: "decide_approval",

@@ -231,7 +231,7 @@ export function normalizeCreativeGenerationInput(args: Record<string, unknown>):
     accountKey: readString(args.accountKey) ?? undefined,
     prompt: readString(args.prompt) ?? undefined,
     creativeName: readString(args.creativeName) ?? undefined,
-    linkUrl: readString(args.linkUrl) ?? undefined,
+    linkUrl: readString(args.linkUrl ?? args.destinationUrl) ?? undefined,
     destinationUrl: readString(args.destinationUrl) ?? undefined,
     referenceImagePaths: readStringArray(args.referenceImagePaths),
     variantCount: readPositiveInteger(args.variantCount) ?? undefined,
@@ -941,7 +941,7 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     pageId: readString(args.pageId) ?? undefined,
     title: readString(args.title) ?? undefined,
     body: readString(args.body) ?? undefined,
-    linkUrl: readString(args.linkUrl) ?? undefined,
+    linkUrl: readString(args.linkUrl ?? args.destinationUrl) ?? undefined,
     description: readString(args.description) ?? undefined,
     instagramUserId: readString(args.instagramUserId) ?? undefined,
     images: readStringArray(args.images),
@@ -1034,6 +1034,11 @@ function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
   if (!input.headline && !input.primaryText && !input.prompt) {
     throw new Error("見出し、本文、または生成プロンプトのいずれかが必要です。");
   }
+  if (requiresDestinationUrlForCurrentCreativeApply(input) && !input.linkUrl) {
+    throw new Error(
+      "現在の Meta Ads CLI / Graph apply で反映できるクリエイティブ形式はリンク広告として作成するため、linkUrl または destinationUrl が必要です。キャンペーン種別ではなく、入稿するクリエイティブ形式に対する必須項目です。"
+    );
+  }
   if (input.campaignId) {
     if (input.adsetId) {
       return;
@@ -1058,6 +1063,22 @@ function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
       "新規キャンペーンから入稿するには campaignName、adsetName、objective、dailyBudget または lifetimeBudget が必要です。予算は広告アカウント通貨の金額で指定してください。既存キャンペーン配下に入れる場合は campaignId と adsetName、既存広告セットに入れる場合は campaignId と adsetId を指定してください。"
     );
   }
+}
+
+function requiresDestinationUrlForCurrentCreativeApply(input: CreativeSubmissionInput): boolean {
+  if (input.mediaType === "image" || input.mediaType === "video" || input.mediaType === "carousel") return true;
+  if ((input.localMediaPaths?.length ?? 0) > 0 || (input.uploadedMedia?.length ?? 0) > 0) return true;
+  if (input.generateImage === true) return true;
+  if ((input.images?.length ?? 0) > 0 || (input.videos?.length ?? 0) > 0) return true;
+  if (
+    (input.titles?.length ?? 0) > 0 ||
+    (input.bodies?.length ?? 0) > 0 ||
+    (input.descriptions?.length ?? 0) > 0 ||
+    (input.callToActions?.length ?? 0) > 0
+  ) {
+    return true;
+  }
+  return Boolean(input.callToAction && input.callToAction !== "NO_BUTTON");
 }
 
 async function loadCreativeContextForSubmission(

@@ -131,6 +131,13 @@ App ID / App Secret だけでは広告アカウントの読み書きはできま
 AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。AdDroid は token
 入力後に取得できる Ad Account を表示し、利用するアカウントを選択します。
 
+本番の広告入稿まで行う場合は、token 発行元の Meta App も本番利用できる状態にしておく
+必要があります。AdDroid 自体は localhost-only のままで構いませんが、Meta App の
+**App settings > Basic** に、外部から開ける **Privacy Policy URL** を設定し、必要に
+応じてデータ削除方法の URL / 説明も設定してください。そのうえで App Mode を
+**Live / 公開** にします。App が Development / 開発モードのままだと、token 登録や
+アカウント一覧取得は通っても、Apply 時の creative 作成で Meta API が拒否することがあります。
+
 公式リンク:
 
 - [Meta for Developers](https://developers.facebook.com/)
@@ -146,17 +153,19 @@ AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。
 
 1. [Meta for Developers](https://developers.facebook.com/) にログインし、必要なら開発者登録を完了します。
 2. [Apps dashboard](https://developers.facebook.com/apps/) で **Create app** を押し、app type は **Business** を選びます。作成後に App ID が確認できれば、AdDroid 用には基本的に十分です。画面に **Marketing API** の追加や設定が表示される場合だけ有効化してください。
-3. [Meta Business Settings](https://business.facebook.com/settings) を開き、広告アカウントを管理している Business Portfolio を選びます。
-4. **Users > System Users** で System User を作成します。長期運用では、個人ユーザーの token ではなく System User Access Token を使います。
-5. 作成した System User を選び、**Add Assets** から次の asset を割り当てます。
+3. 作成した App の **App settings > Basic** を開き、Privacy Policy URL を設定します。店舗・会社サイトのプライバシーポリシーページなど、Meta からもブラウザからも開ける URL を使ってください。Meta の画面でデータ削除方法の URL / 説明を求められた場合も同じ画面で設定します。
+4. 同じ App で **App Mode** を **Live / 公開** にします。公開できない場合は、Privacy Policy URL、連絡先メール、必要な基本項目が保存されているか確認してください。開発モードのまま発行した token は、後続の広告 creative 作成で拒否されることがあります。
+5. [Meta Business Settings](https://business.facebook.com/settings) を開き、広告アカウントを管理している Business Portfolio を選びます。
+6. **Users > System Users** で System User を作成します。長期運用では、個人ユーザーの token ではなく System User Access Token を使います。
+7. 作成した System User を選び、**Add Assets** から次の asset を割り当てます。
    - **Ad Account**: AdDroid で連携・入稿・レポート取得する広告アカウント。広告の作成・更新まで行う場合は Admin / Full control 相当を付与します。
    - **Facebook Page**: 出稿に使うページ。Page 紐付けが必要な広告・creative を扱う場合に必要です。
    - **Instagram Account**: Instagram 配信やInstagram連携creativeを使う場合に必要です。
-   - **App**: 手順 2 で作成した Business App。token 発行時に選択します。
-6. System User を選んだ状態で **Generate New Token** を押し、手順 2 の Business App を選択します。
-7. Permission / scope は、`ads_read`, `ads_management`, `business_management` を選びます。AdDroid は広告アカウント一覧の取得、入稿操作、Business 配下の資産確認にこれらを使います。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
-8. 表示された token は、その画面を離れると再表示できない前提で安全な場所に一時保管します。AdDroid へ登録した後は、平文を共有・コミットしないでください。
-9. `addroid init` の対話セットアップ中に Meta アカウント連携まで進みます。スキップした場合だけ、後から次を実行してください。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
+   - **App**: 手順 2 で作成し、手順 3-4 で本番利用できる状態にした Business App。token 発行時に選択します。
+8. System User を選んだ状態で **Generate New Token** を押し、手順 2 の Business App を選択します。
+9. Permission / scope は、`ads_read`, `ads_management`, `business_management` を選びます。AdDroid は広告アカウント一覧の取得、入稿操作、Business 配下の資産確認にこれらを使います。Meta の System User token は非期限 token と 60 日期限 token を選べます。漏えい時のリスクを抑えたい場合は 60 日期限 token を選び、定期的に再発行してください。
+10. 表示された token は、その画面を離れると再表示できない前提で安全な場所に一時保管します。AdDroid へ登録した後は、平文を共有・コミットしないでください。
+11. `addroid init` の対話セットアップ中に Meta アカウント連携まで進みます。スキップした場合だけ、後から次を実行してください。token 入力後、AdDroid が取得できる Ad Account を表示するので、利用するアカウントを選択してください。
 
 ```bash
 addroid connect meta

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { LocalDiskStorage } from "@addroid/config";
 import { Prisma, type PrismaClient } from "@addroid/db";
 import type { GithubAdapter } from "@addroid/github-adapter";
@@ -74,10 +75,6 @@ export async function createCreativePromotionProposal(opts: {
   if (sourceCreative.status === "qa_failed") {
     throw new Error("QA failed の生成クリエイティブは入稿PRに回せません。別案を選ぶか再生成してください。");
   }
-  if (sourceCreative.pullRequestId) {
-    const suffix = sourceCreative.pullRequest?.htmlUrl ? `: ${sourceCreative.pullRequest.htmlUrl}` : "";
-    throw new Error(`この Creative はすでに PR #${sourceCreative.pullRequest?.number ?? "unknown"} に紐づいています${suffix}`);
-  }
 
   const adText = parseCreativeAdText(sourceCreative.spec);
   const uploadedMedia = await loadSourceCreativeMedia({
@@ -85,11 +82,20 @@ export async function createCreativePromotionProposal(opts: {
     mediaType: sourceCreative.mediaType,
     env,
   });
+  const promotionAttemptId = makePromotionAttemptId();
+  const promotedCreativeName = withPromotionAttemptSuffix(
+    opts.input.creativeName ?? sourceCreative.displayName ?? sourceCreative.key,
+    promotionAttemptId
+  );
+  const promotedAdName = withPromotionAttemptSuffix(
+    opts.input.adName ?? `${sourceCreative.displayName ?? sourceCreative.key} ad`,
+    promotionAttemptId
+  );
   const submissionInput: CreativeSubmissionInput = {
     ...opts.input,
     accountKey: opts.input.accountKey ?? sourceCreative.account.key,
-    creativeName: opts.input.creativeName ?? sourceCreative.displayName ?? sourceCreative.key,
-    adName: opts.input.adName ?? `${sourceCreative.displayName ?? sourceCreative.key} ad`,
+    creativeName: promotedCreativeName,
+    adName: promotedAdName,
     prompt: sourceCreative.prompt ?? undefined,
     headline: opts.input.headline ?? adText?.headline ?? undefined,
     primaryText: opts.input.primaryText ?? adText?.primaryText ?? undefined,
@@ -113,19 +119,20 @@ export async function createCreativePromotionProposal(opts: {
     llmProvider: opts.llmProvider ?? null,
   });
 
+  const promotedAt = new Date().toISOString();
+  const promotionRecord = {
+    prNumber: result.prNumber,
+    pullRequestId: result.pullRequestId,
+    submissionCreativeId: result.creativeId,
+    submissionAdId: result.adId,
+    promotedAt,
+  };
   await opts.prisma.creative.update({
     where: { id: sourceCreative.id },
     data: {
       pullRequestId: result.pullRequestId,
       status: "attached_to_pr",
-      parameters: mergeJsonObject(jsonObject(sourceCreative.parameters), {
-        promotedToSubmissionPr: {
-          prNumber: result.prNumber,
-          pullRequestId: result.pullRequestId,
-          submissionCreativeId: result.creativeId,
-          promotedAt: new Date().toISOString(),
-        },
-      }) as Prisma.InputJsonValue,
+      parameters: appendPromotionHistory(sourceCreative.parameters, promotionRecord) as Prisma.InputJsonValue,
     },
   });
   await opts.prisma.auditLog.create({
@@ -140,8 +147,10 @@ export async function createCreativePromotionProposal(opts: {
         accountKey: submissionInput.accountKey,
         sourceCreativeId: sourceCreative.id,
         submissionCreativeId: result.creativeId,
+        submissionAdId: result.adId,
         pullRequestId: result.pullRequestId,
         prNumber: result.prNumber,
+        previousPullRequestId: sourceCreative.pullRequestId,
         mediaType: result.mediaType,
       } as Prisma.InputJsonValue,
     },
@@ -260,8 +269,55 @@ function mergeJsonObject(base: Record<string, unknown>, extra: Record<string, un
   return { ...base, ...extra };
 }
 
+function appendPromotionHistory(
+  parameters: unknown,
+  record: Record<string, unknown>
+): Record<string, unknown> {
+  const base = jsonObject(parameters);
+  const existingHistory = Array.isArray(base.promotedToSubmissionPrHistory)
+    ? base.promotedToSubmissionPrHistory.filter(isRecord)
+    : [];
+  const legacyLatest = isRecord(base.promotedToSubmissionPr) ? [base.promotedToSubmissionPr] : [];
+  return mergeJsonObject(base, {
+    promotedToSubmissionPr: record,
+    promotedToSubmissionPrHistory: uniquePromotionHistory([...existingHistory, ...legacyLatest, record]).slice(-50),
+  });
+}
+
+function uniquePromotionHistory(items: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Set<string>();
+  const history: Record<string, unknown>[] = [];
+  for (const item of items) {
+    const key = promotionHistoryKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    history.push(item);
+  }
+  return history;
+}
+
+function promotionHistoryKey(item: Record<string, unknown>): string {
+  const pullRequestId = readString(item.pullRequestId);
+  if (pullRequestId) return `pullRequestId:${pullRequestId}`;
+  const submissionCreativeId = readString(item.submissionCreativeId);
+  if (submissionCreativeId) return `submissionCreativeId:${submissionCreativeId}`;
+  if (typeof item.prNumber === "number" && Number.isFinite(item.prNumber)) {
+    return `prNumber:${item.prNumber}`;
+  }
+  return JSON.stringify(item);
+}
+
 function jsonObject(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
+}
+
+function makePromotionAttemptId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 8);
+}
+
+function withPromotionAttemptSuffix(value: string, attemptId: string): string {
+  const base = value.trim() || "creative";
+  return `${base} submission ${attemptId}`;
 }
 
 async function loadSourceCreativeMedia(input: {

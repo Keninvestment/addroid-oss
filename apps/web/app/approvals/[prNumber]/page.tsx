@@ -35,6 +35,25 @@ interface ApprovalRow {
   decisionSource: string | null;
 }
 
+interface ApplyJobRow {
+  id: string;
+  state: string;
+  enqueuedAt: Date;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  jobId: string | null;
+  errorMessage: string | null;
+}
+
+interface ExecutionLogRow {
+  id: string;
+  createdAt: Date;
+  level: string;
+  message: string;
+  refId: string | null;
+  payload: unknown;
+}
+
 // regression fix: github_pull_requests.filesChangedJson の正規化済み shape。
 // publisher 側 (apps/worker/src/lib/improvement-pr-runtime.ts の
 // summarizeFilesForPreview) が書き込む形と一対一で対応する。
@@ -107,6 +126,46 @@ function approvalState(decision: string | null): StatusState {
   return "warn";
 }
 
+function applyJobState(state: string | null): StatusState {
+  if (state === "succeeded" || state === "simulated") return "ok";
+  if (state === "failed") return "error";
+  if (state === "running" || state === "queued") return "info";
+  return "idle";
+}
+
+function logLevelState(level: string): StatusState {
+  if (level === "error") return "error";
+  if (level === "warn") return "warn";
+  if (level === "info") return "info";
+  return "idle";
+}
+
+function stateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    queued: "待機中",
+    running: "実行中",
+    succeeded: "成功",
+    failed: "失敗",
+    simulated: "ドライラン",
+  };
+  return labels[state] ?? state;
+}
+
+function levelLabel(level: string): string {
+  const labels: Record<string, string> = {
+    info: "情報",
+    warn: "警告",
+    error: "エラー",
+    debug: "詳細",
+  };
+  return labels[level] ?? level;
+}
+
+function shortId(id: string | null): string {
+  if (!id) return "—";
+  return id.length > 12 ? id.slice(0, 12) : id;
+}
+
 function readDecisionSource(metadata: unknown): string | null {
   if (
     metadata &&
@@ -118,6 +177,29 @@ function readDecisionSource(metadata: unknown): string | null {
     if (typeof v === "string") return v;
   }
   return null;
+}
+
+function redactLogPayload(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactLogPayload(item));
+  if (!value || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (/token|secret|password|authorization|credential|api[-_]?key/i.test(key)) {
+      out[key] = "[redacted]";
+    } else {
+      out[key] = redactLogPayload(raw);
+    }
+  }
+  return out;
+}
+
+function formatLogPayload(payload: unknown): string | null {
+  if (payload == null) return null;
+  const serialized = JSON.stringify(redactLogPayload(payload), null, 2);
+  if (!serialized || serialized === "null") return null;
+  return serialized.length > 6000
+    ? `${serialized.slice(0, 6000)}\n... truncated ...`
+    : serialized;
 }
 
 export default async function ApprovalDetailPage({ params }: PageParams) {
@@ -176,6 +258,19 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
             metadata: true,
           },
         },
+        applyJobs: {
+          orderBy: { enqueuedAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            state: true,
+            enqueuedAt: true,
+            startedAt: true,
+            finishedAt: true,
+            jobId: true,
+            errorMessage: true,
+          },
+        },
       },
     })
     .catch(() => null);
@@ -219,6 +314,29 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
   const latestDecision = approvals[0]?.decision ?? null;
   const latestSource = approvals[0]?.decisionSource ?? null;
   const pageDisplayTimeZone = resolveDisplayTimeZone();
+  const applyJobs: ApplyJobRow[] = pr.applyJobs;
+  const latestApplyJob = applyJobs[0] ?? null;
+  const executionLogs: ExecutionLogRow[] =
+    applyJobs.length > 0
+      ? await prisma.executionLog.findMany({
+          where: {
+            workspaceId: workspace.id,
+            kind: "apply",
+            refType: "apply_job",
+            refId: { in: applyJobs.map((row) => row.id) },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+          select: {
+            id: true,
+            createdAt: true,
+            level: true,
+            message: true,
+            refId: true,
+            payload: true,
+          },
+        })
+      : [];
 
   const canMerge =
     pr.state === "open" &&
@@ -227,12 +345,12 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
   const mergeBlockedReason = (() => {
     if (pr.state === "merged") return "この PR は既にマージ済みです。";
-    if (pr.state === "closed") return "この PR は閉じられているためマージできません。";
+    if (pr.state === "closed") return "この PR は閉じられているため承認できません。";
     if (latestDecision === "rejected") {
-      return "approval_records.decision=rejected が記録されているためマージできません。";
+      return "approval_records.decision=rejected が記録されているため承認できません。";
     }
     if (latestDecision === "auto_blocked") {
-      return "approval_records.decision=auto_blocked が記録されているためマージできません (上流の policy が拒否)。";
+      return "approval_records.decision=auto_blocked が記録されているため承認できません (上流の policy が拒否)。";
     }
     return null;
   })();
@@ -352,6 +470,33 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
       <div className="page-body page-body--single">
         <Panel
+          title="承認・非承認"
+          subtitle="確認ダイアログを通して実行します"
+          status={
+            <StatusDot state={approvalState(latestDecision)}>
+              {latestDecision ?? "pending"}
+            </StatusDot>
+          }
+        >
+          {!canMerge ? (
+            <EmptyState
+              title="この PR は Web UI から承認できません。"
+              description={
+                mergeBlockedReason ?? "現在のステータスでは承認操作は許可されていません。"
+              }
+            />
+          ) : (
+            <MergePrButton
+              prNumber={pr.number}
+              prTitle={pr.title}
+              repoFullName={`${pr.repo.owner}/${pr.repo.name}`}
+              expectedHeadSha={pr.headSha}
+              htmlUrl={pr.htmlUrl}
+            />
+          )}
+        </Panel>
+
+        <Panel
           title="概要"
           subtitle="変更の状態と承認可否"
           status={
@@ -361,6 +506,158 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           }
         >
           <KeyValueList items={overviewItems} />
+        </Panel>
+
+        <Panel
+          title="承認後の実行ログ"
+          subtitle={
+            applyJobs.length > 0
+              ? `反映受付 ${applyJobs.length} 件 / ログ ${executionLogs.length} 件`
+              : "承認後に反映処理が始まると表示されます"
+          }
+          status={
+            <StatusDot state={applyJobState(latestApplyJob?.state ?? null)}>
+              {latestApplyJob ? stateLabel(latestApplyJob.state) : "未開始"}
+            </StatusDot>
+          }
+        >
+          {applyJobs.length === 0 ? (
+            <EmptyState
+              title={
+                latestDecision === "approved" || latestDecision === "auto_approved"
+                  ? "反映処理はまだ開始されていません。"
+                  : "承認後の実行ログはまだありません。"
+              }
+              description={
+                latestDecision === "approved" || latestDecision === "auto_approved"
+                  ? "GitHub のマージ状態を次回確認し、反映処理が受付されるとここにログが表示されます。"
+                  : "この PR を承認すると、反映処理の受付状況と実行ログをここで確認できます。"
+              }
+            />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
+              <section>
+                <h3
+                  style={{
+                    margin: "0 0 var(--space-2)",
+                    fontSize: "0.95rem",
+                    fontWeight: 700,
+                  }}
+                >
+                  反映受付
+                </h3>
+                <DataTable
+                  rows={applyJobs}
+                  rowKey={(row) => row.id}
+                  empty={null}
+                  columns={[
+                    {
+                      header: "受付日時",
+                      cell: (row) =>
+                        formatDateTime(row.enqueuedAt, { timeZone: pageDisplayTimeZone }),
+                      className: "tabular mono",
+                      headerClassName: "tabular",
+                    },
+                    {
+                      header: "状態",
+                      cell: (row) => (
+                        <StatusBadge state={applyJobState(row.state)}>
+                          {stateLabel(row.state)}
+                        </StatusBadge>
+                      ),
+                    },
+                    {
+                      header: "開始",
+                      cell: (row) =>
+                        row.startedAt
+                          ? formatDateTime(row.startedAt, { timeZone: pageDisplayTimeZone })
+                          : "—",
+                      className: "tabular mono",
+                      headerClassName: "tabular",
+                    },
+                    {
+                      header: "完了",
+                      cell: (row) =>
+                        row.finishedAt
+                          ? formatDateTime(row.finishedAt, { timeZone: pageDisplayTimeZone })
+                          : "—",
+                      className: "tabular mono",
+                      headerClassName: "tabular",
+                    },
+                    {
+                      header: "受付ID",
+                      cell: (row) => shortId(row.jobId ?? row.id),
+                      className: "mono",
+                    },
+                    {
+                      header: "エラー",
+                      cell: (row) => row.errorMessage ?? "—",
+                    },
+                  ]}
+                />
+              </section>
+
+              <section>
+                <h3
+                  style={{
+                    margin: "0 0 var(--space-2)",
+                    fontSize: "0.95rem",
+                    fontWeight: 700,
+                  }}
+                >
+                  実行ログ
+                </h3>
+                <DataTable
+                  rows={executionLogs}
+                  rowKey={(row) => row.id}
+                  empty={
+                    <EmptyState
+                      title="実行ログはまだありません。"
+                      description="反映処理が進むと、開始・検証・Meta CLI 実行結果がここに表示されます。"
+                    />
+                  }
+                  columns={[
+                    {
+                      header: "日時",
+                      cell: (row) =>
+                        formatDateTime(row.createdAt, { timeZone: pageDisplayTimeZone }),
+                      className: "tabular mono",
+                      headerClassName: "tabular",
+                    },
+                    {
+                      header: "状態",
+                      cell: (row) => (
+                        <StatusBadge state={logLevelState(row.level)}>
+                          {levelLabel(row.level)}
+                        </StatusBadge>
+                      ),
+                    },
+                    { header: "メッセージ", cell: (row) => row.message },
+                    {
+                      header: "関連受付",
+                      cell: (row) => shortId(row.refId),
+                      className: "mono",
+                    },
+                    {
+                      header: "詳細",
+                      cell: (row) => {
+                        const payload = formatLogPayload(row.payload);
+                        if (!payload) return "—";
+                        return (
+                          <details>
+                            <summary style={{ cursor: "pointer" }}>表示</summary>
+                            <div style={{ maxWidth: "min(42rem, 70vw)" }}>
+                              <CodeBlock>{payload}</CodeBlock>
+                            </div>
+                          </details>
+                        );
+                      },
+                    },
+                  ]}
+                />
+              </section>
+            </div>
+          )}
         </Panel>
 
         <Panel
@@ -494,25 +791,6 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                 ) : null}
               </div>
             </>
-          )}
-        </Panel>
-
-        <Panel title="承認または否決" subtitle="確認ダイアログを通して実行します">
-          {!canMerge ? (
-            <EmptyState
-              title="この PR は Web UI からマージできません。"
-              description={
-                mergeBlockedReason ?? "現在のステータスではマージは許可されていません。"
-              }
-            />
-          ) : (
-            <MergePrButton
-              prNumber={pr.number}
-              prTitle={pr.title}
-              repoFullName={`${pr.repo.owner}/${pr.repo.name}`}
-              expectedHeadSha={pr.headSha}
-              htmlUrl={pr.htmlUrl}
-            />
           )}
         </Panel>
 

@@ -235,15 +235,18 @@ function readAccountKey(input: OpsChangeProposalInput, fallback: string | null):
 
 function applyProposalToBrand(brand: Record<string, unknown>, input: OpsChangeProposalInput): string[] {
   const changes: string[] = [];
-  const targets = normalizeTargets(input);
+  const targets = normalizeTargets(input, brand);
   if (targets.length === 0) throw new Error("targets または targetIds を指定してください。");
   const desiredStatus = desiredInitialState(input);
   for (const target of targets) {
     const found = findTarget(brand, target);
     if (!found) continue;
     if (input.intent === "budget_change") {
+      if (target.level === "ad") {
+        throw new Error("予算変更の対象は campaign または adset を指定してください。ad には budget を設定できません。");
+      }
       const updated = applyBudgetChange(found.node, input.desiredChanges ?? {});
-      if (updated) changes.push(`${target.level}:${target.id} budget updated`);
+      if (updated) changes.push(formatBudgetChange(target, input.desiredChanges ?? {}));
       continue;
     }
     found.node.initialState = desiredStatus;
@@ -252,7 +255,10 @@ function applyProposalToBrand(brand: Record<string, unknown>, input: OpsChangePr
   return changes;
 }
 
-function normalizeTargets(input: OpsChangeProposalInput): OpsChangeProposalTarget[] {
+function normalizeTargets(
+  input: OpsChangeProposalInput,
+  brand: Record<string, unknown>
+): OpsChangeProposalTarget[] {
   const out: OpsChangeProposalTarget[] = [];
   for (const item of input.targets ?? []) {
     if (!item?.id || !item.level) continue;
@@ -262,11 +268,18 @@ function normalizeTargets(input: OpsChangeProposalInput): OpsChangeProposalTarge
   }
   const defaultLevel = readString(input.desiredChanges?.level) as OpsChangeProposalTarget["level"] | null;
   for (const id of input.targetIds ?? []) {
+    const inferredLevel = inferTargetLevel(brand, id);
+    const level =
+      defaultLevel === "adset" || defaultLevel === "ad" || defaultLevel === "campaign"
+        ? defaultLevel
+        : inferredLevel;
+    if (!level && input.intent === "budget_change") {
+      throw new Error(
+        `予算変更では targetIds だけから対象階層を campaign/adset に確定できません: ${id}。Meta の現在値を確認し、targets: [{ level: "campaign" または "adset", id }] を指定してください。`
+      );
+    }
     out.push({
-      level:
-        defaultLevel === "adset" || defaultLevel === "ad" || defaultLevel === "campaign"
-          ? defaultLevel
-          : "campaign",
+      level: level ?? "campaign",
       id,
     });
   }
@@ -292,6 +305,18 @@ function applyBudgetChange(node: Record<string, unknown>, desired: Record<string
   return true;
 }
 
+function formatBudgetChange(
+  target: OpsChangeProposalTarget,
+  desired: Record<string, unknown>
+): string {
+  const parts: string[] = [];
+  const dailyBudget = readNumber(desired.dailyBudget);
+  const lifetimeBudget = readNumber(desired.lifetimeBudget);
+  if (dailyBudget !== null) parts.push(`dailyBudget -> ${dailyBudget}`);
+  if (lifetimeBudget !== null) parts.push(`lifetimeBudget -> ${lifetimeBudget}`);
+  return `${target.level}:${target.id} budget.${parts.join(", budget.")}`;
+}
+
 function findTarget(
   brand: Record<string, unknown>,
   target: OpsChangeProposalTarget
@@ -299,19 +324,45 @@ function findTarget(
   const campaigns = Array.isArray(brand.campaigns) ? brand.campaigns : [];
   for (const campaign of campaigns) {
     if (!isRecord(campaign)) continue;
-    if (target.level === "campaign" && campaign.id === target.id) return { node: campaign };
+    if (target.level === "campaign" && nodeMatchesId(campaign, target.id)) return { node: campaign };
     const adsets = Array.isArray(campaign.adsets) ? campaign.adsets : [];
     for (const adset of adsets) {
       if (!isRecord(adset)) continue;
-      if (target.level === "adset" && adset.id === target.id) return { node: adset };
+      if (target.level === "adset" && nodeMatchesId(adset, target.id)) return { node: adset };
       const ads = Array.isArray(adset.ads) ? adset.ads : [];
       for (const ad of ads) {
         if (!isRecord(ad)) continue;
-        if (target.level === "ad" && ad.id === target.id) return { node: ad };
+        if (target.level === "ad" && nodeMatchesId(ad, target.id)) return { node: ad };
       }
     }
   }
   return null;
+}
+
+function inferTargetLevel(
+  brand: Record<string, unknown>,
+  id: string
+): OpsChangeProposalTarget["level"] | null {
+  const matched = new Set<OpsChangeProposalTarget["level"]>();
+  const campaigns = Array.isArray(brand.campaigns) ? brand.campaigns : [];
+  for (const campaign of campaigns) {
+    if (!isRecord(campaign)) continue;
+    if (nodeMatchesId(campaign, id)) matched.add("campaign");
+    const adsets = Array.isArray(campaign.adsets) ? campaign.adsets : [];
+    for (const adset of adsets) {
+      if (!isRecord(adset)) continue;
+      if (nodeMatchesId(adset, id)) matched.add("adset");
+      const ads = Array.isArray(adset.ads) ? adset.ads : [];
+      for (const ad of ads) {
+        if (isRecord(ad) && nodeMatchesId(ad, id)) matched.add("ad");
+      }
+    }
+  }
+  return matched.size === 1 ? Array.from(matched)[0]! : null;
+}
+
+function nodeMatchesId(node: Record<string, unknown>, id: string): boolean {
+  return node.id === id || node.externalId === id;
 }
 
 function validateWithTempCheckout(input: {
@@ -394,6 +445,16 @@ function proposalBody(input: {
   changes: string[];
   planSummary: string;
 }): string {
+  const budgetTargetSection =
+    input.input.intent === "budget_change"
+      ? [
+          "## Budget target",
+          "",
+          "このPRは Changes に表示された階層の budget だけを変更します。",
+          "キャンペーン予算と広告セット予算は別物です。対象階層が依頼内容と違う場合は承認せず、campaign/adset のどちらの予算を変更するか確認してください。",
+          "",
+        ]
+      : [];
   return [
     "## Agent proposal",
     "",
@@ -411,6 +472,7 @@ function proposalBody(input: {
     "",
     ...input.changes.map((c) => `- ${c}`),
     "",
+    ...budgetTargetSection,
     "## Dry-run",
     "",
     input.planSummary,

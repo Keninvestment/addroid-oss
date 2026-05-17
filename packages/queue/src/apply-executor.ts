@@ -425,6 +425,7 @@ export async function runExecuteApply(
   context = {
     ...context,
     approvalRecordId: snapshot?.approvalRecordId ?? null,
+    mergeSha: snapshot?.approvalRecordMergeSha ?? null,
   };
 
   // 2) running 遷移
@@ -1564,6 +1565,7 @@ function snapshotForLog(snapshot: ApplyApprovalSnapshot | null): JsonValue {
     latestApprovalDecision: snapshot.latestApprovalDecision,
     approvalRecordId: snapshot.approvalRecordId,
     approvalRecordHeadSha: snapshot.approvalRecordHeadSha,
+    approvalRecordMergeSha: snapshot.approvalRecordMergeSha ?? null,
     approvalDecisionSource: snapshot.approvalDecisionSource,
     mergedAt: snapshot.mergedAt ? snapshot.mergedAt.toISOString() : null,
   };

@@ -216,6 +216,7 @@ export class MockGithubAdapter implements GithubAdapter {
     target.state = "merged";
     target.mergedAt = new Date().toISOString();
     const sha = `mock-merge-sha-${input.number.toString(16).padStart(40, "0")}`;
+    target.mergeSha = sha;
     return {
       sha,
       merged: true,

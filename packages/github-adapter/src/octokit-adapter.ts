@@ -588,6 +588,7 @@ class OctokitApiClient implements GithubApiClient {
         baseRef: String((pr["base"] as Record<string, unknown> | undefined)?.["ref"] ?? "main"),
         htmlUrl: String(pr["html_url"] ?? ""),
         mergedAt: (pr["merged_at"] as string | null) ?? null,
+        mergeSha: readOptionalString(pr["merge_commit_sha"]),
         mergedBy: readLogin(pr["merged_by"]),
       }));
       const out: {
@@ -790,6 +791,10 @@ function extractAddedContentFromDiff(diff: string): string {
 function headerString(v: string | number | undefined): string | undefined {
   if (v === undefined) return undefined;
   return typeof v === "string" ? v : String(v);
+}
+
+function readOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function normalizeState(pr: Record<string, unknown>): "open" | "closed" | "merged" {

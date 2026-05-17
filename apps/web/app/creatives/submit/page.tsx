@@ -94,6 +94,7 @@ export default async function CreativeSubmitPage({
                   .join(", ")}`,
                 selectedContext,
                 "/creatives の Creative ID を指定して生成済みクリエイティブをPRに回す場合は promote_creative_submission を使ってください。",
+                "選択中のCreativeが過去の入稿PRに紐づいていても、別キャンペーンや2回目の入稿として再度PR化できます。",
                 orderedSelectedCreatives.length > 1
                   ? `複数Creativeはユーザーがすでに選択済みです。どれを使うかは質問せず、creativeIds=${JSON.stringify(orderedSelectedCreatives.map((creative) => creative.id))} を指定して、選択済みの全Creativeを同じ配信条件で入稿PR化してください。確認が必要なのは campaignId/adsetId、既存キャンペーン配下の新規adset、または新規campaign/adset 作成条件です。`
                   : null,
@@ -106,6 +107,7 @@ export default async function CreativeSubmitPage({
                 "Meta へ直接変更せず、必ず GitOps PR と dry-run の経路を使ってください。",
               ].filter(Boolean).join("\n")}
               initialInput={selectedInitialInput}
+              sessionResetKey={orderedSelectedCreatives.map((creative) => creative.id).join(",")}
               allowAttachments
             />
           )}
@@ -155,8 +157,8 @@ function formatSelectedCreativeContext(
         `mediaType=${creative.mediaType}`,
         creative.storagePath ? "hasMedia=true" : "hasMedia=false",
         creative.pullRequest
-          ? `alreadyAttachedToPr=${creative.pullRequest.number}`
-          : "alreadyAttachedToPr=false",
+          ? `previousSubmissionPr=${creative.pullRequest.number}`
+          : "previousSubmissionPr=false",
         adText?.headline ? `headline=${adText.headline}` : null,
         adText?.primaryText ? `primaryText=${adText.primaryText}` : null,
         adText?.description ? `description=${adText.description}` : null,

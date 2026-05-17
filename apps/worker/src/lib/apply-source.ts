@@ -4,20 +4,20 @@
 // equivalent in local tests" を満たすために、以下 2 つの動作モードを持つ:
 //
 //   - real: `ADDROID_OPS_REPO_LOCAL_DIR` が指すローカル checkout を使う。
-//     `<dir>/ads/accounts/<key>/brand.yaml` を `next` として読み込み、
-//     `ADDROID_OPS_REPO_BASE_DIR` (任意) があればそれを `previous` として使う。
-//     どちらも `loadAndValidateOpsRepo` / `loadPreviousOpsRepoState` を流用する。
+//     承認済み PR の merge commit と、その first parent の差分だけを `next` /
+//     `previous` として読み込む。Apply は PR 単位で独立し、過去/後続 PR の
+//     desired-state 差分を別PRの承認で巻き込まない。
 //   - mocked: env が未設定の場合は `accounts: []` を返し、orchestrator 側で
 //     `simulated` 状態に倒す。the current implementation の "mocked equivalent in local tests"
 //     経路をこれで吸収する (UI/audit には source=unavailable を表示する)。
 //
 // regression fix: real モードでは `loadForApply` 呼び出し時に
 // `AdsLoaderInput.context` の `headSha` / `repoId` を必ず検証する。
-//   - localDir の git HEAD が `context.headSha` と一致しない、または
+//   - 承認済み merge commit / parent commit / changed brand.yaml を解決できない、または
 //   - 起動時に解決した workspace の opsRepoId が `context.repoId` と一致しない、
 // 場合は fail-closed (source=unavailable) で返し、Meta mutation 経路に到達させない。
-// これにより「承認済み PR の YAML だけが Apply に流れる」契約 (gitops-only
-// approved state) を loader 境界でも保証する。
+// これにより「承認済み PR の差分だけが Apply に流れる」契約 (gitops-only
+// approved PR diff) を loader 境界でも保証する。
 //
 // 本ファイルは Prisma を import せず、ファイルシステム + git の HEAD 取得のみを
 // 触る純粋境界。git 取得は execFile (引数固定, no shell) を使う。
@@ -90,6 +90,43 @@ async function readGitFirstParentSha(dir: string, sha: string): Promise<string |
   }
 }
 
+async function readGitChangedFiles(
+  dir: string,
+  baseSha: string,
+  headSha: string
+): Promise<string[] | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", dir, "diff", "--name-only", `${baseSha}..${headSha}`],
+      { timeout: 10_000, maxBuffer: 1024 * 1024 }
+    );
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+function changedAccountKeys(files: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const file of files) {
+    const normalized = file.replace(/\\/g, "/");
+    const parts = normalized.split("/");
+    if (
+      parts.length >= 4 &&
+      parts[0] === "ads" &&
+      parts[1] === "accounts" &&
+      parts[3] === "brand.yaml"
+    ) {
+      out.add(parts[2]!);
+    }
+  }
+  return out;
+}
+
 async function materializeGitCommit(dir: string, sha: string): Promise<{
   dir: string;
   cleanup: () => Promise<void>;
@@ -125,8 +162,6 @@ async function materializeGitCommit(dir: string, sha: string): Promise<{
 export interface LocalDirAdsLoaderOptions {
   /** ops repo の checkout 絶対パス。null/未指定なら "no source" を返す。 */
   localDir: string | null;
-  /** 比較ベースとなる base ブランチ checkout (`previous`)。任意。 */
-  baseDir?: string | null;
   /**
    * このワーカーが管理する ops repo の `github_repos.id` (UUID)。
    * `loadForApply` は `AdsLoaderInput.context.repoId` がこの値と一致した
@@ -141,6 +176,7 @@ export interface LocalDirAdsLoaderOptions {
   readHeadSha?: (dir: string) => Promise<string | null>;
   commitExists?: (dir: string, sha: string) => Promise<boolean>;
   readParentSha?: (dir: string, sha: string) => Promise<string | null>;
+  readChangedFiles?: (dir: string, baseSha: string, headSha: string) => Promise<string[] | null>;
   materializeCommit?: (dir: string, sha: string) => Promise<{
     dir: string;
     cleanup: () => Promise<void>;
@@ -149,11 +185,15 @@ export interface LocalDirAdsLoaderOptions {
 
 export class LocalDirAdsLoader implements AdsLoader {
   private readonly localDir: string | null;
-  private readonly baseDir: string | null;
   private readonly expectedRepoId: string | null;
   private readonly readHeadSha: (dir: string) => Promise<string | null>;
   private readonly commitExists: (dir: string, sha: string) => Promise<boolean>;
   private readonly readParentSha: (dir: string, sha: string) => Promise<string | null>;
+  private readonly readChangedFiles: (
+    dir: string,
+    baseSha: string,
+    headSha: string
+  ) => Promise<string[] | null>;
   private readonly materializeCommit: (
     dir: string,
     sha: string
@@ -161,11 +201,11 @@ export class LocalDirAdsLoader implements AdsLoader {
 
   constructor(opts: LocalDirAdsLoaderOptions) {
     this.localDir = opts.localDir;
-    this.baseDir = opts.baseDir ?? null;
     this.expectedRepoId = opts.expectedRepoId ?? null;
     this.readHeadSha = opts.readHeadSha ?? readGitHeadSha;
     this.commitExists = opts.commitExists ?? gitCommitExists;
     this.readParentSha = opts.readParentSha ?? readGitFirstParentSha;
+    this.readChangedFiles = opts.readChangedFiles ?? readGitChangedFiles;
     this.materializeCommit = opts.materializeCommit ?? materializeGitCommit;
   }
 
@@ -197,13 +237,21 @@ export class LocalDirAdsLoader implements AdsLoader {
         accounts: [],
       };
     }
-    // 2) headSha guard: approved PR の headSha と一致する tree だけを load する。
-    //    merge commit 方式では main の HEAD と PR headSha が一致しないため、
-    //    commit object がローカルにある場合は一時 worktree で承認済み head そのものを読む。
+    // 2) mergeSha guard: approved PR が base branch に入った merge/squash/rebase
+    //    commit と、その first parent の差分だけを load する。
+    //    headSha は承認対象IDとして検証し、実際の next/previous は mergeSha 境界で読む。
     if (!isFullSha(context.headSha)) {
       return {
         source: "unavailable",
         detail: `apply_job pr#${context.prNumber} headSha is not a 40-char SHA (${context.headSha}); refusing to apply.`,
+        accounts: [],
+      };
+    }
+    const mergeSha = context.mergeSha?.toLowerCase() ?? null;
+    if (!mergeSha || !isFullSha(mergeSha)) {
+      return {
+        source: "unavailable",
+        detail: `apply_job pr#${context.prNumber} has no verified mergeSha; refusing to apply without the exact merged PR boundary.`,
         accounts: [],
       };
     }
@@ -215,34 +263,59 @@ export class LocalDirAdsLoader implements AdsLoader {
         accounts: [],
       };
     }
-    const approvedHead = context.headSha.toLowerCase();
+    const parentSha = await this.readParentSha(this.localDir, mergeSha);
+    if (!parentSha) {
+      return {
+        source: "unavailable",
+        detail: `cannot resolve parent commit for approved PR merge ${mergeSha}; refusing to apply without a PR-specific base state.`,
+        accounts: [],
+      };
+    }
+    if (!(await this.commitExists(this.localDir, mergeSha))) {
+      return {
+        source: "unavailable",
+        detail: `approved PR merge ${mergeSha} is not available locally; refusing to apply without the exact merged PR diff.`,
+        accounts: [],
+      };
+    }
+    if (!(await this.commitExists(this.localDir, parentSha))) {
+      return {
+        source: "unavailable",
+        detail: `parent commit ${parentSha} for approved PR merge ${mergeSha} is not available locally; refusing to apply without the exact merged PR diff.`,
+        accounts: [],
+      };
+    }
+    const changedFiles = await this.readChangedFiles(this.localDir, parentSha, mergeSha);
+    if (!changedFiles) {
+      return {
+        source: "unavailable",
+        detail: `cannot resolve changed files for approved PR merge ${mergeSha}; refusing to apply without the exact merged PR diff.`,
+        accounts: [],
+      };
+    }
+    const changedAccounts = changedAccountKeys(changedFiles);
+    if (changedAccounts.size === 0) {
+      return {
+        source: "unavailable",
+        detail: `approved PR #${context.prNumber} does not change any ads/accounts/*/brand.yaml file; no Meta apply actions are allowed for this PR.`,
+        accounts: [],
+      };
+    }
     let loadDir = this.localDir;
     let cleanup: (() => Promise<void>) | null = null;
-    let previousDir = this.baseDir;
     let previousCleanup: (() => Promise<void>) | null = null;
-    if (head !== approvedHead) {
-      if (!(await this.commitExists(this.localDir, approvedHead))) {
-        return {
-          source: "unavailable",
-          detail: `local checkout HEAD (${head}) does not match approved PR headSha (${context.headSha}) for pr#${context.prNumber}, and the approved commit is not available locally; refusing to apply stale ops repo state.`,
-          accounts: [],
-        };
-      }
-      const materialized = await this.materializeCommit(this.localDir, approvedHead);
+    if (head !== mergeSha) {
+      const materialized = await this.materializeCommit(this.localDir, mergeSha);
       loadDir = materialized.dir;
       cleanup = materialized.cleanup;
     }
-    if (!previousDir) {
-      const parentSha = await this.readParentSha(this.localDir, approvedHead);
-      if (parentSha && (await this.commitExists(this.localDir, parentSha))) {
-        const previous = await this.materializeCommit(this.localDir, parentSha);
-        previousDir = previous.dir;
-        previousCleanup = previous.cleanup;
-      }
-    }
+    const previous = await this.materializeCommit(this.localDir, parentSha);
+    const previousDir = previous.dir;
+    previousCleanup = previous.cleanup;
     // 3) 検証済 — 既存の YAML loader でロード。
     try {
-      const validation = loadAndValidateOpsRepo(loadDir);
+      const previousState = loadPreviousOpsRepoState(previousDir);
+      const validation = loadAndValidateOpsRepo(loadDir, undefined, { previous: previousState });
       if (!validation.ok) {
         return {
           source: "unavailable",
@@ -250,28 +323,26 @@ export class LocalDirAdsLoader implements AdsLoader {
           accounts: [],
         };
       }
-      const previous =
-        previousDir && fs.existsSync(previousDir)
-          ? loadPreviousOpsRepoState(previousDir)
-          : null;
-      const accounts: AccountAdsState[] = validation.loaded.brands.map((b) => ({
-        accountKey: b.accountKey,
-        next: b.brand,
-        previous: previous?.brands.get(b.accountKey) ?? null,
-      }));
+      const accounts: AccountAdsState[] = validation.loaded.brands
+        .filter((b) => changedAccounts.has(b.accountKey))
+        .map((b) => ({
+          accountKey: b.accountKey,
+          next: b.brand,
+          previous: previousState.brands.get(b.accountKey) ?? null,
+        }));
       if (accounts.length === 0) {
         return {
           source: "unavailable",
-          detail: `${path.join(loadDir, DEFAULT_OPS_REPO_LAYOUT.accountsDir)} has no accounts`,
+          detail: `${path.join(loadDir, DEFAULT_OPS_REPO_LAYOUT.accountsDir)} has no changed accounts for approved PR #${context.prNumber}`,
           accounts: [],
         };
       }
       return {
         source: "local_dir",
         detail:
-          head === approvedHead
-            ? `loaded ${accounts.length} account(s) from ${this.localDir} @ ${head}`
-            : `loaded ${accounts.length} account(s) from approved PR head ${approvedHead} using local checkout ${this.localDir} @ ${head}`,
+          head === mergeSha
+            ? `loaded ${accounts.length} changed account(s) from approved PR merge diff ${parentSha}..${mergeSha}`
+            : `loaded ${accounts.length} changed account(s) from approved PR merge ${mergeSha} using local checkout ${this.localDir} @ ${head}`,
         accounts,
       };
     } finally {
@@ -282,7 +353,7 @@ export class LocalDirAdsLoader implements AdsLoader {
 }
 
 /**
- * env から `ADDROID_OPS_REPO_LOCAL_DIR` / `ADDROID_OPS_REPO_BASE_DIR` を読み、
+ * env から `ADDROID_OPS_REPO_LOCAL_DIR` を読み、
  * `LocalDirAdsLoader` を構築する。worker 起動時に 1 度だけ呼ぶ。
  *
  * `expectedRepoId` は呼び出し側 (runtime.ts) が Prisma から
@@ -294,10 +365,8 @@ export function createLocalDirAdsLoaderFromEnv(
   opts: { expectedRepoId?: string | null; localDir?: string | null } = {}
 ): LocalDirAdsLoader {
   const local = opts.localDir ?? (env.ADDROID_OPS_REPO_LOCAL_DIR?.trim() || null);
-  const base = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
   return new LocalDirAdsLoader({
     localDir: local,
-    baseDir: base,
     expectedRepoId: opts.expectedRepoId ?? null,
   });
 }

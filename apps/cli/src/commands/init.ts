@@ -355,11 +355,12 @@ async function runNonInteractiveSetup(
   lines.push("");
   lines.push("Next steps:");
   lines.push("  1. addroid status");
-  lines.push("  2. Meta Access Token を用意");
-  lines.push("  3. addroid connect meta                 # token 入力 + Ad Account 選択");
-  lines.push("  4. addroid connect ai                   # Codex app-server / OpenAI / Claude を選択");
-  lines.push("  5. addroid connect github               # GitHub 認証 + ops repo 作成");
-  lines.push("  6. addroid start");
+  lines.push("  2. Meta App に Privacy Policy URL を設定し、Live / 公開にする");
+  lines.push("  3. Meta Access Token を用意");
+  lines.push("  4. addroid connect meta                 # token 入力 + Ad Account 選択");
+  lines.push("  5. addroid connect ai                   # Codex app-server / OpenAI / Claude を選択");
+  lines.push("  6. addroid connect github               # GitHub 認証 + ops repo 作成");
+  lines.push("  7. addroid start");
   lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
@@ -905,6 +906,7 @@ async function maybeConfigureMetaAccessToken(opts: {
   opts.out.push("  実際の Meta 広告アカウントを接続して Apply / Activate / レポート取得を行うには必須です。");
   opts.out.push("  AdDroid の標準設定は OAuth callback ではなく Access Token 入力方式です。");
   opts.out.push("  ローカル利用で HTTPS callback URL を用意する必要はありません。");
+  opts.out.push("  本番入稿には、token 発行元 Meta App の Privacy Policy URL 設定と Live / 公開モードが必要です。");
   opts.out.push("  Meta Business Suite / Graph API Explorer 等で token を発行し、この後の入力欄に貼り付けます。");
   opts.out.push("  必要な権限の目安: ads_read, ads_management, business_management。");
   opts.out.push("  token 入力後、AdDroid が取得できる Ad Account を表示し、利用するアカウントを選択します。");
@@ -2231,18 +2233,20 @@ function printScaffoldResult(result: ScaffoldResult): void {
   if (!process.env.DATABASE_URL) {
     lines.push("  1. addroid init --interactive    # .env / DB まで対話セットアップ");
     lines.push("  2. addroid status");
+    lines.push("  3. Meta App に Privacy Policy URL を設定し、Live / 公開にする");
+    lines.push("  4. Meta Access Token を用意");
+    lines.push("  5. addroid connect meta          # token 入力 + Ad Account 選択");
+    lines.push("  6. addroid connect github        # GitHub 認証 + ops repo 作成");
+    lines.push("  7. addroid connect ai            # Codex app-server / OpenAI / Claude を選択");
+    lines.push("  8. addroid start");
+  } else {
+    lines.push("  1. addroid status");
+    lines.push("  2. Meta App に Privacy Policy URL を設定し、Live / 公開にする");
     lines.push("  3. Meta Access Token を用意");
     lines.push("  4. addroid connect meta          # token 入力 + Ad Account 選択");
     lines.push("  5. addroid connect github        # GitHub 認証 + ops repo 作成");
     lines.push("  6. addroid connect ai            # Codex app-server / OpenAI / Claude を選択");
     lines.push("  7. addroid start");
-  } else {
-    lines.push("  1. addroid status");
-    lines.push("  2. Meta Access Token を用意");
-    lines.push("  3. addroid connect meta          # token 入力 + Ad Account 選択");
-    lines.push("  4. addroid connect github        # GitHub 認証 + ops repo 作成");
-    lines.push("  5. addroid connect ai            # Codex app-server / OpenAI / Claude を選択");
-    lines.push("  6. addroid start");
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));
@@ -2506,6 +2510,7 @@ function printInitHelp(): void {
       "Interactive setup:",
       "  実際の Meta 広告アカウントを利用するには Meta Access Token が必須です。",
       "  標準設定では OAuth callback を使わず、token 入力後に取得可能な Ad Account を表示します。",
+      "  本番入稿には、token 発行元 Meta App の Privacy Policy URL 設定と Live / 公開モードが必要です。",
       "  `addroid connect meta` で token を暗号化保存し、Ad Account を選択します。",
       "  OAuth callback を使う上級者向け経路は詳細コマンド `addroid auth meta --oauth` です。",
       "  LLM Provider は openai-api-key / anthropic-api-key / codex-app-server から選択できます。",

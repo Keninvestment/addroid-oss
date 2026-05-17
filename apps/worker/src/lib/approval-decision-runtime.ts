@@ -283,24 +283,40 @@ export async function decidePullRequestApproval(
     );
   }
 
-  await opts.prisma.auditLog
-    .create({
-      data: {
-        workspaceId: opts.workspaceId,
-        actor: opts.actor,
-        action: "pr.merged_via_chat",
-        target: `github_pull_request:${pr.id}`,
-        ref: `pr#${pr.number}@${pr.headSha}`,
-        metadata: {
-          prNumber: pr.number,
-          headSha: pr.headSha,
-          mergeSha: mergeResult.sha,
-          htmlUrl: pr.htmlUrl,
-          decisionSource: opts.decisionSource,
-          mergeMethod,
-          preMergeApprovalRecordId: approvalRecordId,
-        } satisfies Prisma.InputJsonValue,
-      },
+  await opts.prisma
+    .$transaction(async (tx) => {
+      await tx.approvalRecord.update({
+        where: { id: approvalRecordId },
+        data: {
+          metadata: {
+            decisionSource: opts.decisionSource,
+            mergeMethod,
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            mergeSha: mergeResult.sha,
+            htmlUrl: pr.htmlUrl,
+            phase: "merged",
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: opts.workspaceId,
+          actor: opts.actor,
+          action: "pr.merged_via_chat",
+          target: `github_pull_request:${pr.id}`,
+          ref: `pr#${pr.number}@${pr.headSha}`,
+          metadata: {
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            mergeSha: mergeResult.sha,
+            htmlUrl: pr.htmlUrl,
+            decisionSource: opts.decisionSource,
+            mergeMethod,
+            preMergeApprovalRecordId: approvalRecordId,
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
     })
     .catch(() => undefined);
 

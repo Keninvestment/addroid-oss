@@ -180,6 +180,7 @@ export async function runGithubPollOnce(
         pullRequestId: upsert.id,
         prNumber: pr.number,
         headSha: pr.headSha,
+        mergeSha: pr.mergeSha ?? null,
         htmlUrl: pr.htmlUrl,
         mergedBy: pr.mergedBy ?? null,
         approval,
@@ -248,6 +249,7 @@ async function ensureApprovalForMergedPr(input: {
   pullRequestId: string;
   prNumber: number;
   headSha: string;
+  mergeSha: string | null;
   htmlUrl: string;
   mergedBy: string | null;
   approval: PrApprovalEvidence | null;
@@ -255,6 +257,7 @@ async function ensureApprovalForMergedPr(input: {
   if (
     input.approval?.decision === "approved" &&
     input.approval.headSha === input.headSha &&
+    (input.approval.mergeSha || !input.mergeSha) &&
     isAcceptedApprovalSource(input.approval.decisionSource)
   ) {
     return { ok: true };
@@ -271,11 +274,13 @@ async function ensureApprovalForMergedPr(input: {
         decisionSource: "github_merge",
         prNumber: input.prNumber,
         headSha: input.headSha,
+        mergeSha: input.mergeSha,
         htmlUrl: input.htmlUrl,
         mergedBy: input.mergedBy,
         previousApprovalRecordId: input.approval?.id ?? null,
         previousApprovalDecision: input.approval?.decision ?? null,
         previousApprovalHeadSha: input.approval?.headSha ?? null,
+        previousApprovalMergeSha: input.approval?.mergeSha ?? null,
         previousApprovalDecisionSource: input.approval?.decisionSource ?? null,
       },
     });

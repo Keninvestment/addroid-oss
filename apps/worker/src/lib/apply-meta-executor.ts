@@ -688,6 +688,22 @@ export function extractExternalIdFromCliStdout(
     /"(externalId|external_id|id)"\s*:\s*(\d+)/
   );
   if (numeric && numeric[2]) return numeric[2];
+
+  const tableId = extractIdFromCliTable(stdout);
+  if (tableId) return tableId;
+
+  return undefined;
+}
+
+function extractIdFromCliTable(stdout: string): string | undefined {
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^id\b/i.test(lines[i]!)) continue;
+    const separator = lines[i + 1] ?? "";
+    const value = lines[i + 2] ?? "";
+    if (!/^-{3,}$/.test(separator)) continue;
+    if (/^[A-Za-z0-9_/-]{6,}$/.test(value)) return value;
+  }
   return undefined;
 }
 

@@ -33,11 +33,22 @@ insights をすべて in-memory で deterministic に再現します。`graph.fa
 
 1. [Meta for Developers](https://developers.facebook.com/) で Business App を作成
 2. Marketing API を有効化
-3. `ads_read`, `ads_management`, `business_management` を含む Access Token を発行
-5. System User token を使う場合は、Business Settings で System User に対象 Ad Account を割り当てる
+3. App Dashboard の **App settings > Basic** で、外部から開ける **Privacy Policy URL** を設定
+4. Meta の画面で求められる場合は、データ削除方法の URL / 説明と連絡先メールなどの基本項目も設定
+5. App Mode を **Live / 公開** に変更
+6. `ads_read`, `ads_management`, `business_management` を含む Access Token を発行
+7. System User token を使う場合は、Business Settings で System User に対象 Ad Account と App を割り当てる
 
 非エンジニア向けの標準手順では OAuth callback は使いません。ローカル利用のために
 HTTPS callback URL、public domain、ngrok 等を用意する必要はありません。
+ただし、Meta App の Privacy Policy URL は AdDroid の localhost URL ではなく、Meta 側が
+確認できる公開ページを指定してください。
+
+> **本番入稿前チェック**: App が Development / 開発モードのままでも token 登録や
+> Ad Account 同期は成功することがあります。しかし Apply で creative を作成する段階で
+> Meta API が `Invalid parameter` や「クリエイティブ投稿は開発モードのアプリにより
+> 作成されたものです」のようなエラーを返し、入稿は失敗します。System User token を
+> 発行する前に、Privacy Policy URL 設定と App Mode が Live / 公開であることを確認してください。
 
 > **Sandbox app**: Meta の Sandbox mode で App を作成すると、本番予算には影響しない
 > 検証用 app type が得られます。AdDroid は app type をトークン取得時に判定し、

@@ -12,6 +12,8 @@ export interface PullRequestSummary {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  /** GitHub が base branch に作った merge/squash/rebase commit SHA。未merge時は null。 */
+  mergeSha?: string | null;
   mergedBy?: string | null;
 }
 

@@ -90,6 +90,7 @@ export interface PrApprovalEvidence {
   decision: PrApprovalDecision;
   approvedBy: string;
   headSha: string | null;
+  mergeSha: string | null;
   decisionSource: string | null;
 }
 
@@ -110,6 +111,7 @@ export interface UpsertPullRequestInput {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  mergeSha?: string | null;
   mergedBy?: string | null;
 }
 
@@ -303,6 +305,12 @@ export interface ApplyJobContext {
    * undefined のまま。
    */
   approvalRecordId?: string | null;
+  /**
+   * 当該 PR が base branch に入った merge/squash/rebase commit SHA。
+   * Apply loader はこの commit とその first parent の差分を読むことで、
+   * 他 PR の未承認/別承認差分を巻き込まず、承認PR単位の状態だけを適用する。
+   */
+  mergeSha?: string | null;
 }
 
 export interface MarkApplyRunningInput {
@@ -355,6 +363,8 @@ export interface ApplyApprovalSnapshot {
     | null;
   /** 最新 approval_records.metadata.headSha。無い場合は null。 */
   approvalRecordHeadSha: string | null;
+  /** 最新 approval_records.metadata.mergeSha。無い場合は null。 */
+  approvalRecordMergeSha?: string | null;
   /** 最新 approval_records.metadata.decisionSource。無い場合は null。 */
   approvalDecisionSource: string | null;
   /**
@@ -496,6 +506,7 @@ export interface QueuePullRequestSummary {
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
+  mergeSha?: string | null;
   mergedBy?: string | null;
 }
 

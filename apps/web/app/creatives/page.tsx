@@ -110,7 +110,11 @@ export default async function CreativesPage({
       accounts = accountRows;
     }
 
-    const where: Prisma.CreativeWhereInput = { account: { workspaceId: ws.id } };
+    const where: Prisma.CreativeWhereInput = {
+      account: { workspaceId: ws.id },
+      aiRunId: { not: null },
+      creativeQaAiRunId: { not: null },
+    };
     if (accountIdParam) {
       where.accountId = accountIdParam;
     }
@@ -152,8 +156,17 @@ export default async function CreativesPage({
     // Toolbar の Provider dropdown 用 (現 account scope の distinct)。
     const providerRows = await prisma.creative.findMany({
       where: accountIdParam
-        ? { accountId: accountIdParam, account: { workspaceId: ws.id } }
-        : { account: { workspaceId: ws.id } },
+        ? {
+            accountId: accountIdParam,
+            account: { workspaceId: ws.id },
+            aiRunId: { not: null },
+            creativeQaAiRunId: { not: null },
+          }
+        : {
+            account: { workspaceId: ws.id },
+            aiRunId: { not: null },
+            creativeQaAiRunId: { not: null },
+          },
       distinct: ["provider"],
       select: { provider: true },
     });
@@ -312,7 +325,7 @@ function CreativeCard({
   const primaryText = adText?.primaryText || "広告テキスト案は詳細画面で確認できます。";
   const description = adText?.description || "詳しくはこちら";
   const cta = adText?.callToAction || "LEARN_MORE";
-  const disabled = row.status === "qa_failed" || Boolean(row.pullRequestId);
+  const disabled = row.status === "qa_failed";
 
   return (
     <article className="creative-card-wrap">

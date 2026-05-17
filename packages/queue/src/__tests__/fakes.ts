@@ -150,6 +150,7 @@ export class FakeGithubPollStore implements GithubPollStore {
           decision: row.decision,
           approvedBy: row.approvedBy,
           headSha: typeof metadata.headSha === "string" ? metadata.headSha : null,
+          mergeSha: typeof metadata.mergeSha === "string" ? metadata.mergeSha : null,
           decisionSource:
             typeof metadata.decisionSource === "string"
               ? metadata.decisionSource
@@ -310,6 +311,7 @@ export class FakeApplyJobStore implements ApplyJobStore {
       // ことを想定)。明示的に setApprovalSnapshot を呼ぶテストはこの値を上書きする。
       approvalRecordId: `appr-default-${applyJobId}`,
       approvalRecordHeadSha: "sha-default",
+      approvalRecordMergeSha: "merge-default",
       approvalDecisionSource: "web_merge",
       mergedAt: new Date("2026-05-01T00:00:00Z"),
     };

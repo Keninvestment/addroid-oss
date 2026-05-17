@@ -337,13 +337,42 @@ GitOps の全体像と承認境界は [`docs/GITOPS.md`](./GITOPS.md) を参照�
 - `ENCRYPTION_KEY` と `DATABASE_URL` が `addroid init` 後の値から変わっていないか確認
 - 再発行した token で `addroid connect meta` を再実行する
 
-### 8.2 上級者向け OAuth で `state mismatch` または callback 失敗
+### 8.2 Apply が `Invalid parameter` / 開発モード app の creative エラーで失敗する
+
+症状:
+
+- PR merge 後に `apply_jobs.state=failed` になる
+- `execution_logs` または通知に `meta.api_error` が残る
+- Meta 側のエラーに「クリエイティブ投稿は開発モードのアプリにより作成されたものです」
+  またはそれに近い文言が出る
+
+原因:
+
+Access Token を発行した Meta App が Development / 開発モードのまま、または Live / 公開に
+必要な App 基本設定が不足しています。token 登録や Ad Account 一覧取得は通っても、
+広告 creative 作成は Meta API 側で拒否されることがあります。
+
+対処:
+
+1. [Meta Apps dashboard](https://developers.facebook.com/apps/) で token 発行元の App を開く
+2. **App settings > Basic** で Privacy Policy URL を設定する
+3. Meta の画面で求められる場合は、データ削除方法の URL / 説明、連絡先メールなども設定する
+4. App Mode を **Live / 公開** に切り替える
+5. System User token を使っている場合は、その App を選んで token を再発行する
+6. `addroid connect meta` で新しい token を登録し直す
+7. 入稿内容を再度 PR 化し、GitOps の承認経路で再実行する
+
+AdDroid の Web UI は localhost-only のままで構いません。ここで必要なのは、Meta App
+側のプライバシーポリシーページが外部から開けることと、App が本番利用できる状態に
+なっていることです。
+
+### 8.3 上級者向け OAuth で `state mismatch` または callback 失敗
 `/api/oauth/meta/begin` で発行した state は CLI / Web で異なるプロセスに渡しません。
 CLI の場合は詳細コマンド `addroid auth meta --oauth` を再実行してください。Web UI の場合は `addroid start`
 を再起動し、別タブの古い OAuth flow を破棄してから再度 `/accounts` の "Meta を接続"
 を押してください。
 
-### 8.3 開発で外部 `graph.facebook.com` を一切叩きたくない
+### 8.4 開発で外部 `graph.facebook.com` を一切叩きたくない
 ```bash
 ADDROID_META_OAUTH_MOCK=1 npm run addroid -- up
 ```
@@ -351,7 +380,7 @@ ADDROID_META_OAUTH_MOCK=1 npm run addroid -- up
 deterministic に実行されます。Apply / Activate も mock 経路で完結し、外部通信は
 発生しません。
 
-### 8.4 Meta execution mode が `unconfigured` のままになる
+### 8.5 Meta execution mode が `unconfigured` のままになる
 - `oauth_tokens` テーブルに provider="meta" のレコードがあるか確認
 - `ENCRYPTION_KEY` が変わっていないか確認 (変更後は保存済み token を復号できない)
 - `apps/web/lib/meta-runtime.ts` の `selectMetaAdapter` が `StubMetaAdapter` を
@@ -360,7 +389,7 @@ deterministic に実行されます。Apply / Activate も mock 経路で完結�
 - `addroid account` で登録済み Ad Account と default を確認し、未設定なら
   `addroid account sync --select-default` または `addroid account choose` を実行する
 
-### 8.5 Apply で本番 Meta を誤って書き換えそう
+### 8.6 Apply で本番 Meta を誤って書き換えそう
 - Apply は新規オブジェクトをすべて **PAUSED** で作成します。Activate を別経路で
   人間が承認するまで予算は消費されません。
 - TopBar の Meta execution mode チップが `live` になっているのを確認したうえで

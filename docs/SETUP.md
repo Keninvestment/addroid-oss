@@ -177,6 +177,7 @@ npm run addroid -- init
 - ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
 - `npm run db:generate` と `npm run db:push` による Prisma schema 反映
 - 実際の Meta 広告アカウント利用に必要な Meta Access Token の取得手順と必要権限を表示
+- Meta App の Privacy Policy URL 設定と Live / 公開モード化が本番入稿に必要であることを表示
 - `addroid connect meta` で Access Token を暗号化保存し、取得できる Ad Account から既定を選択
 
 既存の `.env` / `config.yaml` / `secrets.local.yaml` は破壊しません。既存値がある場合は保持し、

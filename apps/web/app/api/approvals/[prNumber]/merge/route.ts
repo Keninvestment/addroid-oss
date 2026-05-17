@@ -333,23 +333,39 @@ export async function POST(
   // 返す (= GitHub merge は完了している)。
   let postMergeAuditError: string | null = null;
   try {
-    await prisma.auditLog.create({
-      data: {
-        workspaceId: workspace.id,
-        actor: WEB_MERGE_ACTOR,
-        action: "pr.merged_via_web",
-        target: `github_pull_request:${pr.id}`,
-        ref: `pr#${pr.number}@${pr.headSha}`,
-        metadata: {
-          prNumber: pr.number,
-          headSha: pr.headSha,
-          mergeSha: mergeResult.sha,
-          htmlUrl: pr.htmlUrl,
-          decisionSource: WEB_MERGE_DECISION_SOURCE,
-          mergeMethod,
-          preMergeApprovalRecordId: preMergeApprovalId,
-        } satisfies Prisma.InputJsonValue,
-      },
+    await prisma.$transaction(async (tx) => {
+      await tx.approvalRecord.update({
+        where: { id: preMergeApprovalId },
+        data: {
+          metadata: {
+            decisionSource: WEB_MERGE_DECISION_SOURCE,
+            mergeMethod,
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            mergeSha: mergeResult.sha,
+            htmlUrl: pr.htmlUrl,
+            phase: "merged",
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
+      await tx.auditLog.create({
+        data: {
+          workspaceId: workspace.id,
+          actor: WEB_MERGE_ACTOR,
+          action: "pr.merged_via_web",
+          target: `github_pull_request:${pr.id}`,
+          ref: `pr#${pr.number}@${pr.headSha}`,
+          metadata: {
+            prNumber: pr.number,
+            headSha: pr.headSha,
+            mergeSha: mergeResult.sha,
+            htmlUrl: pr.htmlUrl,
+            decisionSource: WEB_MERGE_DECISION_SOURCE,
+            mergeMethod,
+            preMergeApprovalRecordId: preMergeApprovalId,
+          } satisfies Prisma.InputJsonValue,
+        },
+      });
     });
   } catch (err) {
     postMergeAuditError = err instanceof Error ? err.message : String(err);

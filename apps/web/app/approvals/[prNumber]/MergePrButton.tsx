@@ -107,18 +107,18 @@ export function MergePrButton({
       const body = (await res.json().catch(() => ({}))) as DecisionResponse;
       if (!res.ok || !body.ok) {
         const errMessage =
-          body.error ?? body.message ?? `HTTP ${res.status}: 否決に失敗しました`;
+          body.error ?? body.message ?? `HTTP ${res.status}: 非承認に失敗しました`;
         setInlineError(errMessage);
         push({
           variant: "error",
-          title: `PR #${prNumber} の否決に失敗しました`,
+          title: `PR #${prNumber} の非承認に失敗しました`,
           description: errMessage,
         });
         return;
       }
       push({
         variant: "success",
-        title: `PR #${prNumber} を否決しました`,
+        title: `PR #${prNumber} を非承認にしました`,
         description: "この変更から反映処理は起動しません",
       });
       setRejectOpen(false);
@@ -128,7 +128,7 @@ export function MergePrButton({
       setInlineError(msg);
       push({
         variant: "error",
-        title: `PR #${prNumber} の否決に失敗しました`,
+        title: `PR #${prNumber} の非承認に失敗しました`,
         description: msg,
       });
     } finally {
@@ -166,10 +166,10 @@ export function MergePrButton({
           }}
           disabled={busy}
         >
-          否決する
+          非承認にする
         </button>
         <span style={{ fontSize: "0.8125rem", color: "var(--color-text-secondary)" }}>
-          承認後は反映待ち、否決後は反映停止として記録します。
+          承認後は反映待ち、非承認後は反映停止として記録します。
         </span>
       </div>
       <ConfirmDialog
@@ -241,13 +241,13 @@ export function MergePrButton({
         }}
         onConfirm={handleReject}
         busy={busy}
-        confirmLabel="否決する"
+        confirmLabel="非承認にする"
         confirmVariant="danger"
-        title="この変更を否決しますか？"
+        title="この変更を非承認にしますか？"
         description={
           <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
             <div>
-              否決すると approval_records に rejected を記録し、この PR からの反映処理を
+              非承認にすると approval_records に rejected を記録し、この PR からの反映処理を
               起動しません。
             </div>
             <ul style={{ margin: 0, paddingLeft: "1.25rem", lineHeight: 1.7 }}>

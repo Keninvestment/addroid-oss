@@ -216,7 +216,7 @@ export async function runChatCommand(
     ? undefined
     : await loadChatMemory(env, {
         sessionId: requestedSessionId,
-        newSession: parsed.newSession,
+        newSession: parsed.newSession || !requestedSessionId,
       });
   const shouldPrintResumedTranscript = Boolean(
     !parsed.once && !parsed.newSession && (parsed.resume || parsed.sessionId)
@@ -679,7 +679,7 @@ async function printChatHistory(env: NodeJS.ProcessEnv, out: NodeJS.WritableStre
   }
   out.write(`チャット履歴（CLI/Web共通・直近${CHAT_RESUME_LIMIT}件）:\n`);
   printChatSessionSummaries(out, ordered);
-  out.write("\n再開: addroid chat --resume または addroid chat --session <id>\n新規: addroid chat --new-session\n");
+  out.write("\n再開: addroid chat --resume または addroid chat --session <id>\n新規: addroid chat\n");
 }
 
 async function loadChatSessionSummaries(
@@ -3754,6 +3754,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "  addroid chat --resume",
       "  addroid chat --history",
       "  addroid chat --session <id>",
+      "  addroid chat --new-session",
       "  addroid chat --reference-image ./ref.png --once \"この画像を参考にクリエイティブ生成\"",
       "",
       "Examples:",
@@ -3771,6 +3772,7 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "  - 参考画像は `/attach ./ref.png` で次のクリエイティブ生成依頼に添付できます。",
       "  - `--resume` または `/resume` で過去のCLIチャット履歴を選択して再開できます。",
       "  - `--history` で直近の履歴一覧を表示し、`--session <id>` で直接再開できます。",
+      "  - 過去セッションを明示的に選ばない限り、`addroid chat` と `--once` は新規セッションで開始します。",
       "  - LLM は AGENTS.md と主要 docs を参照して AdDroid tool を直接実行します。",
       "  - 任意 shell / restore / 破壊的 git / secret 表示 / approval 迂回の Meta 変更は拒否します。",
       "  - --yes は旧バージョン互換のため受け付けますが、chat では確認プロンプトを出しません。",

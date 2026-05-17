@@ -18,7 +18,10 @@ import {
   createStandaloneCreativeGeneration,
   normalizeCreativeSubmissionInput,
 } from "../creative-submission-runtime.js";
-import { normalizeCreativePromotionBatchInput } from "../creative-promotion-runtime.js";
+import {
+  createCreativePromotionProposal,
+  normalizeCreativePromotionBatchInput,
+} from "../creative-promotion-runtime.js";
 
 test("createCreativeSubmissionProposal writes creative/ad draft through GitOps PR only", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-ops-"));
@@ -363,6 +366,88 @@ test("normalizeCreativePromotionBatchInput drops null optional values", () => {
   assert.equal(input.urgency, undefined);
 });
 
+test("createCreativePromotionProposal allows reusing a creative already attached to a PR", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-reuse-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const prisma = fakePrisma();
+    let updatedParameters: unknown = null;
+    const creativeApi = prisma.creative as unknown as {
+      findFirst: () => Promise<Record<string, unknown>>;
+      update: (args: { data: Record<string, unknown> }) => Promise<{ id: string }>;
+    };
+    creativeApi.findFirst = async () => ({
+      id: "source_cr_1",
+      accountId: "acct_1",
+      pullRequestId: "previous_pr",
+      key: "source-key",
+      displayName: "Reusable Creative",
+      mediaType: "text",
+      status: "attached_to_pr",
+      prompt: "promote this existing creative",
+      parameters: {
+        promotedToSubmissionPr: {
+          prNumber: 10,
+          pullRequestId: "previous_pr",
+          submissionCreativeId: "old-submission",
+          promotedAt: "2026-05-01T00:00:00.000Z",
+        },
+      },
+      storagePath: null,
+      spec: {
+        adText: {
+          headline: "Reusable",
+          primaryText: "Use this creative again.",
+          description: "Second submission",
+          callToAction: "LEARN_MORE",
+        },
+      },
+      account: { key: "primary", displayName: "Primary" },
+      pullRequest: { number: 10, htmlUrl: "https://github.example/octo/ops/pull/10" },
+    });
+    creativeApi.update = async (args) => {
+      updatedParameters = args.data.parameters;
+      return { id: "source_cr_1" };
+    };
+    const github = new FakeGithubAdapter();
+    const result = await createCreativePromotionProposal({
+      prisma: prisma as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        creativeId: "source_cr_1",
+        campaignId: "cmp_existing",
+        adsetId: "as_existing",
+        linkUrl: "https://example.com/reuse",
+      },
+    });
+
+    assert.equal(result.planOk, true);
+    assert.notEqual(result.creativeId, "reusable-creative");
+    assert.match(result.creativeId, /^reusable-creative-submission-[a-f0-9]{8}$/);
+    assert.equal(github.created.length, 1);
+    const parameters = updatedParameters as {
+      promotedToSubmissionPr?: { prNumber?: number; submissionCreativeId?: string };
+      promotedToSubmissionPrHistory?: Array<{ prNumber?: number; submissionCreativeId?: string }>;
+    };
+    assert.equal(parameters.promotedToSubmissionPr?.prNumber, 42);
+    assert.equal(parameters.promotedToSubmissionPr?.submissionCreativeId, result.creativeId);
+    assert.equal(parameters.promotedToSubmissionPrHistory?.length, 2);
+    assert.equal(parameters.promotedToSubmissionPrHistory?.[0]?.prNumber, 10);
+    assert.equal(parameters.promotedToSubmissionPrHistory?.[1]?.prNumber, 42);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test("normalizeCreativeSubmissionInput accepts account-currency budget fields", () => {
   const input = normalizeCreativeSubmissionInput({
     creativeName: "jpy-sale",
@@ -375,6 +460,58 @@ test("normalizeCreativeSubmissionInput accepts account-currency budget fields", 
   });
 
   assert.equal(input.dailyBudget, 500);
+});
+
+test("normalizeCreativeSubmissionInput maps destinationUrl to linkUrl", () => {
+  const input = normalizeCreativeSubmissionInput({
+    creativeName: "destination-url",
+    adName: "Destination URL Ad",
+    headline: "Destination",
+    primaryText: "Use destinationUrl alias.",
+    campaignId: "cmp_existing",
+    adsetId: "as_existing",
+    mediaType: "image",
+    destinationUrl: "https://example.com/destination",
+  });
+
+  assert.equal(input.linkUrl, "https://example.com/destination");
+});
+
+test("createCreativeSubmissionProposal rejects link-ad creative without destination URL before opening PR", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-missing-link-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    await assert.rejects(
+      createCreativeSubmissionProposal({
+        prisma: fakePrisma() as never,
+        githubAdapter: github as unknown as GithubAdapter,
+        workspaceId: "ws_1",
+        actor: "test",
+        source: "web-chat",
+        env: {
+          ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+          ADDROID_HOME: homeDir,
+        },
+        input: {
+          accountKey: "primary",
+          creativeName: "missing-link",
+          adName: "Missing Link Ad",
+          headline: "Missing link",
+          primaryText: "This image creative needs a destination URL.",
+          campaignId: "cmp_existing",
+          adsetId: "as_existing",
+          mediaType: "image",
+        },
+      }),
+      /linkUrl または destinationUrl が必要/
+    );
+    assert.equal(github.created.length, 0);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
 });
 
 test("createCreativeSubmissionProposal surfaces dry-run failure details", async () => {
@@ -432,6 +569,7 @@ test("normalizeCreativeSubmissionInput preserves Instagram profile Meta values",
     headline: "Profile Visit",
     campaignId: "cmp_existing",
     adsetName: "Profile Visit JP",
+    linkUrl: "https://example.com/profile",
     callToAction: "VIEW_INSTAGRAM_PROFILE",
     optimizationGoal: "VISIT_INSTAGRAM_PROFILE",
   });
@@ -447,6 +585,7 @@ test("normalizeCreativeSubmissionInput accepts safe Meta enum tokens without a l
     headline: "Future Token",
     campaignId: "cmp_existing",
     adsetName: "Future Token JP",
+    linkUrl: "https://example.com/future",
     callToAction: "call_now",
     optimizationGoal: "future_goal",
     billingEvent: "future_billing",
@@ -579,6 +718,7 @@ test("createCreativeSubmissionProposal uses winning creative context when genera
         headline: "Context Sale",
         primaryText: "Try the contextual offer today.",
         prompt: "make a new sale visual",
+        linkUrl: "https://example.com/context-sale",
         campaignId: "cmp_existing",
         adsetId: "as_existing",
         mediaType: "image",
@@ -627,6 +767,7 @@ test("createCreativeSubmissionProposal uses user referenceImagePaths as visual b
         creativeName: "ref-sale",
         adName: "Ref Sale Ad",
         prompt: "添付画像の雰囲気を参考に新しい広告画像を生成",
+        linkUrl: "https://example.com/ref-sale",
         campaignId: "cmp_existing",
         adsetId: "as_existing",
         mediaType: "image",
@@ -673,6 +814,7 @@ test("createCreativeSubmissionProposal sends referenceImagePaths to provider onl
         creativeName: "direct-ref-sale",
         adName: "Direct Ref Sale Ad",
         prompt: "この画像をベースに、Meta広告向け画像を加工して別案を生成",
+        linkUrl: "https://example.com/direct-ref-sale",
         campaignId: "cmp_existing",
         adsetId: "as_existing",
         mediaType: "image",
