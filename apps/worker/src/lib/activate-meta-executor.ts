@@ -43,7 +43,7 @@ import type {
 import { META_CLI_MIN_VERSION } from "./apply-meta-executor.js";
 
 // ---------------------------------------------------------------------
-// PlanAction 同等の args ビルダ
+// Activate action 用の args ビルダ
 // ---------------------------------------------------------------------
 
 /**

@@ -46,8 +46,9 @@ export interface BootstrapOpsRepoInput {
   initialAccountKey: string;
   initialAccountDisplayName: string;
   /**
-   * 初期 bootstrap 時に同時に用意する Meta ad accounts。
-   * 複数アカウント連携済みの場合、各 account の brand.yaml を作る。
+   * 初期 bootstrap 時に連携済みの Meta ad accounts。
+   * 現行 ops template は account 別の静的設定ファイルを作らず、
+   * apply 対象は PR ごとの operations/<account>/*.json に保存する。
    */
   initialAccounts?: { key: string; displayName: string }[];
   /** 作成する repo 名。owner は OAuth 接続済みアカウント。 */
@@ -69,7 +70,7 @@ export interface BootstrapOpsRepoResult {
 }
 
 export interface CreatePullRequestFile {
-  /** repo-relative path (例: "ads/accounts/act_123/campaigns/cmp_456.yaml")。 */
+  /** repo-relative path (例: "operations/act_123/2026-05-17-budget.json")。 */
   path: string;
   /** unified diff string (sanitize は呼び出し側で済んでいる前提)。 */
   diff: string;

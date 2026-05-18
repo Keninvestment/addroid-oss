@@ -109,8 +109,8 @@ export interface ImprovementPrFileChange {
 /**
  * `ImprovementPrCreativeAttachment` — PR に添付する 1 creative 分のサマリ。
  * orchestrator が image_prompt + creative_qa + creatives 永続化の結果から組み立て、
- * (a) Ads YAML に追加する creative manifest ファイル
- *     (`ads/accounts/<account_key>/creatives/<creative_id>.yaml`) と、
+ * (a) PR に添付する creative evidence ファイル
+ *     (`evidence/creatives/<account_key>/<creative_id>.yaml`) と、
  * (b) PR body の `## 生成クリエイティブ` セクション
  * の双方を構築するために使う。
  *
@@ -189,7 +189,7 @@ export interface ImprovementPrPlanFinding {
 /**
  * gitops が出した YAML 変更を、プロジェクトの正規 dry-run / plan 経路に通した
  * 結果。LLM-authored の `dryRunSummary` ではなく、Zod 検証 +
- * `buildExecutionPlan` による実 plan の出力を 1 つの構造体に丸めたもの。
+ * operation manifest validation による実 plan の出力を 1 つの構造体に丸めたもの。
  */
 export interface ImprovementPrPlanValidationResult {
   /** 検証が実際に走ったか。ops repo の local checkout が無い等の理由で skip された場合は false。 */
@@ -1187,7 +1187,7 @@ async function runPipelineMode(
   //   - linkCreativesToPullRequest が PR linkage を qa_passed/qa_warned に
   //     限定する Prisma store 側の per-row gate と矛盾しない (= store が throw
   //     しない契約 = "complete per-asset QA before any PR linkage").
-  //   - PR diff の Ads YAML manifest と PR body の "## 生成クリエイティブ"
+  //   - PR diff の creative evidence と PR body の "## 生成クリエイティブ"
   //     セクションが、Meta に届く可能性のある creative だけを参照する
   //     (= "no PR metadata for blocked assets")。
   //   - qa_failed creatives 自体は creatives テーブルに残るので Web UI / audit /
@@ -1214,7 +1214,7 @@ async function runPipelineMode(
   //     and PR" — pullRequestId を持つ行は実 asset が背後に存在することが前提。
   //   - prompt-only fallback (Provider 未注入 / 失敗) で生成された qa_passed 行は
   //     audit metadata としては creatives テーブルに残るが、PR 添付経路は通さない
-  //     (Ads YAML manifest にも storage ref を載せられないため意味を持たない)。
+  //     (creative evidence にも storage ref を載せられないため意味を持たない)。
   //   - 同じ条件は runtime store (`linkCreativesToPullRequest`) の per-row gate
   //     でも DB 側で再検査される (二重防御 + production fail-loud)。
   const linkableCreativeIds = attachableCreativeAttachments
@@ -1229,6 +1229,29 @@ async function runPipelineMode(
     .map((a) => a.creativeDbId);
 
   if (opts.workflowIntent === "auto_creative_generation") {
+    const persistedImageCount = creativeAttachments.filter(
+      (a) =>
+        a.storageRef !== null &&
+        a.storagePath !== null &&
+        a.provider !== null &&
+        a.model !== null
+    ).length;
+    let autoCreativeErrorMessage: string | null = null;
+    if (persistedImageCount === 0) {
+      if (imageGen.providerError) {
+        autoCreativeErrorMessage = `image generation failed: ${imageGen.providerError}`;
+      } else if (!opts.imageProvider || opts.imageProvider.enabled === false) {
+        autoCreativeErrorMessage =
+          "image generation skipped: image provider is not configured";
+      } else if (!opts.creativeStorage) {
+        autoCreativeErrorMessage =
+          "image generation skipped: creative storage is not configured";
+      } else if (creativeQa.output.recommendation !== "approve") {
+        autoCreativeErrorMessage = `creative_qa recommended ${creativeQa.output.recommendation}`;
+      } else {
+        autoCreativeErrorMessage = "image generation completed with no persisted assets";
+      }
+    }
     await auditWriter.recordImprovementPrAudit({
       workspaceId: opts.workspaceId,
       accountKey: opts.accountKey,
@@ -1248,11 +1271,22 @@ async function runPipelineMode(
         creativeIds,
         linkableCreativeIds,
         blockedCreativeIds,
+        imageGeneration: {
+          fallback: imageGen.fallback,
+          persistedImageCount,
+          baseStorageRef: imageGen.baseStorageRef,
+          provider: imageGen.providerName ?? opts.imageProvider?.name ?? null,
+          model: imageGen.model ?? opts.imageProvider?.defaultModel ?? null,
+          providerError: imageGen.providerError,
+        },
       },
-      summary: "auto_creative_generation completed; PR not opened",
+      summary:
+        autoCreativeErrorMessage === null
+          ? "auto_creative_generation completed; PR not opened"
+          : `auto_creative_generation skipped: ${autoCreativeErrorMessage}`,
     });
     return buildSummary({
-      status: creativeIds.length > 0 ? "succeeded" : "skipped_no_proposal",
+      status: persistedImageCount > 0 ? "succeeded" : "skipped_no_proposal",
       opts,
       account,
       aiRunIds,
@@ -1261,6 +1295,7 @@ async function runPipelineMode(
       proposalCount: 0,
       pullRequest: null,
       audit: null,
+      errorMessage: autoCreativeErrorMessage ?? undefined,
     });
   }
 
@@ -1388,11 +1423,9 @@ async function runPipelineMode(
   }
   // implementation item: gitops 出力に「生成クリエイティブの reference manifest」ファイルを
   // 1 creative につき 1 ファイル追加する。manifest は
-  // `ads/accounts/<account_key>/creatives/<creative_id>.yaml` に書かれ、
-  // brand.yaml の Zod schema からは独立しているため Ads YAML 検証や
-  // buildExecutionPlan を壊さない (loadAndValidateOpsRepo は brand.yaml のみを
-  // 読む)。これにより:
-  //   - Ads YAML の中に creative reference (storage ref / provider / model /
+  // `evidence/creatives/<account_key>/<creative_id>.yaml` に書かれ、
+  // apply operations からは独立した evidence file として扱う。これにより:
+  //   - evidence の中に creative reference (storage ref / provider / model /
   //     prompt rationale / QA breakdown) が形として残り、merge 後も diff から
   //     生成系列を辿れる。
   //   - audit / plan validator / publisher が同じ files を見るので、
@@ -1401,7 +1434,7 @@ async function runPipelineMode(
   // 使う (gitops.output.files は ai_runs に既に永続化されているため、後追いの
   // metadata ファイルは orchestrator 経由でのみ載せる)。
   // regression fix: PR diff には deterministic QA 通過分のみを載せる
-  // (qa_failed は creatives テーブル上には残るが、Ads YAML manifest には載せない)。
+  // (qa_failed は creatives テーブル上には残るが、creative evidence には載せない)。
   const creativeAttachmentFiles = buildCreativeAttachmentFiles({
     accountKey: opts.accountKey,
     attachments: attachableCreativeAttachments,
@@ -1468,7 +1501,7 @@ async function runPipelineMode(
 
   // ── 8b) plan validation (Regression fix) ───────────────────
   // gitops の YAML 変更を実 plan / dry-run 経路に通す。LLM-authored の
-  // dryRunSummary ではなく、Zod 検証 + buildExecutionPlan による実 plan の
+  // dryRunSummary ではなく、operation manifest validation による実 plan の
   // 結果を PR body と audit metadata に残すことで、人間レビュアが実際の
   // diff の妥当性を判断できるようにする。
   let planValidation: ImprovementPrPlanValidationResult;
@@ -1704,7 +1737,7 @@ async function runPipelineMode(
       mediaBuyerRationale: mediaBuyer.output.rationale,
       fileCount: gitops.output.files.length,
       // implementation item: PR diff には gitops files に加えて 1 creative につき
-      // 1 manifest YAML (`ads/accounts/<key>/creatives/<creative_id>.yaml`) を
+      // 1 evidence YAML (`evidence/creatives/<key>/<creative_id>.yaml`) を
       // 載せている。merge 後に human が PR diff を辿り直す際の補助として、
       // 添付ファイル数を audit metadata にも記録する。
       attachedCreativeFileCount: creativeAttachmentFiles.length,
@@ -2084,11 +2117,10 @@ function oneLine(s: string): string {
 }
 
 /**
- * implementation item: 添付対象の creatives を Ads YAML 配下に配置する manifest ファイル
- * (`ads/accounts/<account_key>/creatives/<creative_id>.yaml`) を組み立てる。
+ * implementation item: 添付対象の creatives を evidence 配下に配置する YAML ファイル
+ * (`evidence/creatives/<account_key>/<creative_id>.yaml`) を組み立てる。
  *
- * - `loadAndValidateOpsRepo` は brand.yaml のみを読むため、本ファイル群は schema
- *   検証や buildExecutionPlan を壊さない (= 副作用なしの evidence ファイル)。
+ * - apply operations とは別の evidence file で、Meta 反映対象にはしない。
  * - 機密値 (API key 等) は image_prompt / creative_qa 出力には含まれない契約だが、
  *   prompt 本文に万一含まれても sanitize しない (PR 本文と同じく ai_runs の
  *   rendering boundary を継承)。`storage://` 以外の絶対 fs path は載せない。
@@ -2111,7 +2143,7 @@ function buildCreativeAttachmentFiles(input: {
       .map((l) => `+${l}`)
       .join("\n");
     files.push({
-      path: `ads/accounts/${input.accountKey}/creatives/${a.creativeDbId}.yaml`,
+      path: `evidence/creatives/${input.accountKey}/${a.creativeDbId}.yaml`,
       action: "create",
       diff,
     });

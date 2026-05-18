@@ -40,18 +40,26 @@ schedules:
     cron: "*/2 * * * *"
     enabled: true
 `;
-const VALID_BRAND = `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: fall
-    name: Fall
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget:
-      dailyBudget: 50
-`;
+const VALID_OPERATION = `${JSON.stringify(
+  {
+    version: 1,
+    accountKey: "primary",
+    intent: "other",
+    source: "test",
+    actor: "test",
+    rationale: null,
+    createdAt: "2026-05-17T00:00:00.000Z",
+    actions: [
+      {
+        resource: "campaign",
+        verb: "update",
+        args: ["ads", "campaign", "update", "120", "--status", "paused"],
+      },
+    ],
+  },
+  null,
+  2
+)}\n`;
 
 const HEAD_SHA = "deadbeefcafebabedeadbeefcafebabedeadbeef";
 const MERGE_SHA = "2222222222222222222222222222222222222222";
@@ -75,7 +83,7 @@ function fixtureRepo(): { dir: string; cleanup: () => void } {
   return writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": VALID_BRAND,
+    "operations/primary/status.json": VALID_OPERATION,
   });
 }
 
@@ -83,7 +91,7 @@ function prDiffSeams(parentDir: string) {
   return {
     commitExists: async (_dir: string, sha: string) => sha === MERGE_SHA || sha === PARENT_SHA,
     readParentSha: async (_dir: string, sha: string) => (sha === MERGE_SHA ? PARENT_SHA : null),
-    readChangedFiles: async () => ["ads/accounts/primary/brand.yaml"],
+    readChangedFiles: async () => ["operations/primary/status.json"],
     materializeCommit: async (_dir: string, sha: string) => {
       assert.equal(sha, PARENT_SHA);
       return {
@@ -108,9 +116,9 @@ test("loadForApply loads accounts when repoId and mergeSha both match", async ()
     });
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "local_dir");
-    assert.equal(out.accounts.length, 1);
-    assert.equal(out.accounts[0]!.accountKey, "primary");
-    assert.equal(out.accounts[0]!.previous?.account.key, "primary");
+    assert.equal(out.accounts.length, 0);
+    assert.equal(out.directActions?.[0]?.accountKey, "primary");
+    assert.equal(out.directActions?.[0]?.actions.length, 1);
   } finally {
     current.cleanup();
     parent.cleanup();
@@ -149,7 +157,7 @@ test("loadForApply reads an approved PR merge from a materialized commit when ma
       readHeadSha: async () => otherSha,
       commitExists: async (_dir, sha) => sha === MERGE_SHA || sha === PARENT_SHA,
       readParentSha: async (_dir, sha) => (sha === MERGE_SHA ? PARENT_SHA : null),
-      readChangedFiles: async () => ["ads/accounts/primary/brand.yaml"],
+      readChangedFiles: async () => ["operations/primary/status.json"],
       materializeCommit: async (_dir, sha) => {
         assert.ok(sha === MERGE_SHA || sha === PARENT_SHA);
         return {
@@ -162,24 +170,20 @@ test("loadForApply reads an approved PR merge from a materialized commit when ma
     });
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "local_dir");
-    assert.equal(out.accounts.length, 1);
-    assert.equal(out.accounts[0]!.accountKey, "primary");
+    assert.equal(out.accounts.length, 0);
+    assert.equal(out.directActions?.[0]?.accountKey, "primary");
     assert.equal(cleanedMaterialized, true);
-    assert.match(out.detail ?? "", /approved PR merge/);
+    assert.match(out.detail ?? "", /loaded 1 operation action/);
   } finally {
     current.cleanup();
     merged.cleanup();
   }
 });
 
-test("loadForApply derives previous state from the approved merge parent", async () => {
+test("loadForApply reads operations from the approved merge", async () => {
   const current = fixtureRepo();
   const merged = fixtureRepo();
-  const parent = writeFixture({
-    ".addroid/project.yaml": VALID_PROJECT,
-    "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": VALID_BRAND.replace("displayName: \"Primary\"", "displayName: \"Previous\""),
-  });
+  const parent = fixtureRepo();
   try {
     const loader = new LocalDirAdsLoader({
       localDir: current.dir,
@@ -187,7 +191,7 @@ test("loadForApply derives previous state from the approved merge parent", async
       readHeadSha: async () => "0000000000000000000000000000000000000000",
       commitExists: async (_dir, sha) => sha === MERGE_SHA || sha === PARENT_SHA,
       readParentSha: async (_dir, sha) => (sha === MERGE_SHA ? PARENT_SHA : null),
-      readChangedFiles: async () => ["ads/accounts/primary/brand.yaml"],
+      readChangedFiles: async () => ["operations/primary/status.json"],
       materializeCommit: async (_dir, sha) => ({
         dir: sha === PARENT_SHA ? parent.dir : merged.dir,
         cleanup: async () => undefined,
@@ -195,7 +199,7 @@ test("loadForApply derives previous state from the approved merge parent", async
     });
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "local_dir");
-    assert.equal(out.accounts[0]!.previous?.account.displayName, "Previous");
+    assert.equal(out.directActions?.[0]?.actions[0]?.kind, "meta_cli_operation");
   } finally {
     current.cleanup();
     merged.cleanup();
@@ -203,19 +207,19 @@ test("loadForApply derives previous state from the approved merge parent", async
   }
 });
 
-test("loadForApply only returns accounts whose brand.yaml changed in the approved merge", async () => {
-  const secondaryBrand = VALID_BRAND.replaceAll("primary", "secondary").replace("Primary", "Secondary");
+test("loadForApply only returns operations whose files changed in the approved merge", async () => {
+  const secondaryOperation = VALID_OPERATION.replace('"accountKey": "primary"', '"accountKey": "secondary"');
   const current = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": VALID_BRAND,
-    "ads/accounts/secondary/brand.yaml": secondaryBrand,
+    "operations/primary/status.json": VALID_OPERATION,
+    "operations/secondary/status.json": secondaryOperation,
   });
   const parent = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": VALID_BRAND,
-    "ads/accounts/secondary/brand.yaml": secondaryBrand,
+    "operations/primary/status.json": VALID_OPERATION,
+    "operations/secondary/status.json": secondaryOperation,
   });
   try {
     const loader = new LocalDirAdsLoader({
@@ -224,7 +228,7 @@ test("loadForApply only returns accounts whose brand.yaml changed in the approve
       readHeadSha: async () => MERGE_SHA,
       commitExists: async (_dir, sha) => sha === MERGE_SHA || sha === PARENT_SHA,
       readParentSha: async (_dir, sha) => (sha === MERGE_SHA ? PARENT_SHA : null),
-      readChangedFiles: async () => ["ads/accounts/primary/brand.yaml"],
+      readChangedFiles: async () => ["operations/primary/status.json"],
       materializeCommit: async () => ({
         dir: parent.dir,
         cleanup: async () => undefined,
@@ -232,14 +236,14 @@ test("loadForApply only returns accounts whose brand.yaml changed in the approve
     });
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "local_dir");
-    assert.deepEqual(out.accounts.map((a) => a.accountKey), ["primary"]);
+    assert.deepEqual(out.directActions?.map((a) => a.accountKey), ["primary"]);
   } finally {
     current.cleanup();
     parent.cleanup();
   }
 });
 
-test("loadForApply returns unavailable when the approved merge has no brand.yaml changes", async () => {
+test("loadForApply returns unavailable when the approved merge has no operation manifest changes", async () => {
   const current = fixtureRepo();
   const parent = fixtureRepo();
   try {
@@ -258,7 +262,7 @@ test("loadForApply returns unavailable when the approved merge has no brand.yaml
     const out = await loader.loadForApply({ context: ctx() });
     assert.equal(out.source, "unavailable");
     assert.equal(out.accounts.length, 0);
-    assert.match(out.detail ?? "", /does not change any ads\/accounts\/\*\/brand.yaml/);
+    assert.match(out.detail ?? "", /does not change operations\/\*\.json/);
   } finally {
     current.cleanup();
     parent.cleanup();

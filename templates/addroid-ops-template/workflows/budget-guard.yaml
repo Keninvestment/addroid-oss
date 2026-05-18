@@ -21,6 +21,6 @@ autoPause:
   safeCategories: []
 
 # Optional per-account budgets (currency major unit)。
-# キーは ads/accounts/<key> と一致させる。未指定の account は budget=0 として
+# キーは AdDroid の ad account key と一致させる。未指定の account は budget=0 として
 # 扱われ、daily_budget_80 / monthly_pace ルールは静かに skip。
 accounts: {}

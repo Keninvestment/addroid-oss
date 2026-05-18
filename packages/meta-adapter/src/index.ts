@@ -83,24 +83,6 @@ export {
   type SelectMetaAdapterOptions,
 } from "./factory.js";
 export {
-  MockMetaSandbox,
-  SandboxValidationError,
-  deriveExternalId,
-  type MetaObjectStatus,
-  type MockMetaSandboxOptions,
-  type SandboxAd,
-  type SandboxAdSet,
-  type SandboxApplyResult,
-  type SandboxBudget,
-  type SandboxCampaign,
-  type SandboxCreative,
-  type SandboxInsights,
-  type SandboxInsightsResource,
-  type SandboxResource,
-  type SandboxValidationCode,
-  type SandboxVerb,
-} from "./sandbox.js";
-export {
   META_CLI_SUPPORTED_OPERATIONS,
   MetaCliBinaryNotConfiguredError,
   MetaCliMissingTokenError,

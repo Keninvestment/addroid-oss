@@ -64,6 +64,7 @@ import {
   type ApprovalDecisionAction,
 } from "./approval-decision-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
+import { runMetaMirrorSync } from "./meta-mirror-runtime.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
@@ -467,6 +468,8 @@ export async function executeWorkerAgentTool(opts: {
           data: { label: result.label, rowCount: result.rowCount, rows: result.rows.slice(0, 20) },
         };
       }
+      case "sync_meta_mirror":
+        return await syncMetaMirror({ ...opts, tool: readyTool });
       case "propose_ops_change": {
         if (!opts.githubAdapter) {
           return {
@@ -641,6 +644,44 @@ async function loadWorkerMetaAssetReadiness(
       })
     )
   );
+}
+
+async function syncMetaMirror(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  actor?: string;
+  source?: PlanRunSource;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const selection = await buildPrismaMetaAdapterSelection({ prisma: opts.prisma }).catch(() => null);
+  const lease = await selection?.adapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease?.accessToken) {
+    return {
+      display: opts.tool.display,
+      status: "error",
+      message: "Meta token が未接続です。",
+    };
+  }
+  const result = await runMetaMirrorSync({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    accessToken: lease.accessToken,
+    accountId: readOptionalString(opts.tool.toolArgs.accountId),
+    accountKey:
+      readOptionalString(opts.tool.toolArgs.accountKey) ??
+      readOptionalString(opts.tool.toolArgs.account_key),
+    includeMetrics:
+      opts.tool.toolArgs.includeMetrics !== false &&
+      opts.tool.toolArgs.include_metrics !== false,
+    actor: opts.actor ?? "agent:scheduled-task",
+    source: opts.source ?? "scheduled-agent",
+  });
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: `Mirror DB を同期しました。campaign=${result.campaigns}, adset=${result.adsets}, ad=${result.ads}, snapshot=${result.metrics.snapshots}`,
+    data: result,
+  };
 }
 
 function normalizeCreativeSubmissionSource(source: PlanRunSource | undefined) {
@@ -1127,6 +1168,7 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
       : undefined;
   const accountKey = readStringArg(args, "accountKey", "account_key");
   const rationale = readStringArg(args, "rationale");
+  const operations = normalizeOpsOperations(args.operations);
   return {
     intent,
     ...(accountKey ? { accountKey } : {}),
@@ -1135,7 +1177,61 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
     ...(desiredChanges ? { desiredChanges } : {}),
     ...(rationale ? { rationale } : {}),
     ...(urgency ? { urgency } : {}),
+    ...(operations.length > 0 ? { operations } : {}),
   };
+}
+
+function normalizeOpsOperations(value: unknown): NonNullable<OpsChangeProposalInput["operations"]> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const resource = readOptionalString(item.resource);
+    const verb = readOptionalString(item.verb);
+    if (!resource || !verb) return [];
+    const args = readStringList(item.args);
+    if (args.length === 0) return [];
+    const entity = normalizeOpsOperationEntity(item.entity);
+    return [{
+      resource,
+      verb,
+      args,
+      ...(entity ? { entity } : {}),
+      ...(typeof item.externalIdRequired === "boolean"
+        ? { externalIdRequired: item.externalIdRequired }
+        : typeof item.external_id_required === "boolean"
+          ? { externalIdRequired: item.external_id_required }
+          : {}),
+    }];
+  });
+}
+
+function normalizeOpsOperationEntity(value: unknown): NonNullable<NonNullable<OpsChangeProposalInput["operations"]>[number]["entity"]> | null {
+  if (!isRecord(value)) return null;
+  const nodeType = readOptionalString(value.nodeType) ?? readOptionalString(value.node_type);
+  const nodeKey = readOptionalString(value.nodeKey) ?? readOptionalString(value.node_key);
+  const displayName = readOptionalString(value.displayName) ?? readOptionalString(value.display_name);
+  const parentNodeType = readOptionalString(value.parentNodeType) ?? readOptionalString(value.parent_node_type);
+  const parentNodeKey = readOptionalString(value.parentNodeKey) ?? readOptionalString(value.parent_node_key);
+  const status = readOptionalString(value.status);
+  const entity = {
+    ...(nodeType ? { nodeType } : {}),
+    ...(nodeKey ? { nodeKey } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(parentNodeType ? { parentNodeType } : {}),
+    ...(parentNodeKey ? { parentNodeKey } : {}),
+    ...(status ? { status } : {}),
+  };
+  return Object.keys(entity).length > 0 ? entity : null;
+}
+
+function readStringList(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return value.split(/\s+/).filter(Boolean);
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+        const text = readOptionalString(item);
+        return text ? [text] : [];
+      })
+    : [];
 }
 
 function normalizeAutomationRuleProposalInput(

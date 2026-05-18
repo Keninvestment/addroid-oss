@@ -19,7 +19,7 @@
     "@addroid/llm-provider": "*",
     "@addroid/meta-adapter": "*",
     "@addroid/queue": "*",
-    "@addroid/yaml-schemas": "*",
+    "@addroid/ops-schemas": "*",
     "cron-parser": "^4.9.0",
     "yaml": "^2.5.1"
   },

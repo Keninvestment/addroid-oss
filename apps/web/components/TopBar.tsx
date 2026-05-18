@@ -33,7 +33,7 @@ export async function TopBar() {
   return (
     <header className="top-bar">
       <Link href="/" className="top-bar__brand" style={{ color: "inherit", textDecoration: "none" }}>
-        AdDroid
+        AdDroid OSS
       </Link>
       <div className="top-bar__meta">
         <Link

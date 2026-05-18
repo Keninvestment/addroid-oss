@@ -58,8 +58,8 @@ AdDroid OSS の既定モデルは、OS の常駐サービス内で **1 プロセ
 | `packages/github-adapter` | GitHub OAuth、ops repo bootstrap、ETag-aware ポーリング。adapter pattern (Real / Mock)。 |
 | `packages/meta-adapter` | Meta Graph API adapter (Real / Mock / Stub)、in-memory sandbox harness。 |
 | `packages/llm-provider` | LLM Provider 抽象 (Codex / Stub / Mock) と Image Provider、AI run / Creative QA / Creative storage。 |
-| `packages/yaml-schemas` | Ads YAML / cron.yaml / project.yaml の Zod スキーマと型。 |
-| `packages/ops-template` | 生成 ops リポジトリのテンプレート (brand.yaml / cron.yaml / .addroid/project.yaml / GitHub Actions / README)。 |
+| `packages/ops-schemas` | GitOps operation manifest の Zod スキーマと型。 |
+| `packages/ops-template` | 生成 ops リポジトリのテンプレート (operations / .addroid/project.json / GitHub Actions / README)。 |
 
 依存方向は単一方向に保ちます:
 
@@ -80,7 +80,7 @@ packages/*             →  packages/* (極小限)
 |---|---|
 | `workspaces` | AdDroid のローカルワークスペース (config + ops repo メタ) |
 | `oauth_tokens` | GitHub / Meta / Codex / Slack の OAuth トークン (暗号化保存) |
-| `ad_accounts` | Meta 広告アカウント (`ads/accounts/<key>/...` と紐付け、`modeOverride` で per-account 実行モード上書き) |
+| `ad_accounts` | Meta 広告アカウント (Meta Mirror DB / operation manifests と紐付け、`modeOverride` で per-account 実行モード上書き) |
 | `ads_hierarchy` | campaign / adset / ad の正規化ツリー |
 | `creatives` | クリエイティブ資産 (画像 / カルーセル) と LocalDisk storage ref |
 | `performance_snapshots` | 日次メトリクスの冪等スナップショット |

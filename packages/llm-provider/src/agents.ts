@@ -1369,7 +1369,7 @@ export async function runMediaBuyerAgent(
 // ===========================================================================
 
 export interface GitOpsAgentFile {
-  /** repo-relative path (例: "ads/accounts/act_123/campaigns/cmp_456.yaml")。 */
+  /** repo-relative path (例: "operations/act_123/2026-05-17-budget.json")。 */
   path: string;
   /** "create" | "update" | "delete". */
   action: "create" | "update" | "delete";

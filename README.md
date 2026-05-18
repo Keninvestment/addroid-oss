@@ -358,8 +358,8 @@ addroid/
 │   ├── github-adapter/     GitHub OAuth + Octokit + ETag-aware ポーリング adapter
 │   ├── meta-adapter/       Meta Graph API adapter (Real / Mock / Stub) と sandbox harness
 │   ├── llm-provider/       LLM / Image Provider 抽象 (Codex / Stub / Mock) と Creative QA
-│   ├── yaml-schemas/       Ads YAML / cron.yaml / project.yaml の Zod スキーマ
-│   └── ops-template/       生成 ops リポジトリのテンプレート (brand.yaml 他)
+│   ├── ops-schemas/        GitOps operation manifest の Zod スキーマ
+│   └── ops-template/       生成 ops リポジトリのテンプレート
 ├── prisma/
 │   └── schema.prisma       AdDroid テーブル + pg-boss 互換スキーマ
 ├── design/

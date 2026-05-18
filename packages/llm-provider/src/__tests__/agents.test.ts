@@ -887,7 +887,7 @@ test("runGitOpsAgent: succeeds with one file diff", async () => {
         branchName: "addroid/act_1-budget-2026-04-30",
         files: [
           {
-            path: "ads/accounts/act_1/adsets/adset_42.yaml",
+            path: "operations/act_1/2026-04-30-budget.json",
             action: "update",
             diff: "@@\n-bid: 100\n+bid: 110",
           },

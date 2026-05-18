@@ -28,8 +28,9 @@ import type {
   MetaRefreshResult,
 } from "@addroid/meta-adapter";
 import { MetaCliRunner, MetaTokenExpiredError } from "@addroid/meta-adapter";
-import type { CreateCampaignAction, PlanAction } from "@addroid/yaml-schemas";
-import type { ApplyJobContext } from "@addroid/queue";
+import type { ApplyAction, ApplyJobContext } from "@addroid/queue";
+
+type CreateCampaignAction = ApplyAction & { kind: "create_campaign" };
 
 import {
   CliApplyExecutor,
@@ -571,6 +572,13 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
     });
     assert.equal(creative.status, "success");
     assert.equal(creative.externalId, "999000111222333");
+    const creativePayload = creative.logPayload as Record<string, unknown>;
+    assert.deepEqual(
+      (creativePayload.sanitizedArgs as string[]).filter((arg) =>
+        arg.startsWith("--instagram-")
+      ),
+      ["--instagram-actor-id"]
+    );
     assert.equal(log.length, 0, "create_creative should not spawn the legacy CLI");
 
     const ad = await executor.executeAction({
@@ -601,23 +609,70 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
   }
 });
 
+test("CliApplyExecutor.executeAction: meta_cli_operation uses canonical instagram actor flag", async () => {
+  const log: SpawnLog[] = [];
+  const runner = makeRunner(
+    [{ stdout: '{"id":"999000111222333"}\n', stderr: "", exitCode: 0 }],
+    log
+  );
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
+
+  const result = await executor.executeAction({
+    action: {
+      kind: "meta_cli_operation",
+      account: "act_786887980003986",
+      resource: "creatives",
+      verb: "create",
+      args: [
+        "ads",
+        "creative",
+        "create",
+        "--name",
+        "Creative 1",
+        "--page-id",
+        "281900655012835",
+        "--image",
+        "/tmp/creative.png",
+        "--instagram-actor-id",
+        "17841465387326763",
+      ],
+      entity: {
+        nodeType: "creative",
+        nodeKey: "cr-1",
+      },
+      externalIdRequired: true,
+    },
+    context: ctx(),
+    attempt: 0,
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(result.externalId, "999000111222333");
+  assert.equal(log.length, 1);
+  assert.ok(log[0]!.args.includes("--instagram-actor-id"));
+  assert.ok(!log[0]!.args.includes("--instagram-user-id"));
+});
+
 // ---------------------------------------------------------------------
-// CliApplyExecutor — unsupported PlanAction kind is fail-closed (skipped)
+// CliApplyExecutor — unsupported action kind is fail-closed (skipped)
 // ---------------------------------------------------------------------
 
-test("CliApplyExecutor.executeAction: unsupported PlanAction kind is skipped without spawning CLI", async () => {
+test("CliApplyExecutor.executeAction: unsupported action kind is skipped without spawning CLI", async () => {
   const log: SpawnLog[] = [];
   const runner = makeRunner([], log); // no scripted runs — must not be invoked
   const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
 
-  const deletePseudoAction = {
-    kind: "delete_campaign",
+  const unsupportedPseudoAction = {
+    kind: "create_experiment",
     account: "primary",
+    experimentId: "exp-x",
     campaignId: "cmp-x",
-  } as unknown as PlanAction;
+    name: "experiment",
+    variants: [],
+  } as unknown as ApplyAction;
 
   const result = await executor.executeAction({
-    action: deletePseudoAction,
+    action: unsupportedPseudoAction,
     context: ctx(),
     attempt: 0,
   });
@@ -626,7 +681,7 @@ test("CliApplyExecutor.executeAction: unsupported PlanAction kind is skipped wit
   assert.equal(log.length, 0, "must not spawn CLI for unsupported action kind");
   const payload = result.logPayload as Record<string, unknown>;
   assert.equal(payload.reason, "unsupported_action");
-  assert.equal(payload.actionKind, "delete_campaign");
+  assert.equal(payload.actionKind, "create_experiment");
 });
 
 // ---------------------------------------------------------------------
@@ -832,15 +887,18 @@ test("extractExternalIdFromCliStdout: empty / non-id stdout yields undefined (ca
   );
 });
 
-test("MockApplyExecutor: skipped for unsupported PlanAction kinds", async () => {
+test("MockApplyExecutor: skipped for unsupported action kinds", async () => {
   const executor = new MockApplyExecutor();
-  const deletePseudoAction = {
-    kind: "delete_campaign",
+  const unsupportedPseudoAction = {
+    kind: "create_experiment",
     account: "primary",
+    experimentId: "exp-x",
     campaignId: "cmp-x",
-  } as unknown as PlanAction;
+    name: "experiment",
+    variants: [],
+  } as unknown as ApplyAction;
   const result = await executor.executeAction({
-    action: deletePseudoAction,
+    action: unsupportedPseudoAction,
     context: ctx(),
     attempt: 0,
   });
@@ -932,22 +990,25 @@ test("resolveApplyExecutor: ADDROID_META_CLI_BIN unset and no MOCK flag → Fail
   assert.ok(!(payload.sanitizedCommand as string).includes(TOKEN));
 });
 
-test("FailClosedApplyExecutor: skipped for unsupported PlanAction kinds (matches Cli/Mock contract)", async () => {
+test("FailClosedApplyExecutor: skipped for unsupported action kinds (matches Cli/Mock contract)", async () => {
   const executor = new FailClosedApplyExecutor();
-  const deletePseudoAction = {
-    kind: "delete_campaign",
+  const unsupportedPseudoAction = {
+    kind: "create_experiment",
     account: "primary",
+    experimentId: "exp-x",
     campaignId: "cmp-x",
-  } as unknown as PlanAction;
+    name: "experiment",
+    variants: [],
+  } as unknown as ApplyAction;
   const result = await executor.executeAction({
-    action: deletePseudoAction,
+    action: unsupportedPseudoAction,
     context: ctx(),
     attempt: 0,
   });
   assert.equal(result.status, "skipped");
   const payload = result.logPayload as Record<string, unknown>;
   assert.equal(payload.reason, "unsupported_action");
-  assert.equal(payload.actionKind, "delete_campaign");
+  assert.equal(payload.actionKind, "create_experiment");
 });
 
 // regression fix: CLI が configured (ADDROID_META_CLI_BIN 設定) のときは

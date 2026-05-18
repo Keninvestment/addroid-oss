@@ -19,8 +19,9 @@ import {
   createPrismaPlanStore,
   type PlanRunOutput,
   type PlanRunSource,
+  type OperationPlanAction,
+  type ValidationFinding,
 } from "../../../worker/src/lib/plan-runtime.js";
-import type { PlanAction, ValidationFinding } from "@addroid/yaml-schemas";
 
 interface PlanOptions {
   root: string;
@@ -107,8 +108,8 @@ export async function runPlan(args: string[]): Promise<number> {
   return errors.length > 0 ? 1 : 0;
 }
 
-function collectActions(result: PlanRunOutput): PlanAction[] {
-  const out: PlanAction[] = [];
+function collectActions(result: PlanRunOutput): OperationPlanAction[] {
+  const out: OperationPlanAction[] = [];
   for (const acc of result.perAccount) out.push(...acc.actions);
   return out;
 }
@@ -240,7 +241,7 @@ function isPlanRunSource(v: string): v is PlanRunSource {
 function printHelp() {
   process.stdout.write(
     [
-      "addroid plan — ops repo の YAML から apply 案を simulate (read-only)",
+      "addroid plan — ops repo の operations/*.json から apply 案を simulate (read-only)",
       "",
       "Usage:",
       "  addroid plan --dry-run [--root <dir>] [--base <dir>] [--account <key>]",
@@ -249,9 +250,8 @@ function printHelp() {
       "Options:",
       "  --dry-run         the current implementation でも plan は dry-run のみ。実 mutation は行わない",
       "  --root, -r <dir>  対象 ops repo ルート (default: cwd)",
-      "  --base <dir>      前回 / base 状態の ops repo ルート。既存キャンペーンとの",
-      "                    差分から budget 変更や initialState の安全性を比較する",
-      "  --account <key>   ads/accounts/<key> の plan のみを出力する (validation は全件)",
+      "  --base <dir>      互換オプション。operation manifest 経路では参照しません",
+      "  --account <key>   指定 accountKey の operation のみを出力する",
       "  --persist         実行結果を execution_logs.kind=plan に記録する",
       "                    (DATABASE_URL 必須。Web UI の /plans 履歴に表示される)",
       "  --source <name>   --persist 時に source ラベルを指定 (default: cli)",
@@ -262,50 +262,16 @@ function printHelp() {
   );
 }
 
-function describeAction(a: PlanAction): string {
-  switch (a.kind) {
-    case "create_campaign": {
-      const parts: string[] = [];
-      if (a.budget.dailyBudget !== undefined) parts.push(`dailyBudget=${a.budget.dailyBudget}`);
-      if (a.budget.lifetimeBudget !== undefined) parts.push(`lifetimeBudget=${a.budget.lifetimeBudget}`);
-      return `+ ${a.kind} account=${a.account} id=${a.campaignId} initialState=${a.initialState} ${parts.join(" ")}`.trimEnd();
-    }
-    case "update_campaign":
-      return `~ ${a.kind} account=${a.account} id=${a.campaignId} fields=${Object.keys(a.changes).join(",") || "(none)"}`;
-    case "delete_campaign":
-      return `- ${a.kind} account=${a.account} id=${a.campaignId}`;
-    case "create_adset":
-      return `+ ${a.kind} account=${a.account} campaign=${a.campaignId} id=${a.adsetId} initialState=${a.initialState}`;
-    case "update_adset":
-      return `~ ${a.kind} account=${a.account} campaign=${a.campaignId} id=${a.adsetId} fields=${Object.keys(a.changes).join(",") || "(none)"}`;
-    case "delete_adset":
-      return `- ${a.kind} account=${a.account} campaign=${a.campaignId} id=${a.adsetId}`;
-    case "create_ad":
-      return `+ ${a.kind} account=${a.account} campaign=${a.campaignId} adset=${a.adsetId} id=${a.adId} creativeRef=${a.creativeRef}`;
-    case "update_ad":
-      return `~ ${a.kind} account=${a.account} campaign=${a.campaignId} adset=${a.adsetId} id=${a.adId} fields=${Object.keys(a.changes).join(",") || "(none)"}`;
-    case "delete_ad":
-      return `- ${a.kind} account=${a.account} campaign=${a.campaignId} adset=${a.adsetId} id=${a.adId}`;
-    case "create_creative":
-      return `+ ${a.kind} account=${a.account} id=${a.creativeId} mediaType=${a.mediaType}`;
-    case "update_creative":
-      return `~ ${a.kind} account=${a.account} id=${a.creativeId} fields=${Object.keys(a.changes).join(",") || "(none)"}`;
-    case "delete_creative":
-      return `- ${a.kind} account=${a.account} id=${a.creativeId}`;
-    case "create_experiment":
-      return `+ ${a.kind} account=${a.account} id=${a.experimentId} campaign=${a.campaignId} variants=${a.variants.length}`;
-    case "update_experiment":
-      return `~ ${a.kind} account=${a.account} id=${a.experimentId} fields=${Object.keys(a.changes).join(",") || "(none)"}`;
-    case "delete_experiment":
-      return `- ${a.kind} account=${a.account} id=${a.experimentId}`;
-  }
+function describeAction(a: OperationPlanAction): string {
+  const prefix = a.verb === "create" ? "+" : a.verb === "delete" ? "-" : "~";
+  return `${prefix} ${a.resource}:${a.verb} account=${a.account} args=${a.args.join(" ")}`;
 }
 
 function printHuman(
   root: string,
   errors: ValidationFinding[],
   warnings: ValidationFinding[],
-  actions: PlanAction[]
+  actions: OperationPlanAction[]
 ): void {
   const lines: string[] = [];
   lines.push("[addroid plan --dry-run]");
@@ -340,7 +306,7 @@ function printHuman(
   }
   lines.push(`  actions     : ${actions.length}`);
   if (actions.length === 0) {
-    lines.push("    (no apply actions — campaigns 配列が空、または brand.yaml がありません)");
+    lines.push("    (no apply actions — operations/*.json がありません)");
   } else {
     for (const a of actions) {
       lines.push(`    ${describeAction(a)}`);
@@ -348,7 +314,7 @@ function printHuman(
   }
   lines.push("");
   lines.push(
-    "  the current implementation: PAUSED-by-default で plan は dry-run のみ。実 apply は worker が GitOps merged PR から起動します。"
+    "  plan は dry-run のみ。実 apply は worker が GitOps merged PR から起動します。"
   );
   lines.push("");
   process.stdout.write(lines.join("\n"));

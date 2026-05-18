@@ -145,12 +145,12 @@ export const AGENT_TOOL_MANIFEST = [
   {
     name: "propose_ops_change",
     description:
-      "停止、配信開始、予算変更など本番広告に影響する変更案を ops repo の GitHub PR として作成する。Meta には直接反映しない。",
-    args: "{intent:'pause'|'activate'|'status_change'|'budget_change'|'other', accountKey?:string, targets?:Array<{level:'campaign'|'adset'|'ad', id:string}>, targetIds?:string[], desiredChanges?:object, rationale?:string, urgency?:'low'|'normal'|'high'}",
+      "停止、配信開始、予算変更、作成、更新、削除など本番広告に影響する変更案を ops repo の GitHub PR として作成する。Meta には直接反映しない。",
+    args: "{intent:'pause'|'activate'|'status_change'|'budget_change'|'other', accountKey?:string, targets?:Array<{level:'campaign'|'adset'|'ad', id:string}>, targetIds?:string[], desiredChanges?:object, operations?:Array<{resource:string, verb:string, args:string[], entity?:{nodeType?:string,nodeKey?:string,displayName?:string,parentNodeType?:string,parentNodeKey?:string,status?:string}, externalIdRequired?:boolean}>, rationale?:string, urgency?:'low'|'normal'|'high'}",
     effects: ["gitops-pr"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
     guidance:
-      "Use this for any production mutation intent. For 'CV0 campaign を停止', first inspect read-only data, then create a PR with intent:'pause' and campaign targets. For budget_change, inspect the current campaign and adset budget fields first, then set targets with an explicit level:'campaign' or level:'adset'. If the user says campaign but the spend limit lives on an adset, target the adset; if campaign/adset budget ownership is unclear, ask before creating the PR. Human merge is required.",
+      "Use this for any production mutation intent. For common pause/activate/budget changes, first inspect read-only data and pass targets + desiredChanges. For other Meta Ads CLI mutations, pass operations with the exact args that should run after approval, e.g. ['ads','adset','update',id,'--daily-budget','300'] or create/delete args verified against the installed CLI. For budget_change, inspect campaign and adset budget fields first and target the object that actually carries the budget. Human merge is required.",
   },
   {
     name: "decide_approval",
@@ -172,7 +172,7 @@ export const AGENT_TOOL_MANIFEST = [
     effects: ["gitops-pr"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
     guidance:
-      "Use this when the user asks to create/upload/submit Meta ad creative. Create PRs only within Meta Ads CLI 2026/04/29 apply coverage. Three placement modes are supported: ad creation in an existing adset needs campaignId+adsetId; adset creation in an existing campaign needs campaignId+adsetName+optimizationGoal+billingEvent; campaign creation needs campaignName+adsetName+objective+optimizationGoal+billingEvent and dailyBudget or lifetimeBudget. If read-only Meta inspection finds an existing campaign/adset the user wants, pass its campaignId/adsetId even when it is not yet in brand.yaml; the PR runtime adopts live parent objects as existing anchors. Budget and bid amounts are account-currency major units; for a JPY account, 500円/日は dailyBudget:500. Targeting supported by apply is countries only. Do not pass age, city/radius, placements, devices, Advantage audience, custom audiences, exclusions, flexible targeting, PROFILE_VISIT, VISIT_INSTAGRAM_PROFILE, or VIEW_INSTAGRAM_PROFILE; tell the user those source settings cannot be reflected by the current CLI and ask whether to proceed with supported alternatives such as LINK_CLICKS and OPEN_LINK. Meta creative options include pageId, body/title/link/description/CTA, instagramUserId, image/video files, and DCO arrays. Ask concise clarification questions for missing placement, pageId, optimizationGoal/billingEvent, budget, destination link, country targeting, or copy before calling the tool. Use referenceImagePaths when attached/local images should guide new image generation; use localMediaPaths only when the files themselves should be submitted as final ad media. Human PR merge is required.",
+      "Use this when the user asks to create/upload/submit Meta ad creative. Create PRs only within Meta Ads CLI 2026/04/29 apply coverage. Three placement modes are supported: ad creation in an existing adset needs campaignId+adsetId; adset creation in an existing campaign needs campaignId+adsetName+optimizationGoal+billingEvent; campaign creation needs campaignName+adsetName+objective+optimizationGoal+billingEvent and dailyBudget or lifetimeBudget. If read-only Meta inspection finds an existing campaign/adset the user wants, pass its campaignId/adsetId; the PR runtime adopts live parent objects as existing anchors. Budget and bid amounts are account-currency major units; for a JPY account, 500円/日は dailyBudget:500. Targeting supported by apply is countries only. Do not pass age, city/radius, placements, devices, Advantage audience, custom audiences, exclusions, flexible targeting, PROFILE_VISIT, VISIT_INSTAGRAM_PROFILE, or VIEW_INSTAGRAM_PROFILE; tell the user those source settings cannot be reflected by the current CLI and ask whether to proceed with supported alternatives such as LINK_CLICKS and OPEN_LINK. Meta creative options include pageId, body/title/link/description/CTA, instagramUserId, image/video files, and DCO arrays. Ask concise clarification questions for missing placement, pageId, optimizationGoal/billingEvent, budget, destination link, country targeting, or copy before calling the tool. Use referenceImagePaths when attached/local images should guide new image generation; use localMediaPaths only when the files themselves should be submitted as final ad media. Human PR merge is required.",
   },
   {
     name: "generate_creatives",
@@ -194,7 +194,7 @@ export const AGENT_TOOL_MANIFEST = [
     effects: ["gitops-pr"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
     guidance:
-      "Use this when the user asks to submit, PR, or入稿 creatives that already exist in /creatives, or gives Creative ID(s) from the creative library. If multiple Creative IDs are already selected, pass all of them as creativeIds and ask only for missing placement/submission settings, not which creative to use. It reuses the stored image and stored Meta ad text; do not call generate_creatives again. If read-only Meta inspection finds an existing campaign/adset the user wants, pass its campaignId/adsetId even when it is not yet in brand.yaml; the PR runtime adopts live parent objects as existing anchors. Ask for missing creativeId/creativeIds, placement, pageId, destination link, optimizationGoal/billingEvent, budget, or country targeting before calling the tool. Human PR merge is required.",
+      "Use this when the user asks to submit, PR, or入稿 creatives that already exist in /creatives, or gives Creative ID(s) from the creative library. If multiple Creative IDs are already selected, pass all of them as creativeIds and ask only for missing placement/submission settings, not which creative to use. It reuses the stored image and stored Meta ad text; do not call generate_creatives again. If read-only Meta inspection finds an existing campaign/adset the user wants, pass its campaignId/adsetId; the PR runtime adopts live parent objects as existing anchors. Ask for missing creativeId/creativeIds, placement, pageId, destination link, optimizationGoal/billingEvent, budget, or country targeting before calling the tool. Human PR merge is required.",
   },
   {
     name: "propose_automation_rule",
@@ -238,6 +238,16 @@ export const AGENT_TOOL_MANIFEST = [
     args: "{resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
     effects: ["read"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+  },
+  {
+    name: "sync_meta_mirror",
+    description:
+      "Meta の現在状態を Mirror DB に同期し、/campaigns や各チャット系の表示元を最新化する。Meta 側は変更しない。",
+    args: "{accountKey?:string, accountId?:string, includeMetrics?:boolean}",
+    effects: ["read", "local-write"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this when the user asks to sync, refresh, update the displayed campaigns, or after Meta-side manual changes. This is read-only against Meta and writes only the local mirror DB.",
   },
 ] as const satisfies readonly AgentToolDefinition[];
 

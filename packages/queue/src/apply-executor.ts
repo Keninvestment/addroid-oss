@@ -1,29 +1,16 @@
 // AdDroid OSS — execute_apply ハンドラ本体。
 //
-// merged PR から enqueue された `apply_jobs` 行を取り、対応する Ads YAML
-// (next + previous) を `AdsLoader` 経由で取得し、`buildExecutionPlan` で
-// PlanAction[] に変換し、`MetaActionExecutor` 経由で 1 件ずつ Meta CLI へ
-// 送って `apply_jobs` を `succeeded` / `failed` / `simulated` に遷移させる。
+// merged PR から enqueue された `apply_jobs` 行を取り、承認済み PR 差分内の
+// operations/*.json を `AdsLoader` 経由で取得し、Meta CLI へ 1 件ずつ送って
+// `apply_jobs` を `succeeded` / `failed` / `simulated` に遷移させる。
 //
 // the current implementation 受入基準:
-//   - "Apply a valid YAML change as PAUSED resources or a mocked equivalent in
-//      local tests."
-//   - "New campaigns must be created PAUSED by default."
-//   - "Activate is separate from Apply" (= apply 経路で active 化させない)。
+//   - PR merge を人間の承認境界として、operation manifest の内容をそのまま実行する。
+//   - loader / approval / execution-mode / account lock の境界で fail-closed する。
 //
 // 本モジュールは Prisma を直接 import しない。`ApplyJobStore` /
 // `MetaActionExecutor` / `AdsLoader` はすべて呼び出し側 (apps/worker) が注入する。
 // テストは `__tests__/fakes.ts` の in-memory fake で置換する。
-
-import type {
-  BrandYaml,
-  CreateAdAction,
-  CreateAdsetAction,
-  CreateCampaignAction,
-  PlanAction,
-  PlanFinding,
-} from "@addroid/yaml-schemas";
-import { buildExecutionPlan } from "@addroid/yaml-schemas";
 
 import {
   buildAdAccountLockKey,
@@ -48,18 +35,95 @@ import type {
   UpsertAppliedAdsNodeInput,
 } from "./store.js";
 
+export interface MetaCliOperationAction {
+  kind: "meta_cli_operation";
+  account: string;
+  resource: string;
+  verb: string;
+  args: string[];
+  entity?: {
+    nodeType?: "campaign" | "adset" | "ad" | "creative" | string;
+    nodeKey?: string;
+    displayName?: string;
+    parentNodeType?: "campaign" | "adset" | string;
+    parentNodeKey?: string;
+    status?: string;
+  };
+  externalIdRequired?: boolean;
+}
+
+type LegacyApplyActionKind =
+  | "create_campaign"
+  | "update_campaign"
+  | "delete_campaign"
+  | "create_adset"
+  | "update_adset"
+  | "delete_adset"
+  | "create_ad"
+  | "update_ad"
+  | "delete_ad"
+  | "create_creative"
+  | "update_creative"
+  | "delete_creative"
+  | "create_experiment"
+  | "update_experiment"
+  | "delete_experiment";
+
+export interface LegacyApplyAction {
+  kind: LegacyApplyActionKind;
+  account: string;
+  campaignId?: any;
+  adsetId?: any;
+  adId?: any;
+  creativeId?: any;
+  creativeRef?: any;
+  name?: any;
+  objective?: any;
+  initialState?: any;
+  budget?: any;
+  adsetBudgetSharing?: any;
+  optimizationGoal?: any;
+  billingEvent?: any;
+  bidAmount?: any;
+  startTime?: any;
+  endTime?: any;
+  targeting?: any;
+  pixelId?: any;
+  customEventType?: any;
+  trackingSpecs?: any;
+  changes?: any;
+  pageId?: any;
+  storageKey?: any;
+  mediaType?: any;
+  body?: any;
+  primaryText?: any;
+  title?: any;
+  headline?: any;
+  linkUrl?: any;
+  description?: any;
+  callToAction?: any;
+  instagramUserId?: any;
+  images?: any;
+  videos?: any;
+  titles?: any;
+  bodies?: any;
+  descriptions?: any;
+  callToActions?: any;
+}
+
+export type ApplyAction = MetaCliOperationAction | LegacyApplyAction;
+
 // ---------------------------------------------------------------------
-// AdsLoader — apply_job が指す PR の Ads YAML 状態を返す境界。
+// AdsLoader — apply_job が指す PR から operation manifest を返す境界。
 // ---------------------------------------------------------------------
 
 /**
- * 1 アカウント分の Ads YAML 状態 (PR before/after)。
- * `previous` が null の場合は「全件新規作成」として扱う。
+ * 旧 loader 互換の型。新経路では使わず、`directActions` のみを実行する。
  */
 export interface AccountAdsState {
   accountKey: string;
-  next: BrandYaml;
-  previous: BrandYaml | null;
+  next: any;
+  previous: any | null;
 }
 
 export interface AdsLoaderInput {
@@ -73,6 +137,10 @@ export interface AdsLoadResult {
   detail?: string;
   /** 影響を受けたアカウント分の状態。空配列なら "no source" 扱い → simulated。 */
   accounts: AccountAdsState[];
+  /**
+ * Operation Manifest から直接構築した実行アクション。
+ */
+  directActions?: Array<{ accountKey: string; actions: ApplyAction[] }>;
 }
 
 export interface AdsLoader {
@@ -80,12 +148,12 @@ export interface AdsLoader {
 }
 
 // ---------------------------------------------------------------------
-// MetaActionExecutor — 1 件の PlanAction を Meta 側に反映する境界。
+// MetaActionExecutor — 1 件の apply action を Meta 側に反映する境界。
 //   real 実装は Meta CLI runner を、テスト/ローカルは in-memory mock を使う。
 // ---------------------------------------------------------------------
 
 export interface ExecuteActionInput {
-  action: PlanAction;
+  action: ApplyAction;
   context: ApplyJobContext;
   /** リトライ回数 (初回 = 0)。executor は基本この値を意識しない。 */
   attempt: number;
@@ -135,74 +203,33 @@ export interface ExecuteActionResult {
 
 export interface MetaActionExecutor {
   /**
-   * 1 件の `PlanAction` を Meta API/CLI に反映する。
+   * 1 件の apply action を Meta API/CLI に反映する。
    *
-   * orchestrator は `enforcePausedOnPlanAction` を経由した「PAUSED 化済み」
-   * action のみをこの関数に渡す。executor 側で initialState を再書き換えしないこと。
+   * orchestrator は PR 承認済み operation manifest から作った action を渡す。
+   * executor 側で承認済み status を再書き換えしないこと。
    */
   executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult>;
 }
 
 // ---------------------------------------------------------------------
-// PAUSED enforcement (pure helper)
+// Approval boundary normalization (pure helper)
 // ---------------------------------------------------------------------
 
 /**
- * `create_*` 系の PlanAction は initialState を必ず "paused" に上書きする。
- *
- * Activate (= ACTIVE 化) は本契約では別操作・別 audit に分離する仕様のため、
- * Apply 経路の create_* はすべて PAUSED で Meta に反映する。YAML 側で
- * `initialState: active` が宣言されていても、apply 段階で握りつぶす。
- *
- * `update_*` 系は initialState の変更を受け付けないようにし、active 化の
- * 副流入を防ぐ (`changes.initialState` を drop する)。
- *
- * 戻り値は新規オブジェクトで、入力の PlanAction は変更しない (immutable)。
+ * PR merge / in-app approval を人間の承認境界として扱い、承認済み action を
+ * そのまま Meta CLI に渡す。将来ここで audit 用の正規化を加える場合も、
+ * status の強制変更は行わない。
  */
-export function enforcePausedOnPlanAction(action: PlanAction): {
-  action: PlanAction;
+export function prepareApprovedApplyAction(action: ApplyAction): {
+  action: ApplyAction;
   rewritten: boolean;
 } {
-  switch (action.kind) {
-    case "create_campaign":
-    case "create_adset":
-    case "create_ad": {
-      if (action.initialState === "paused") return { action, rewritten: false };
-      const rewritten = { ...action, initialState: "paused" as const };
-      return { action: rewritten as CreateCampaignAction | CreateAdsetAction | CreateAdAction, rewritten: true };
-    }
-    case "update_campaign":
-    case "update_adset":
-    case "update_ad": {
-      if (!("changes" in action) || !action.changes.initialState) {
-        return { action, rewritten: false };
-      }
-      // Drop any active-flip from updates. ACTIVE 化は Activate 経路の責務。
-      const restChanges: typeof action.changes = {};
-      for (const [k, v] of Object.entries(action.changes)) {
-        if (k === "initialState") continue;
-        restChanges[k] = v;
-      }
-      // changes が空になったらこの action を no-op にする。
-      const rewritten = { ...action, changes: restChanges };
-      return { action: rewritten as PlanAction, rewritten: true };
-    }
-    default:
-      return { action, rewritten: false };
-  }
+  return { action, rewritten: false };
 }
 
 /** 中身のない update_* (changes={}) は実行不要としてスキップ判定する。 */
-export function isNoopAction(action: PlanAction): boolean {
-  if (
-    action.kind === "update_campaign" ||
-    action.kind === "update_adset" ||
-    action.kind === "update_ad" ||
-    action.kind === "update_creative" ||
-    action.kind === "update_experiment"
-  ) {
-    return Object.keys(action.changes).length === 0;
-  }
+export function isNoopAction(action: ApplyAction): boolean {
+  if (action.kind === "meta_cli_operation") return action.args.length === 0;
   return false;
 }
 
@@ -253,7 +280,7 @@ export interface RunExecuteApplyOptions {
 }
 
 export interface ApplyActionOutcome {
-  action: PlanAction;
+  action: ApplyAction;
   status: ExecuteActionStatus;
   message: string;
   attempts: number;
@@ -292,12 +319,11 @@ const defaultSleep = (ms: number): Promise<void> =>
  * 流れ:
  *   1. ApplyJobContext を取得。見つからなければ "failed (no_context)"。
  *   2. apply_jobs を `running` に遷移。
- *   3. AdsLoader でアカウント別 next/previous YAML を取得。
+ *   3. AdsLoader でアカウント別 operation manifest を取得。
  *      - ロード結果が空 (= local checkout 不在 / mocked source none) なら
  *        `simulated` に倒し audit に `apply.simulated` を記録して終了。
- *   4. 各アカウントについて buildExecutionPlan を走らせ、guardrail/structural
- *      の error finding があれば「plan error」として失敗。
- *   5. 各 PlanAction を PAUSED 化 → MetaActionExecutor に渡す。
+ *   4. 各アカウントの action を検証し、実行対象を確定する。
+ *   5. 各 action を MetaActionExecutor に渡す。
  *      - rate_limit_error は backoff + 再試行。
  *      - auth_error / unknown_error は中断。残り action は skip 扱い。
  *      - 個別実行ごとに `execution_logs (kind=apply)` に sanitized payload を記録。
@@ -444,7 +470,7 @@ export async function runExecuteApply(
     },
   });
 
-  // 3) Ads YAML 取得
+  // 3) Operation manifest 取得
   let load: AdsLoadResult;
   try {
     load = await opts.loader.loadForApply({ context });
@@ -481,7 +507,12 @@ export async function runExecuteApply(
     });
   }
 
-  if (load.accounts.length === 0) {
+  const loadedAccountCount =
+    load.accounts.length > 0
+      ? load.accounts.length
+      : new Set((load.directActions ?? []).map((a) => a.accountKey)).size;
+
+  if (load.accounts.length === 0 && (!load.directActions || load.directActions.length === 0)) {
     // mocked equivalent path: ローダがソースを提供できない場合は simulated。
     await opts.store.recordApplyExecutionLog({
       workspaceId: opts.workspaceId,
@@ -532,7 +563,10 @@ export async function runExecuteApply(
   //   - "report_only never mutates Meta"
   //   - "auto_apply only executes pre-approved safe operations"
   // を Meta CLI 直前で強制する境界。
-  const accountKeys = load.accounts.map((a) => a.accountKey);
+  const accountKeys =
+    load.accounts.length > 0
+      ? load.accounts.map((a) => a.accountKey)
+      : [...new Set((load.directActions ?? []).map((a) => a.accountKey))];
   const modeContext = await opts.store.loadAccountExecutionModes({
     workspaceId: opts.workspaceId,
     accountKeys,
@@ -600,78 +634,20 @@ export async function runExecuteApply(
     });
     return baseSummary("failed", {
       source: load.source,
-      accountsTouched: load.accounts.length,
+      accountsTouched: loadedAccountCount,
       errorMessage,
       abortReason: "report_only_mode",
     });
   }
 
-  // 4) plan 構築 (各アカウント、エラー finding は plan_error)
-  const plans: { accountKey: string; actions: PlanAction[] }[] = [];
-  const planErrors: Array<{ accountKey: string; finding: PlanFinding }> = [];
-  for (const acct of load.accounts) {
-    const plan = buildExecutionPlan({
-      account: acct.accountKey,
-      next: acct.next,
-      previous: acct.previous,
-    });
-    for (const finding of plan.findings) {
-      if (finding.level === "error") {
-        planErrors.push({ accountKey: acct.accountKey, finding });
-      }
+  const plans: { accountKey: string; actions: ApplyAction[] }[] = [];
+  if (load.directActions && load.directActions.length > 0) {
+    for (const direct of load.directActions) {
+      plans.push({ accountKey: direct.accountKey, actions: direct.actions });
     }
-    plans.push({ accountKey: acct.accountKey, actions: plan.actions });
-  }
-  if (planErrors.length > 0) {
-    const summary =
-      `plan validation failed (${planErrors.length} error finding(s))`;
-    await opts.store.recordApplyExecutionLog({
-      workspaceId: opts.workspaceId,
-      kind: "apply",
-      refType: "apply_job",
-      refId: opts.applyJobId,
-      level: "error",
-      message: `apply_job ${opts.applyJobId}: ${summary}`,
-      payload: {
-        stage: "plan",
-        findings: planErrors.map((p) => ({
-          account: p.accountKey,
-          message: p.finding.message,
-          ...(p.finding.pointer ? { pointer: p.finding.pointer } : {}),
-        })),
-      },
-    });
-    await opts.store.markApplyFinished({
-      applyJobId: opts.applyJobId,
-      state: "failed",
-      errorMessage: summary,
-      result: {
-        reason: "plan_error",
-        findingCount: planErrors.length,
-      },
-    });
-    await opts.store.recordApplyAudit({
-      workspaceId: opts.workspaceId,
-      action: "apply.failed",
-      applyJobId: opts.applyJobId,
-      pullRequestId: context.pullRequestId,
-      prNumber: context.prNumber,
-      headSha: context.headSha,
-      ref: `pr#${context.prNumber}@${context.headSha}`,
-      metadata: {
-        reason: "plan_error",
-        findingCount: planErrors.length,
-      },
-    });
-    return baseSummary("failed", {
-      source: load.source,
-      accountsTouched: load.accounts.length,
-      errorMessage: summary,
-      abortReason: "plan_error",
-    });
   }
 
-  // 5) PlanAction を PAUSED 化 → executor に渡す。
+  // 5) Operation action を executor に渡す。
   const outcomes: ApplyActionOutcome[] = [];
   let succeeded = 0;
   let failed = 0;
@@ -714,7 +690,7 @@ export async function runExecuteApply(
     if (abortReason) {
       for (const rawAction of plan.actions) {
         totalActions += 1;
-        const { action, rewritten } = enforcePausedOnPlanAction(rawAction);
+        const { action, rewritten } = prepareApprovedApplyAction(rawAction);
         if (rewritten) pausedRewrites += 1;
         skipped += 1;
         outcomes.push({
@@ -758,10 +734,10 @@ export async function runExecuteApply(
   // 以降の処理は元の終端ブロックへ続く。
 
   // ----- 内部関数: 1 アカウント分の plan を実行する -----
-  async function runPlanForAccount(plan: { accountKey: string; actions: PlanAction[] }): Promise<void> {
+  async function runPlanForAccount(plan: { accountKey: string; actions: ApplyAction[] }): Promise<void> {
     for (const rawAction of plan.actions) {
       totalActions += 1;
-      const { action, rewritten } = enforcePausedOnPlanAction(rawAction);
+      const { action, rewritten } = prepareApprovedApplyAction(rawAction);
       if (rewritten) pausedRewrites += 1;
 
       if (abortReason) {
@@ -884,10 +860,7 @@ export async function runExecuteApply(
         // 永久に拒否される。executor が externalId を返さなかった場合は
         // 「Meta 側に作成されたかも知れないが追跡不能」状態として fail-closed
         // し、null externalId の PAUSED 行は決して作らない。
-        if (
-          isCreateActionRequiringExternalId(action.kind) &&
-          !nonEmptyString(finalResult.externalId)
-        ) {
+        if (actionRequiresExternalId(action) && !nonEmptyString(finalResult.externalId)) {
           failed += 1;
           const message =
             `${action.kind} reported success but Meta CLI returned no externalId; ` +
@@ -1085,7 +1058,7 @@ export async function runExecuteApply(
         failed,
         skipped,
         pausedRewrites,
-        accountsTouched: load.accounts.length,
+        accountsTouched: loadedAccountCount,
       },
     });
     // regression fix: abort 前に Meta 反映 + ads_hierarchy 永続化が完了した
@@ -1107,7 +1080,7 @@ export async function runExecuteApply(
         failed,
         skipped,
         pausedRewrites,
-        accountsTouched: load.accounts.length,
+        accountsTouched: loadedAccountCount,
         affectedNodes: affectedNodesForLog(affectedNodes),
         failingAction: failingAction
           ? failingActionForLog(failingAction)
@@ -1116,7 +1089,7 @@ export async function runExecuteApply(
     });
     return baseSummary("failed", {
       source: load.source,
-      accountsTouched: load.accounts.length,
+      accountsTouched: loadedAccountCount,
       totalActions,
       succeeded,
       failed,
@@ -1137,7 +1110,7 @@ export async function runExecuteApply(
       failed,
       skipped,
       pausedRewrites,
-      accountsTouched: load.accounts.length,
+      accountsTouched: loadedAccountCount,
     },
   });
   // regression fix: `apply.executed` audit metadata に成功 action ごとの
@@ -1157,14 +1130,14 @@ export async function runExecuteApply(
       failed,
       skipped,
       pausedRewrites,
-      accountsTouched: load.accounts.length,
+      accountsTouched: loadedAccountCount,
       totalActions,
       affectedNodes: affectedNodesForLog(affectedNodes),
     },
   });
   return baseSummary("succeeded", {
     source: load.source,
-    accountsTouched: load.accounts.length,
+    accountsTouched: loadedAccountCount,
     totalActions,
     succeeded,
     failed,
@@ -1179,13 +1152,13 @@ export async function runExecuteApply(
 // ---------------------------------------------------------------------
 
 /**
- * PlanAction を execution_logs.payload に乗せられる形にする。
+ * Apply action を execution_logs.payload に乗せられる形にする。
  *
- * - field 名は YAML 由来 (id 等) のみ。token は含まれない。
+ * - field 名は operation manifest 由来 (id 等) のみ。token は含まれない。
  * - 大きい構造 (variants 等) はそのまま JSON シリアライズして OK。
  * - `account` は plan.account として既に乗っているため重複させない。
  */
-function actionForLog(action: PlanAction): JsonValue {
+function actionForLog(action: ApplyAction): JsonValue {
   // structuredClone を使わず JSON 経由で「JSON-friendly」値に正規化する。
   const cloned = JSON.parse(JSON.stringify(action)) as JsonValue;
   return cloned;
@@ -1194,29 +1167,30 @@ function actionForLog(action: PlanAction): JsonValue {
 // ---------------------------------------------------------------------
 // regression fix: ads_hierarchy persistence on Apply success
 //
-// 1 つの PlanAction を `UpsertAppliedAdsNodeInput` に翻訳する純粋関数と、
+// 1 つの apply action を `UpsertAppliedAdsNodeInput` に翻訳する純粋関数と、
 // それを呼び出して `execution_logs` にエラー痕跡を残しつつ apply を継続させる
 // ラッパを定義する。
 //
 // 対象は campaign / adset / ad のみ (creative は別テーブル `creatives` に
-// 永続化される — 本契約のスコープ外)。delete_* は Meta CLI runner の
-// `META_CLI_SUPPORTED_OPERATIONS` に未登録のため status="success" に到達しない。
+// 永続化される — 本契約のスコープ外)。delete_* / product_* などは
+// operation manifest 経由で実行できるが、ads_hierarchy 永続化対象ではない。
 // ---------------------------------------------------------------------
 
 /**
  * regression fix: Apply success が ads_hierarchy 永続化のために external_id を
- * 必須とする PlanAction kinds。runPlanForAccount の success 分岐で fail-closed
+ * 必須とする action kinds。runPlanForAccount の success 分岐で fail-closed
  * 判定に使われ、`deriveAppliedAdsNodeInput` の create_* 分岐でも防御的に
  * 同じルールを適用する (executor 側で漏れた場合の二重防御)。
  */
 export function isCreateActionRequiringExternalId(
-  kind: PlanAction["kind"]
+  kind: ApplyAction["kind"]
 ): boolean {
-  return (
-    kind === "create_campaign" ||
-    kind === "create_adset" ||
-    kind === "create_ad"
-  );
+  return kind === "create_campaign" || kind === "create_adset" || kind === "create_ad";
+}
+
+function actionRequiresExternalId(action: ApplyAction): boolean {
+  if (action.kind === "meta_cli_operation") return action.externalIdRequired === true;
+  return isCreateActionRequiringExternalId(action.kind);
 }
 
 function nonEmptyString(value: string | undefined): value is string {
@@ -1224,7 +1198,7 @@ function nonEmptyString(value: string | undefined): value is string {
 }
 
 function deriveAppliedAdsNodeInput(args: {
-  action: PlanAction;
+  action: ApplyAction;
   workspaceId: string;
   externalId: string | undefined;
   lastCommitSha: string;
@@ -1233,114 +1207,96 @@ function deriveAppliedAdsNodeInput(args: {
   // regression fix: create_* で external_id が空のまま落ちてきたら、ここでも
   // null を返して永続化を拒否する (runPlanForAccount の fail-closed と同じ
   // 不変条件を二重防御する)。
-  if (
-    isCreateActionRequiringExternalId(action.kind) &&
-    !nonEmptyString(externalId)
-  ) {
+  if (actionRequiresExternalId(action) && !nonEmptyString(externalId)) {
     return null;
   }
   const externalIdMaybe = nonEmptyString(externalId) ? { externalId } : {};
   const spec = actionForLog(action);
-  switch (action.kind) {
-    case "create_campaign":
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "campaign",
-        nodeKey: action.campaignId,
-        displayName: action.name,
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-        status: "paused",
-      };
-    case "update_campaign": {
-      const renamed = extractDisplayNameFromChanges(action.changes);
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "campaign",
-        nodeKey: action.campaignId,
-        ...(renamed !== undefined ? { displayName: renamed } : {}),
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-      };
-    }
-    case "create_adset":
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "adset",
-        nodeKey: action.adsetId,
-        displayName: action.name,
-        parentNodeType: "campaign",
-        parentNodeKey: action.campaignId,
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-        status: "paused",
-      };
-    case "update_adset": {
-      const renamed = extractDisplayNameFromChanges(action.changes);
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "adset",
-        nodeKey: action.adsetId,
-        ...(renamed !== undefined ? { displayName: renamed } : {}),
-        parentNodeType: "campaign",
-        parentNodeKey: action.campaignId,
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-      };
-    }
-    case "create_ad":
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "ad",
-        nodeKey: action.adId,
-        displayName: action.name,
-        parentNodeType: "adset",
-        parentNodeKey: action.adsetId,
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-        status: "paused",
-      };
-    case "update_ad": {
-      const renamed = extractDisplayNameFromChanges(action.changes);
-      return {
-        workspaceId,
-        accountKey: action.account,
-        nodeType: "ad",
-        nodeKey: action.adId,
-        ...(renamed !== undefined ? { displayName: renamed } : {}),
-        parentNodeType: "adset",
-        parentNodeKey: action.adsetId,
-        ...externalIdMaybe,
-        lastCommitSha,
-        spec,
-      };
-    }
-    default:
-      return null;
+  if (action.kind === "meta_cli_operation") {
+    const entity = action.entity;
+    if (!entity?.nodeType || !entity.nodeKey) return null;
+    const nodeType =
+      entity.nodeType === "campaign" || entity.nodeType === "adset" || entity.nodeType === "ad"
+        ? entity.nodeType
+        : null;
+    if (!nodeType) return null;
+    const parentNodeType =
+      entity.parentNodeType === "campaign" || entity.parentNodeType === "adset"
+        ? entity.parentNodeType
+        : undefined;
+    const status =
+      entity.status === "active" || entity.status === "paused" || entity.status === "archived"
+        ? entity.status
+        : undefined;
+    return {
+      workspaceId,
+      accountKey: action.account,
+      nodeType,
+      nodeKey: entity.nodeKey,
+      ...(entity.displayName ? { displayName: entity.displayName } : {}),
+      ...(parentNodeType ? { parentNodeType } : {}),
+      ...(entity.parentNodeKey ? { parentNodeKey: entity.parentNodeKey } : {}),
+      ...externalIdMaybe,
+      lastCommitSha,
+      spec,
+      ...(status ? { status } : {}),
+    };
   }
+  if (action.kind === "create_campaign" || action.kind === "update_campaign") {
+    return {
+      workspaceId,
+      accountKey: action.account,
+      nodeType: "campaign",
+      nodeKey: String(action.campaignId),
+      ...(typeof action.name === "string" ? { displayName: action.name } : {}),
+      ...externalIdMaybe,
+      lastCommitSha,
+      spec,
+      ...(typeof action.initialState === "string" ? { status: normalizeNodeStatus(action.initialState) } : {}),
+    };
+  }
+  if (action.kind === "create_adset" || action.kind === "update_adset") {
+    return {
+      workspaceId,
+      accountKey: action.account,
+      nodeType: "adset",
+      nodeKey: String(action.adsetId),
+      ...(typeof action.name === "string" ? { displayName: action.name } : {}),
+      parentNodeType: "campaign",
+      parentNodeKey: String(action.campaignId),
+      ...externalIdMaybe,
+      lastCommitSha,
+      spec,
+      ...(typeof action.initialState === "string" ? { status: normalizeNodeStatus(action.initialState) } : {}),
+    };
+  }
+  if (action.kind === "create_ad" || action.kind === "update_ad") {
+    return {
+      workspaceId,
+      accountKey: action.account,
+      nodeType: "ad",
+      nodeKey: String(action.adId),
+      ...(typeof action.name === "string" ? { displayName: action.name } : {}),
+      parentNodeType: "adset",
+      parentNodeKey: String(action.adsetId),
+      ...externalIdMaybe,
+      lastCommitSha,
+      spec,
+      ...(typeof action.initialState === "string" ? { status: normalizeNodeStatus(action.initialState) } : {}),
+    };
+  }
+  return null;
 }
 
-function extractDisplayNameFromChanges(
-  changes: Record<string, { from: unknown; to: unknown }>
-): string | undefined {
-  const nameChange = changes.name;
-  if (nameChange && typeof nameChange.to === "string") return nameChange.to;
+function normalizeNodeStatus(value: string): "active" | "paused" | "archived" | undefined {
+  const v = value.toLowerCase();
+  if (v === "active" || v === "paused" || v === "archived") return v;
   return undefined;
 }
 
 async function persistAppliedHierarchyNode(args: {
-  action: PlanAction;
-  plan: { accountKey: string; actions: PlanAction[] };
+  action: ApplyAction;
+  plan: { accountKey: string; actions: ApplyAction[] };
   finalResult: ExecuteActionResult;
   context: ApplyJobContext;
   opts: RunExecuteApplyOptions;
@@ -1400,7 +1356,7 @@ type NodeIdent = {
 
 interface AffectedNodeRecord extends NodeIdent {
   accountKey: string;
-  actionKind: PlanAction["kind"];
+  actionKind: ApplyAction["kind"];
   /** Meta 側で確定した external_id (例: act_xxx/cmp_yyy)。executor が返さなければ null。 */
   externalId: string | null;
   /** `upsertAppliedAdsNode` が返した local 行 id。creative や upsert 失敗時は null。 */
@@ -1409,7 +1365,7 @@ interface AffectedNodeRecord extends NodeIdent {
 
 interface FailingActionRecord extends NodeIdent {
   accountKey: string;
-  actionKind: PlanAction["kind"];
+  actionKind: ApplyAction["kind"];
   /**
    * 失敗 action が触ろうとしていた Meta external_id。executor が
    * `update_x` で対象オブジェクトの id を返している場合等の externalId を
@@ -1418,33 +1374,22 @@ interface FailingActionRecord extends NodeIdent {
   attemptedExternalId: string | null;
 }
 
-function nodeIdentForAction(action: PlanAction): NodeIdent {
-  switch (action.kind) {
-    case "create_campaign":
-    case "update_campaign":
-    case "delete_campaign":
-      return { nodeType: "campaign", nodeKey: action.campaignId };
-    case "create_adset":
-    case "update_adset":
-    case "delete_adset":
-      return { nodeType: "adset", nodeKey: action.adsetId };
-    case "create_ad":
-    case "update_ad":
-    case "delete_ad":
-      return { nodeType: "ad", nodeKey: action.adId };
-    case "create_creative":
-    case "update_creative":
-    case "delete_creative":
-      return { nodeType: "creative", nodeKey: action.creativeId };
-    case "create_experiment":
-    case "update_experiment":
-    case "delete_experiment":
-      return { nodeType: "experiment", nodeKey: action.experimentId };
+function nodeIdentForAction(action: ApplyAction): NodeIdent {
+  if (action.kind === "meta_cli_operation") {
+    return {
+      nodeType: (action.entity?.nodeType as NodeIdent["nodeType"] | undefined) ?? "campaign",
+      nodeKey: action.entity?.nodeKey ?? `${action.resource}:${action.verb}`,
+    };
   }
+  if (action.kind.endsWith("_campaign")) return { nodeType: "campaign", nodeKey: String(action.campaignId) };
+  if (action.kind.endsWith("_adset")) return { nodeType: "adset", nodeKey: String(action.adsetId) };
+  if (action.kind.endsWith("_ad")) return { nodeType: "ad", nodeKey: String(action.adId) };
+  if (action.kind.endsWith("_creative")) return { nodeType: "creative", nodeKey: String(action.creativeId) };
+  return { nodeType: "campaign", nodeKey: action.kind };
 }
 
 function buildFailingActionRecord(args: {
-  action: PlanAction;
+  action: ApplyAction;
   accountKey: string;
   attemptedExternalId: string | undefined;
 }): FailingActionRecord {

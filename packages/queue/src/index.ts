@@ -119,17 +119,19 @@ export {
 } from "./rate-limit.js";
 
 export {
-  enforcePausedOnPlanAction,
+  prepareApprovedApplyAction,
   isNoopAction,
   runExecuteApply,
   type AccountAdsState,
   type AdsLoader,
   type AdsLoaderInput,
   type AdsLoadResult,
+  type ApplyAction,
   type ApplyActionOutcome,
   type ExecuteActionInput,
   type ExecuteActionResult,
   type ExecuteActionStatus,
+  type MetaCliOperationAction,
   type MetaActionExecutor,
   type RunExecuteApplyOptions,
   type RunExecuteApplySummary,

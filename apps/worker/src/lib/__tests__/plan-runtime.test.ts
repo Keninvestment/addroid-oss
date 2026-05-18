@@ -63,24 +63,32 @@ schedules:
     enabled: true
 `;
 
+function operationManifest(accountKey: string, actions: unknown[]): string {
+  return `${JSON.stringify(
+    {
+      version: 1,
+      accountKey,
+      intent: "other",
+      source: "test",
+      actor: "test",
+      rationale: null,
+      createdAt: "2026-05-17T00:00:00.000Z",
+      actions,
+    },
+    null,
+    2
+  )}\n`;
+}
+
 // ---- runPlanForRoot: success ---------------------------------------
 
 test("runPlanForRoot returns ok=true and risk=ok for a clean repo with paused campaigns", () => {
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: fall-promo
-    name: Fall Promo
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget:
-      dailyBudget: 50
-`,
+    "operations/primary/create-campaign.json": operationManifest("primary", [
+      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "Fall Promo", "--objective", "outcome_traffic", "--status", "paused"] },
+    ]),
   });
   try {
     const out = runPlanForRoot({ rootDir: dir });
@@ -104,31 +112,22 @@ campaigns:
 
 // ---- runPlanForRoot: dry-run failure (validation error) ------------
 
-test("runPlanForRoot reports dry-run failure (initial active campaign) with ok=false", () => {
+test("runPlanForRoot reports dry-run failure for unsupported operation with ok=false", () => {
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: launch
-    name: Launch
-    objective: OUTCOME_TRAFFIC
-    initialState: active
-    budget:
-      dailyBudget: 100
-`,
+    "operations/primary/unsupported.json": operationManifest("primary", [
+      { resource: "campaign", verb: "dance", args: ["ads", "campaign", "dance"] },
+    ]),
   });
   try {
     const out = runPlanForRoot({ rootDir: dir });
     assert.equal(out.ok, false);
     assert.equal(out.risk, "error");
-    assert.ok(out.validationErrors.length > 0);
+    assert.equal(out.perAccount.length, 1);
     assert.match(
-      out.validationErrors.map((e) => e.message).join("\n"),
-      /initialState: "paused"/
+      out.perAccount[0]!.findings.map((e) => e.message).join("\n"),
+      /unsupported Meta CLI operation/
     );
   } finally {
     cleanup();
@@ -137,24 +136,11 @@ campaigns:
 
 // ---- runPlanForRoot: guardrail violation (plan-level error) --------
 
-test("runPlanForRoot surfaces guardrail violations as plan-level errors", () => {
+test("runPlanForRoot surfaces invalid operation manifest as validation errors", () => {
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-guardrails:
-  maxDailyBudgetPerCampaign: 50
-campaigns:
-  - id: fall
-    name: Fall
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget:
-      dailyBudget: 100
-`,
+    "operations/primary/invalid.json": `{"version":1,"accountKey":"primary","actions":"nope"}\n`,
   });
   try {
     const out = runPlanForRoot({ rootDir: dir });
@@ -162,12 +148,9 @@ campaigns:
     assert.equal(out.risk, "error");
     assert.ok(
       out.validationErrors.some((e) =>
-        e.message.includes("maxDailyBudgetPerCampaign")
+        e.message.includes("actions[] is required")
       )
     );
-    assert.equal(out.perAccount.length, 1);
-    assert.equal(out.perAccount[0]!.risk, "error");
-    assert.ok(out.perAccount[0]!.counts.errors >= 1);
   } finally {
     cleanup();
   }
@@ -179,28 +162,12 @@ test("runPlanForRoot accountFilter restricts perAccount to matching account", ()
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: a
-    name: A
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget: { dailyBudget: 10 }
-`,
-    "ads/accounts/secondary/brand.yaml": `version: 1
-account:
-  key: secondary
-  displayName: "Secondary"
-campaigns:
-  - id: b
-    name: B
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget: { dailyBudget: 20 }
-`,
+    "operations/primary/a.json": operationManifest("primary", [
+      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "A"] },
+    ]),
+    "operations/secondary/b.json": operationManifest("secondary", [
+      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "B"] },
+    ]),
   });
   try {
     const out = runPlanForRoot({ rootDir: dir, accountFilter: "secondary" });
@@ -218,17 +185,9 @@ test("persistPlanRun records info-level execution log on a clean plan", async ()
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: fall-promo
-    name: Fall Promo
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget: { dailyBudget: 50 }
-`,
+    "operations/primary/create-campaign.json": operationManifest("primary", [
+      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "Fall Promo"] },
+    ]),
   });
   try {
     const result = runPlanForRoot({ rootDir: dir });
@@ -264,17 +223,9 @@ test("persistPlanRun records error-level log when validation fails", async () =>
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: launch
-    name: Launch
-    objective: OUTCOME_TRAFFIC
-    initialState: active
-    budget: { dailyBudget: 100 }
-`,
+    "operations/primary/unsupported.json": operationManifest("primary", [
+      { resource: "campaign", verb: "dance", args: ["ads", "campaign", "dance"] },
+    ]),
   });
   try {
     const result = runPlanForRoot({ rootDir: dir });
@@ -294,7 +245,7 @@ campaigns:
     assert.equal(entry.payload.ok, false);
     assert.equal(entry.payload.risk, "error");
     assert.equal(entry.payload.source, "ci");
-    assert.ok(entry.payload.validationErrors.length > 0);
+    assert.ok((entry.payload.perAccount[0]?.findings.length ?? 0) > 0);
   } finally {
     cleanup();
   }

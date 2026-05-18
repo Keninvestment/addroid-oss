@@ -24,7 +24,7 @@ import {
 import {
   loadAutomationRules,
   type AutomationRuleYaml,
-} from "@addroid/yaml-schemas";
+} from "@addroid/ops-schemas";
 import type { AutomationCliMutationExecutor } from "./automation-action-executor.js";
 import {
   buildCurrentAutomationBaseline,

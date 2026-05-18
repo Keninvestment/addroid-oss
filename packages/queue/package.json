@@ -14,7 +14,6 @@
   },
   "dependencies": {
     "@addroid/llm-provider": "*",
-    "@addroid/yaml-schemas": "*",
     "pg-boss": "^10.1.5"
   },
   "devDependencies": {

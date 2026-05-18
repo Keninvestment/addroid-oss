@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { Prisma, type PrismaClient } from "@addroid/db";
+import type { MetaCliOperationAction } from "@addroid/queue";
 import type {
   CreatePullRequestFile,
   GithubAdapter,
@@ -23,6 +24,15 @@ export interface OpsChangeProposalInput {
   desiredChanges?: Record<string, unknown>;
   rationale?: string;
   urgency?: "low" | "normal" | "high";
+  operations?: OperationProposalAction[];
+}
+
+export interface OperationProposalAction {
+  resource: string;
+  verb: string;
+  args: string[];
+  entity?: MetaCliOperationAction["entity"];
+  externalIdRequired?: boolean;
 }
 
 export interface OpsChangeProposalResult {
@@ -68,49 +78,25 @@ export async function createOpsChangeProposal(opts: {
     where: { workspaceId_key: { workspaceId: opts.workspaceId, key: accountKey } },
     select: { key: true, displayName: true },
   });
-  const checkout = await ensureOpsRepoLocalCheckout({
-    prisma: opts.prisma as never,
-    workspaceId: opts.workspaceId,
-    env,
-  }).catch(() => null);
-  const rootDir =
-    checkout?.rootDir ??
-    (await resolveOpsRepoLocalDirForWorkspace({
-      prisma: opts.prisma as never,
-      workspaceId: opts.workspaceId,
-      env,
-    })).rootDir;
-  if (!rootDir) throw new Error("ops repo の local checkout を解決できません。GitHub 接続と ops repo bootstrap を完了してください。");
-  const brandPath = path.join(rootDir, "ads", "accounts", accountKey, "brand.yaml");
-  if (!fs.existsSync(brandPath)) {
-    throw new Error(`対象 account の brand.yaml が見つかりません: ads/accounts/${accountKey}/brand.yaml`);
-  }
-
-  const original = fs.readFileSync(brandPath, "utf8");
-  const doc = YAML.parse(original) as unknown;
-  if (!isRecord(doc)) throw new Error("brand.yaml の形式が不正です。");
-  const next = structuredCloneJson(doc);
-  const changes = applyProposalToBrand(next, opts.input);
+  const manifest = buildOperationManifest({
+    input: opts.input,
+    accountKey,
+    actor: opts.actor,
+    source: opts.source,
+  });
+  const changes = manifest.actions.map(formatOperationChange);
   if (changes.length === 0) {
-    throw new Error("PR にできる変更対象が見つかりませんでした。target id と level を確認してください。");
+    throw new Error("PR にできる操作が見つかりませんでした。target id、level、desiredChanges を確認してください。");
   }
 
-  const nextText = YAML.stringify(next);
+  const nextText = `${JSON.stringify(manifest, null, 2)}\n`;
+  const operationPath = `operations/${accountKey}/${new Date().toISOString().replace(/[:.]/g, "-")}-${opts.input.intent}.json`;
   const file: CreatePullRequestFile = {
-    path: `ads/accounts/${accountKey}/brand.yaml`,
-    action: "update",
+    path: operationPath,
+    action: "create",
     diff: fullFileDiff(nextText),
   };
-  const baseDir = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
-  const plan = validateWithTempCheckout({
-    rootDir,
-    baseDir,
-    file,
-    accountKey,
-  });
-  if (!plan.ok) {
-    throw new Error(formatDryRunFailure(plan));
-  }
+  const planSummary = summarizeOperationManifest(manifest);
 
   const title = proposalTitle(opts.input.intent, account?.displayName ?? accountKey, changes);
   const body = proposalBody({
@@ -119,7 +105,7 @@ export async function createOpsChangeProposal(opts: {
     actor: opts.actor,
     source: opts.source,
     changes,
-    planSummary: summarizePlan(plan),
+    planSummary,
   });
   const branchName = `addroid/ops-proposal-${Date.now().toString(36)}`;
   const created = await opts.githubAdapter.createPullRequest({
@@ -191,10 +177,11 @@ export async function createOpsChangeProposal(opts: {
       approvedBy: "addroid",
       decision: "approval_required",
       comment: "Agent-created GitOps proposal requires human PR merge.",
-      metadata: {
+    metadata: {
         decisionSource: "agent_ops_proposal",
         intent: opts.input.intent,
         accountKey,
+        operationPath,
         changes,
       } as Prisma.InputJsonValue,
     },
@@ -210,8 +197,9 @@ export async function createOpsChangeProposal(opts: {
         source: opts.source,
         intent: opts.input.intent,
         accountKey,
+        operationPath,
         changes,
-        planSummary: summarizePlan(plan),
+        planSummary,
       } as Prisma.InputJsonValue,
     },
   }).catch(() => undefined);
@@ -222,9 +210,172 @@ export async function createOpsChangeProposal(opts: {
     pullRequestId: prRow.id,
     headSha: created.headSha,
     filesChanged: 1,
-    planOk: plan.ok,
-    planSummary: summarizePlan(plan),
+    planOk: true,
+    planSummary,
   };
+}
+
+interface OperationManifest {
+  version: 1;
+  accountKey: string;
+  intent: OpsChangeProposalInput["intent"];
+  source: string;
+  actor: string;
+  rationale: string | null;
+  createdAt: string;
+  actions: Array<Omit<MetaCliOperationAction, "kind" | "account">>;
+}
+
+function buildOperationManifest(input: {
+  input: OpsChangeProposalInput;
+  accountKey: string;
+  actor: string;
+  source: string;
+}): OperationManifest {
+  const actions = normalizeOperationActions(input.input, input.accountKey);
+  return {
+    version: 1,
+    accountKey: input.accountKey,
+    intent: input.input.intent,
+    source: input.source,
+    actor: input.actor,
+    rationale: input.input.rationale?.trim() || null,
+    createdAt: new Date().toISOString(),
+    actions,
+  };
+}
+
+function normalizeOperationActions(
+  input: OpsChangeProposalInput,
+  accountKey: string
+): Array<Omit<MetaCliOperationAction, "kind" | "account">> {
+  if (Array.isArray(input.operations) && input.operations.length > 0) {
+    return input.operations.map((op) => ({
+      resource: normalizeResourceName(op.resource),
+      verb: op.verb,
+      args: op.args,
+      ...(op.entity ? { entity: op.entity } : {}),
+      ...(op.externalIdRequired ? { externalIdRequired: true } : {}),
+    }));
+  }
+  const targets = normalizeTargetsFromInput(input);
+  if (targets.length === 0) throw new Error("targets または operations を指定してください。");
+  return targets.map((target) => operationFromTarget(input, target, accountKey));
+}
+
+function operationFromTarget(
+  input: OpsChangeProposalInput,
+  target: OpsChangeProposalTarget,
+  _accountKey: string
+): Omit<MetaCliOperationAction, "kind" | "account"> {
+  const desired = input.desiredChanges ?? {};
+  if (input.intent === "budget_change") {
+    if (target.level === "ad") {
+      throw new Error("予算変更の対象は campaign または adset を指定してください。ad には budget を設定できません。");
+    }
+    const flags = budgetChangeFlags(desired);
+    if (flags.length === 0) throw new Error("予算変更には dailyBudget または lifetimeBudget が必要です。");
+    const resource = target.level === "campaign" ? "campaigns" : "adsets";
+    const cliResource = target.level === "campaign" ? "campaign" : "adset";
+    return {
+      resource,
+      verb: "update",
+      args: ["ads", cliResource, "update", target.id, ...flags],
+      entity: {
+        nodeType: target.level,
+        nodeKey: target.id,
+      },
+    };
+  }
+  const status = desiredStatus(input);
+  const cliResource = target.level;
+  const resource = target.level === "campaign" ? "campaigns" : target.level === "adset" ? "adsets" : "ads";
+  return {
+    resource,
+    verb: "update",
+    args: ["ads", cliResource, "update", target.id, "--status", status],
+    entity: {
+      nodeType: target.level,
+      nodeKey: target.id,
+      status,
+    },
+  };
+}
+
+function normalizeTargetsFromInput(input: OpsChangeProposalInput): OpsChangeProposalTarget[] {
+  const out: OpsChangeProposalTarget[] = [];
+  for (const item of input.targets ?? []) {
+    if (!item?.id || !item.level) continue;
+    if (item.level === "campaign" || item.level === "adset" || item.level === "ad") out.push(item);
+  }
+  const explicitLevel = readString(input.desiredChanges?.level);
+  for (const id of input.targetIds ?? []) {
+    const level =
+      explicitLevel === "campaign" || explicitLevel === "adset" || explicitLevel === "ad"
+        ? explicitLevel
+        : input.intent === "budget_change"
+          ? null
+          : "campaign";
+    if (!level) {
+      throw new Error(`targetIds だけでは対象階層を確定できません: ${id}。targets に level を指定してください。`);
+    }
+    out.push({ level, id });
+  }
+  return out;
+}
+
+function budgetChangeFlags(desired: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  const dailyBudget = readNumber(desired.dailyBudget);
+  const lifetimeBudget = readNumber(desired.lifetimeBudget);
+  if (dailyBudget !== null) out.push("--daily-budget", String(Math.round(dailyBudget)));
+  if (lifetimeBudget !== null) out.push("--lifetime-budget", String(Math.round(lifetimeBudget)));
+  return out;
+}
+
+function desiredStatus(input: OpsChangeProposalInput): "active" | "paused" | "archived" {
+  const explicit = readString(input.desiredChanges?.status) ?? readString(input.desiredChanges?.initialState);
+  const normalized = explicit?.toLowerCase();
+  if (normalized === "active" || normalized === "activate") return "active";
+  if (normalized === "archived" || normalized === "archive") return "archived";
+  if (normalized === "paused" || normalized === "pause") return "paused";
+  if (input.intent === "activate") return "active";
+  return "paused";
+}
+
+function normalizeResourceName(resource: string): string {
+  switch (resource) {
+    case "campaign":
+      return "campaigns";
+    case "adset":
+      return "adsets";
+    case "ad":
+      return "ads";
+    case "creative":
+      return "creatives";
+    case "catalog":
+      return "catalogs";
+    case "dataset":
+      return "datasets";
+    case "page":
+      return "pages";
+    case "product-feed":
+      return "product-feeds";
+    case "product-item":
+      return "product-items";
+    case "product-set":
+      return "product-sets";
+    default:
+      return resource;
+  }
+}
+
+function formatOperationChange(action: Omit<MetaCliOperationAction, "kind" | "account">): string {
+  return `${action.resource}:${action.verb} ${action.args.join(" ")}`;
+}
+
+function summarizeOperationManifest(manifest: OperationManifest): string {
+  return `operation_manifest=ok actions=${manifest.actions.length} account=${manifest.accountKey}`;
 }
 
 function readAccountKey(input: OpsChangeProposalInput, fallback: string | null): string {
@@ -488,7 +639,7 @@ function fullFileDiff(content: string): string {
     .split("\n")
     .map((line) => `+${line}`)
     .join("\n");
-  return [`--- /dev/null`, `+++ b/brand.yaml`, `@@`, body].join("\n");
+  return [`--- /dev/null`, `+++ b/operation.json`, `@@`, body].join("\n");
 }
 
 function extractAddedContentFromDiff(diff: string): string {

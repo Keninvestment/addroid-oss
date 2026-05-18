@@ -400,7 +400,7 @@ export interface RecordApplyAuditInput {
  * `external_id 未確定` で永久に拒否される (acceptance: "Activate is separate
  * from Apply ... before changing PAUSED to ACTIVE"). 本入力でその欠落を埋める。
  *
- * - `accountKey` は YAML 上の `ads/accounts/<key>` で、実装側が
+ * - `accountKey` は AdDroid の ad account key で、実装側が
  *   `ad_accounts.(workspaceId, key)` を参照して `accountId` を解決する。
  * - `parentNodeType` / `parentNodeKey` はノード階層の親 (adset → campaign,
  *   ad → adset) を指し、実装側が同じ accountId 配下から `parentId` を解決する。
@@ -408,7 +408,7 @@ export interface RecordApplyAuditInput {
  *   YAML 名前変更があった場合のみ渡す (= update_* の changes.name.to)。
  * - `externalId` は Meta 側で確定した campaign/adset/ad/creative ID。
  * - `lastCommitSha` は apply の元 PR の headSha (= Apply 操作の commit metadata)。
- * - `spec` は sanitized な PlanAction snapshot (token を含めない)。
+ * - `spec` は sanitized な apply action snapshot (token を含めない)。
  * - `status` は Apply 経路では常に "paused" (Activate 経路で "active" に上書き)。
  */
 export interface UpsertAppliedAdsNodeInput {
@@ -434,7 +434,7 @@ export interface UpsertAppliedAdsNodeInput {
  * - `workspaceMode` は `workspaces.executionMode`。null は不明値で、
  *   `resolveExecutionMode` が `report_only` にフォールバックする。
  * - `overrideByAccountKey` のキーは AdsLoader の `accountKey` (= YAML 上の
- *   `ads/accounts/<key>`)。値が無いキーは `null` (= override 未設定) として
+ *   ad account key)。値が無いキーは `null` (= override 未設定) として
  *   扱われ、workspace mode が採用される。
  */
 export interface AccountExecutionModes {
@@ -470,7 +470,7 @@ export interface ApplyJobStore {
   ): Promise<ApplyApprovalSnapshot | null>;
   markApplyRunning(input: MarkApplyRunningInput): Promise<void>;
   markApplyFinished(input: MarkApplyFinishedInput): Promise<void>;
-  /** apply 全体・個別 PlanAction・MetaCli 結果を記録する。 */
+  /** apply 全体・個別 apply action・MetaCli 結果を記録する。 */
   recordApplyExecutionLog(input: ExecutionLogInput): Promise<void>;
   recordApplyAudit(input: RecordApplyAuditInput): Promise<void>;
   /**

@@ -82,6 +82,8 @@ import {
   decidePullRequestApproval,
   type ApprovalDecisionAction,
 } from "../../../worker/src/lib/approval-decision-runtime.js";
+import { runMetaMirrorSync } from "../../../worker/src/lib/meta-mirror-runtime.js";
+import { buildPrismaMetaAdapterSelection } from "../../../worker/src/lib/meta-runtime.js";
 
 type ChatCommandName =
   | "doctor"
@@ -1262,6 +1264,9 @@ async function executeUserFacingTool(
     const code = await runMetaAdsReadOnlyForChat(tool, opts);
     return { handled: true, code, message: `Meta Ads read-only query exit ${code}` };
   }
+  if (tool.tool === "sync_meta_mirror") {
+    return await syncMetaMirrorForChat(tool, opts);
+  }
   if (tool.tool === "propose_ops_change") {
     return await proposeOpsChangeForChat(tool, opts);
   }
@@ -1748,6 +1753,47 @@ async function proposeOpsChangeForChat(
     return { handled: true, code: 1, message };
   } finally {
     await ctx?.close().catch(() => undefined);
+  }
+}
+
+async function syncMetaMirrorForChat(
+  tool: ReadyAgentTool,
+  opts: {
+    out: NodeJS.WritableStream;
+    env: NodeJS.ProcessEnv;
+  }
+): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
+  if (!opts.env.DATABASE_URL) {
+    const message = "Mirror DB を同期できません。先に `addroid init` を完了してください。";
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 2, message };
+  }
+  try {
+    const { prisma, workspaceId } = await resolveCliChatDb(opts.env);
+    const selection = await buildPrismaMetaAdapterSelection({ prisma, env: opts.env });
+    const lease = await selection.adapter.loadAccessTokenPlaintext();
+    if (!lease?.accessToken) {
+      const message = "Meta token が未接続です。先に `addroid connect meta` を完了してください。";
+      opts.out.write(`${message}\n`);
+      return { handled: true, code: 2, message };
+    }
+    const result = await runMetaMirrorSync({
+      prisma,
+      workspaceId,
+      accessToken: lease.accessToken,
+      accountId: readOptionalString(tool.toolArgs.accountId),
+      accountKey: readOptionalString(tool.toolArgs.accountKey) ?? readOptionalString(tool.toolArgs.account_key),
+      includeMetrics: tool.toolArgs.includeMetrics !== false && tool.toolArgs.include_metrics !== false,
+      actor: "agent:cli-chat",
+      source: "cli-chat",
+    });
+    const message = `Mirror DB を同期しました。campaign=${result.campaigns}, adset=${result.adsets}, ad=${result.ads}, snapshot=${result.metrics.snapshots}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 0, message, data: result };
+  } catch (err) {
+    const message = `Mirror DB を同期できませんでした: ${(err as Error).message}`;
+    opts.out.write(`${message}\n`);
+    return { handled: true, code: 1, message };
   }
 }
 
@@ -2961,8 +3007,9 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
     urgencyRaw === "low" || urgencyRaw === "high" || urgencyRaw === "normal"
       ? urgencyRaw
       : undefined;
-  const accountKey = readOptionalString(args.accountKey);
+  const accountKey = readOptionalString(args.accountKey) ?? readOptionalString(args.account_key);
   const rationale = readOptionalString(args.rationale);
+  const operations = normalizeOpsOperations(args.operations);
   return {
     intent,
     ...(accountKey ? { accountKey } : {}),
@@ -2971,7 +3018,61 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
     ...(desiredChanges ? { desiredChanges } : {}),
     ...(rationale ? { rationale } : {}),
     ...(urgency ? { urgency } : {}),
+    ...(operations.length > 0 ? { operations } : {}),
   };
+}
+
+function normalizeOpsOperations(value: unknown): NonNullable<OpsChangeProposalInput["operations"]> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const resource = readOptionalString(item.resource);
+    const verb = readOptionalString(item.verb);
+    if (!resource || !verb) return [];
+    const args = readStringList(item.args);
+    if (args.length === 0) return [];
+    const entity = normalizeOpsOperationEntity(item.entity);
+    return [{
+      resource,
+      verb,
+      args,
+      ...(entity ? { entity } : {}),
+      ...(typeof item.externalIdRequired === "boolean"
+        ? { externalIdRequired: item.externalIdRequired }
+        : typeof item.external_id_required === "boolean"
+          ? { externalIdRequired: item.external_id_required }
+          : {}),
+    }];
+  });
+}
+
+function normalizeOpsOperationEntity(value: unknown): NonNullable<NonNullable<OpsChangeProposalInput["operations"]>[number]["entity"]> | null {
+  if (!isRecord(value)) return null;
+  const nodeType = readOptionalString(value.nodeType) ?? readOptionalString(value.node_type);
+  const nodeKey = readOptionalString(value.nodeKey) ?? readOptionalString(value.node_key);
+  const displayName = readOptionalString(value.displayName) ?? readOptionalString(value.display_name);
+  const parentNodeType = readOptionalString(value.parentNodeType) ?? readOptionalString(value.parent_node_type);
+  const parentNodeKey = readOptionalString(value.parentNodeKey) ?? readOptionalString(value.parent_node_key);
+  const status = readOptionalString(value.status);
+  const entity = {
+    ...(nodeType ? { nodeType } : {}),
+    ...(nodeKey ? { nodeKey } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(parentNodeType ? { parentNodeType } : {}),
+    ...(parentNodeKey ? { parentNodeKey } : {}),
+    ...(status ? { status } : {}),
+  };
+  return Object.keys(entity).length > 0 ? entity : null;
+}
+
+function readStringList(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return value.split(/\s+/).filter(Boolean);
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+        const text = readOptionalString(item);
+        return text ? [text] : [];
+      })
+    : [];
 }
 
 function normalizeAutomationRuleProposalInput(
@@ -3207,8 +3308,7 @@ function formatSubmissionCheckForUser(
   } else {
     lines.push("人間の承認が必要です:");
     lines.push("- GitHub PRで内容を確認し、問題なければ merge してください。");
-    lines.push("- merge 後、worker が Meta に PAUSED 状態で作成・更新します。");
-    lines.push("- ACTIVE化は別の承認境界です。配信開始する場合だけ「有効化して」と依頼してください。");
+    lines.push("- merge 後、worker が承認済みの内容を Meta に反映します。");
   }
   lines.push(`詳細を見る: ${webUrl}/plans`);
   lines.push("");

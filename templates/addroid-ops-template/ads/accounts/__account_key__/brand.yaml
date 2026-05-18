@@ -1,5 +1,0 @@
-version: 1
-account:
-  key: {{accountKey}}
-  displayName: "{{accountDisplayName}}"
-campaigns: []

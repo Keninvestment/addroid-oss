@@ -10,15 +10,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { BrandYaml } from "@addroid/yaml-schemas";
 import {
   buildAdAccountLockKey,
   createCrossProcessAdAccountLockProvider,
-  enforcePausedOnPlanAction,
+  prepareApprovedApplyAction,
   runExecuteApply,
   type AccountAdsState,
   type AdsLoadResult,
   type AdAccountLockProvider,
+  type ApplyAction,
   type ApplyJobContext,
 } from "../index.js";
 import {
@@ -29,6 +29,14 @@ import {
 
 const APPLY_JOB_ID = "apply-1";
 const WORKSPACE_ID = "ws-1";
+
+type TestBrandState = {
+  version: 1;
+  account: { key: string; displayName: string };
+  campaigns: Array<Record<string, unknown>>;
+  creatives: unknown[];
+  experiments: unknown[];
+};
 
 function ctx(): ApplyJobContext {
   return {
@@ -41,9 +49,7 @@ function ctx(): ApplyJobContext {
   };
 }
 
-function brand(initialState: "paused" | "active" = "paused"): BrandYaml {
-  // BrandYaml shape is provided by @addroid/yaml-schemas; we build a literal
-  // that the schema would have accepted (we don't re-validate here).
+function brand(initialState: "paused" | "active" = "paused"): TestBrandState {
   return {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
@@ -59,19 +65,155 @@ function brand(initialState: "paused" | "active" = "paused"): BrandYaml {
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
+  };
 }
 
 function loadResult(accounts: AccountAdsState[], source: AdsLoadResult["source"] = "fixture"): AdsLoadResult {
-  return { source, accounts };
+  return {
+    source,
+    accounts,
+    directActions: accounts.map((account) => ({
+      accountKey: account.accountKey,
+      actions: actionsFromState(account),
+    })),
+  };
+}
+
+function actionsFromState(account: AccountAdsState): ApplyAction[] {
+  const next = account.next as TestBrandState;
+  const previous = account.previous as TestBrandState | null;
+  const actions: ApplyAction[] = [];
+  const previousCampaigns = new Map(
+    (previous?.campaigns ?? []).map((campaign) => [String(campaign.id), campaign])
+  );
+  const previousCreativeIds = new Set(
+    (previous?.creatives as Array<Record<string, unknown>> | undefined ?? []).map((creative) =>
+      String(creative.id)
+    )
+  );
+  for (const creative of next.creatives as Array<Record<string, unknown>>) {
+    if (previousCreativeIds.has(String(creative.id))) continue;
+    actions.push({
+      kind: "create_creative",
+      account: account.accountKey,
+      creativeId: String(creative.id),
+      name: String(creative.name ?? creative.id),
+      mediaType: String(creative.mediaType ?? "image"),
+    });
+  }
+  for (const campaign of next.campaigns) {
+    const previousCampaign = previousCampaigns.get(String(campaign.id));
+    const campaignChanged =
+      previousCampaign &&
+      (previousCampaign.name !== campaign.name ||
+        JSON.stringify(previousCampaign.budget ?? {}) !== JSON.stringify(campaign.budget ?? {}));
+    if (!previousCampaign) {
+      actions.push({
+        kind: "create_campaign",
+        account: account.accountKey,
+        campaignId: String(campaign.id),
+        name: String(campaign.name ?? campaign.id),
+        objective: String(campaign.objective ?? "OUTCOME_TRAFFIC"),
+        initialState: String(campaign.initialState ?? "paused"),
+        budget: (campaign.budget ?? { dailyBudget: 100 }) as Record<string, unknown>,
+      });
+    } else if (campaignChanged) {
+      actions.push({
+        kind: "update_campaign",
+        account: account.accountKey,
+        campaignId: String(campaign.id),
+        ...(previousCampaign.name !== campaign.name
+          ? { name: String(campaign.name ?? campaign.id) }
+          : {}),
+        changes: { name: { from: previousCampaign.name, to: campaign.name } },
+      });
+    }
+    const adsets = Array.isArray(campaign.adsets)
+      ? (campaign.adsets as Array<Record<string, unknown>>)
+      : [];
+    const previousAdsets = new Map(
+      (Array.isArray(previousCampaign?.adsets)
+        ? (previousCampaign!.adsets as Array<Record<string, unknown>>)
+        : []
+      ).map((adset) => [String(adset.id), adset])
+    );
+    for (const adset of adsets) {
+      const previousAdset = previousAdsets.get(String(adset.id));
+      const adsetChanged =
+        previousAdset &&
+        (previousAdset.name !== adset.name ||
+          JSON.stringify(previousAdset.targeting ?? {}) !== JSON.stringify(adset.targeting ?? {}) ||
+          JSON.stringify(previousAdset.budget ?? {}) !== JSON.stringify(adset.budget ?? {}));
+      if (!previousAdset) {
+        actions.push({
+          kind: "create_adset",
+          account: account.accountKey,
+          campaignId: String(campaign.id),
+          adsetId: String(adset.id),
+          name: String(adset.name ?? adset.id),
+          initialState: String(adset.initialState ?? "paused"),
+          targeting: (adset.targeting ?? { countries: [], interests: [], customAudiences: [] }) as Record<string, unknown>,
+        });
+      } else if (adsetChanged) {
+        actions.push({
+          kind: "update_adset",
+          account: account.accountKey,
+          campaignId: String(campaign.id),
+          adsetId: String(adset.id),
+          ...(previousAdset.name !== adset.name
+            ? { name: String(adset.name ?? adset.id) }
+            : {}),
+          changes: { name: { from: previousAdset.name, to: adset.name } },
+        });
+      }
+      const ads = Array.isArray(adset.ads) ? (adset.ads as Array<Record<string, unknown>>) : [];
+      const previousAds = new Map(
+        (Array.isArray(previousAdset?.ads)
+          ? (previousAdset!.ads as Array<Record<string, unknown>>)
+          : []
+        ).map((ad) => [String(ad.id), ad])
+      );
+      for (const ad of ads) {
+        const previousAd = previousAds.get(String(ad.id));
+        const adChanged =
+          previousAd &&
+          (previousAd.name !== ad.name || previousAd.creativeRef !== ad.creativeRef);
+        if (!previousAd) {
+          actions.push({
+            kind: "create_ad",
+            account: account.accountKey,
+            campaignId: String(campaign.id),
+            adsetId: String(adset.id),
+            adId: String(ad.id),
+            name: String(ad.name ?? ad.id),
+            creativeRef: String(ad.creativeRef ?? ""),
+            initialState: String(ad.initialState ?? "paused"),
+          });
+        } else if (adChanged) {
+          actions.push({
+            kind: "update_ad",
+            account: account.accountKey,
+            campaignId: String(campaign.id),
+            adsetId: String(adset.id),
+            adId: String(ad.id),
+            ...(previousAd.name !== ad.name
+              ? { name: String(ad.name ?? ad.id) }
+              : {}),
+            changes: { creativeRef: { from: previousAd.creativeRef, to: ad.creativeRef } },
+          });
+        }
+      }
+    }
+  }
+  return actions;
 }
 
 // ---------------------------------------------------------------------
-// enforcePausedOnPlanAction (pure)
+// prepareApprovedApplyAction (pure)
 // ---------------------------------------------------------------------
 
-test("enforcePausedOnPlanAction rewrites create_campaign initialState=active to paused", () => {
-  const r = enforcePausedOnPlanAction({
+test("prepareApprovedApplyAction preserves create_campaign initialState after PR approval", () => {
+  const r = prepareApprovedApplyAction({
     kind: "create_campaign",
     account: "primary",
     campaignId: "c1",
@@ -80,11 +222,11 @@ test("enforcePausedOnPlanAction rewrites create_campaign initialState=active to 
     initialState: "active",
     budget: { dailyBudget: 50 },
   });
-  assert.equal(r.rewritten, true);
-  assert.equal((r.action as { initialState: string }).initialState, "paused");
+  assert.equal(r.rewritten, false);
+  assert.equal((r.action as { initialState: string }).initialState, "active");
 });
 
-test("enforcePausedOnPlanAction leaves already-paused create unchanged", () => {
+test("prepareApprovedApplyAction leaves already-paused create unchanged", () => {
   const action = {
     kind: "create_campaign" as const,
     account: "primary",
@@ -94,13 +236,13 @@ test("enforcePausedOnPlanAction leaves already-paused create unchanged", () => {
     initialState: "paused" as const,
     budget: { dailyBudget: 50 },
   };
-  const r = enforcePausedOnPlanAction(action);
+  const r = prepareApprovedApplyAction(action);
   assert.equal(r.rewritten, false);
   assert.strictEqual(r.action, action);
 });
 
-test("enforcePausedOnPlanAction drops initialState changes from update_campaign", () => {
-  const r = enforcePausedOnPlanAction({
+test("prepareApprovedApplyAction preserves status changes after PR approval", () => {
+  const r = prepareApprovedApplyAction({
     kind: "update_campaign",
     account: "primary",
     campaignId: "c1",
@@ -109,9 +251,9 @@ test("enforcePausedOnPlanAction drops initialState changes from update_campaign"
       name: { from: "Old", to: "New" },
     },
   });
-  assert.equal(r.rewritten, true);
+  assert.equal(r.rewritten, false);
   const after = r.action as { changes: Record<string, unknown> };
-  assert.equal(after.changes.initialState, undefined);
+  assert.deepEqual(after.changes.initialState, { from: "paused", to: "active" });
   assert.deepEqual(after.changes.name, { from: "Old", to: "New" });
 });
 
@@ -119,11 +261,11 @@ test("enforcePausedOnPlanAction drops initialState changes from update_campaign"
 // runExecuteApply — happy path
 // ---------------------------------------------------------------------
 
-test("runExecuteApply: success path forces PAUSED, records logs, emits apply.executed audit", async () => {
+test("runExecuteApply: success path preserves approved state, records logs, emits apply.executed audit", async () => {
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
 
-  // YAML 上は active で宣言されていても apply 経路で paused に強制されること。
+  // PR 承認後は YAML/operation 上の active 指定を apply 経路で書き換えない。
   const loader = new FakeAdsLoader(
     loadResult([
       { accountKey: "primary", next: brand("active"), previous: null },
@@ -151,13 +293,13 @@ test("runExecuteApply: success path forces PAUSED, records logs, emits apply.exe
   assert.equal(summary.totalActions, 1);
   assert.equal(summary.succeeded, 1);
   assert.equal(summary.failed, 0);
-  assert.equal(summary.pausedRewrites, 1, "create_* with active should be rewritten to paused");
+  assert.equal(summary.pausedRewrites, 0);
 
-  // executor に渡された action は paused 化されているはず (PAUSED-by-default)。
+  // executor に渡された action は承認済み差分どおり active のまま。
   assert.equal(executor.calls.length, 1);
   const passed = executor.calls[0]!.action;
   assert.equal(passed.kind, "create_campaign");
-  assert.equal((passed as { initialState: string }).initialState, "paused");
+  assert.equal((passed as { initialState: string }).initialState, "active");
 
   // apply_jobs 遷移
   assert.equal(store.runningCalls.length, 1);
@@ -294,53 +436,18 @@ test("runExecuteApply: empty AdsLoader result records simulated state and apply.
 });
 
 // ---------------------------------------------------------------------
-// runExecuteApply — plan error finding (e.g. guardrail violation)
+// runExecuteApply — loader validation failure
 // ---------------------------------------------------------------------
 
-test("runExecuteApply: plan with error finding fails before executor runs", async () => {
+test("runExecuteApply: loader validation error fails before executor runs", async () => {
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
 
-  // ad.creativeRef が creatives[] に無い → buildExecutionPlan が error finding を出す
-  const next: BrandYaml = {
-    version: 1,
-    account: { key: "primary", displayName: "Primary" },
-    campaigns: [
-      {
-        id: "c1",
-        name: "C1",
-        objective: "OUTCOME_TRAFFIC",
-        initialState: "paused",
-        budget: { dailyBudget: 100 },
-        adsets: [
-          {
-            id: "as1",
-            name: "AS1",
-            initialState: "paused",
-            targeting: {
-              countries: ["JP"],
-              interests: [],
-              customAudiences: [],
-            },
-            ads: [
-              {
-                id: "ad1",
-                name: "Ad1",
-                creativeRef: "missing-creative",
-                initialState: "paused",
-              },
-            ],
-          },
-        ],
-      },
-    ],
-    creatives: [],
-    experiments: [],
-  } as BrandYaml;
-
-  const loader = new FakeAdsLoader(
-    loadResult([{ accountKey: "primary", next, previous: null }])
-  );
+  const loader = {
+    async loadForApply() {
+      throw new Error("operation manifest validation failed");
+    },
+  };
   const executor = new FakeMetaActionExecutor();
 
   const summary = await runExecuteApply({
@@ -352,13 +459,13 @@ test("runExecuteApply: plan with error finding fails before executor runs", asyn
   });
 
   assert.equal(summary.state, "failed");
-  assert.equal(summary.abortReason, "plan_error");
-  assert.equal(executor.calls.length, 0, "executor must not run when plan has errors");
+  assert.equal(summary.abortReason, "unknown_error");
+  assert.equal(executor.calls.length, 0, "executor must not run when loader validation fails");
   assert.equal(store.audits.length, 1);
   assert.equal(store.audits[0]!.action, "apply.failed");
   assert.equal(
     (store.audits[0]!.metadata as { reason: string }).reason,
-    "plan_error"
+    "loader_error"
   );
 });
 
@@ -371,7 +478,7 @@ test("runExecuteApply: auth_error aborts apply and emits oauth.meta.reauth_requi
   store.setContext(APPLY_JOB_ID, ctx());
 
   // Two campaigns so we can verify that the second action is skipped after the abort.
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -394,7 +501,7 @@ test("runExecuteApply: auth_error aborts apply and emits oauth.meta.reauth_requi
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous: null }])
@@ -442,7 +549,7 @@ test("runExecuteApply: api_error aborts apply and emits meta.api_error audit dri
   const store = new FakeApplyJobStore();
   store.setContext(APPLY_JOB_ID, ctx());
 
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -465,7 +572,7 @@ test("runExecuteApply: api_error aborts apply and emits meta.api_error audit dri
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous: null }])
@@ -1158,7 +1265,7 @@ test("runExecuteApply: persists campaign/adset/ad PAUSED hierarchy nodes with ex
   store.setContext(APPLY_JOB_ID, ctx());
 
   // 親子関係 (campaign → adset → ad) を 1 アカウント分構築する。
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1188,7 +1295,7 @@ test("runExecuteApply: persists campaign/adset/ad PAUSED hierarchy nodes with ex
     ],
     creatives: [{ id: "cr-1", name: "Creative 1", mediaType: "image" }],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous: null }])
@@ -1277,7 +1384,7 @@ test("runExecuteApply: update_* actions update existing nodes without insert def
       },
     ],
   };
-  const previous: BrandYaml = {
+  const previous: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1292,10 +1399,10 @@ test("runExecuteApply: update_* actions update existing nodes without insert def
     ],
     creatives: [{ id: "cr-1", name: "C1", mediaType: "image" }],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
   // next は campaign の name を変更し、adset の budget を追加 (name 不変),
   // ad の creativeRef を別 creative に切り替える (name 不変)。
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1319,7 +1426,7 @@ test("runExecuteApply: update_* actions update existing nodes without insert def
       { id: "cr-2", name: "C2", mediaType: "image" },
     ],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous }])
@@ -1593,7 +1700,7 @@ test("runExecuteApply: update_* success WITHOUT externalId still persists hierar
   store.setContext(APPLY_JOB_ID, ctx());
 
   // update_campaign を発生させるため previous と next で name を変える。
-  const previous: BrandYaml = {
+  const previous: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1608,8 +1715,8 @@ test("runExecuteApply: update_* success WITHOUT externalId still persists hierar
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
-  const next: BrandYaml = {
+  } as TestBrandState;
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1624,7 +1731,7 @@ test("runExecuteApply: update_* success WITHOUT externalId still persists hierar
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous }])
@@ -1768,7 +1875,7 @@ test("runExecuteApply: apply.executed audit metadata carries external_id and hie
   // campaign + adset + ad の create_* を 1 アカウント分作る。creative も含めて
   // affectedNodes に乗ることを確認する (creative は ads_hierarchy 対象外なので
   // hierarchyId は null)。
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1798,7 +1905,7 @@ test("runExecuteApply: apply.executed audit metadata carries external_id and hie
     ],
     creatives: [{ id: "cr-1", name: "Creative 1", mediaType: "image" }],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous: null }])
@@ -1921,7 +2028,7 @@ test("runExecuteApply: apply.failed audit metadata identifies the failing action
 
   // 2 つの campaign を入れて、1 つ目だけ Meta 反映に成功し、2 つ目で auth_error
   // が起きるようにする。abort 後の 2 つ目は failingAction、1 つ目は affectedNodes に乗る。
-  const next: BrandYaml = {
+  const next: TestBrandState = {
     version: 1,
     account: { key: "primary", displayName: "Primary" },
     campaigns: [
@@ -1944,7 +2051,7 @@ test("runExecuteApply: apply.failed audit metadata identifies the failing action
     ],
     creatives: [],
     experiments: [],
-  } as BrandYaml;
+  } as TestBrandState;
 
   const loader = new FakeAdsLoader(
     loadResult([{ accountKey: "primary", next, previous: null }])

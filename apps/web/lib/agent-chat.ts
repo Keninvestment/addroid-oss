@@ -91,6 +91,7 @@ import {
   decidePullRequestApproval,
   type ApprovalDecisionAction,
 } from "../../worker/src/lib/approval-decision-runtime";
+import { runMetaMirrorSync } from "../../worker/src/lib/meta-mirror-runtime";
 
 export interface WebAgentExecution {
   display: string;
@@ -465,6 +466,8 @@ export async function executeWebAgentTool(
         return await showRecentLogs(tool.toolArgs, tool.display);
       case "query_meta_ads":
         return await runMetaAdsReadOnlyTool(workspaceId, tool.toolArgs, tool.display, provider);
+      case "sync_meta_mirror":
+        return await syncMetaMirrorTool(workspaceId, tool.toolArgs, tool.display);
       case "start_delivery":
         return {
           display: tool.display,
@@ -577,6 +580,38 @@ async function proposeOpsChangeTool(
     display,
     status: "ok",
     message: `GitOps PR #${result.prNumber} を作成しました。人間の承認・merge 後に反映されます。\n${result.htmlUrl}`,
+    data: result,
+  };
+}
+
+async function syncMetaMirrorTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  const { adapter } = await getActiveMetaAdapter();
+  const lease = await adapter.loadAccessTokenPlaintext();
+  if (!lease?.accessToken) {
+    return {
+      display,
+      status: "error",
+      message: "Meta token が未接続です。/meta から接続してください。",
+    };
+  }
+  const result = await runMetaMirrorSync({
+    prisma,
+    workspaceId,
+    accessToken: lease.accessToken,
+    accountId: readOptionalString(args.accountId),
+    accountKey: readOptionalString(args.accountKey) ?? readOptionalString(args.account_key),
+    includeMetrics: args.includeMetrics !== false && args.include_metrics !== false,
+    actor: "agent:web-chat",
+    source: "web-chat",
+  });
+  return {
+    display,
+    status: "ok",
+    message: `Mirror DB を同期しました。campaign=${result.campaigns}, adset=${result.adsets}, ad=${result.ads}, snapshot=${result.metrics.snapshots}`,
     data: result,
   };
 }
@@ -2367,8 +2402,7 @@ function formatSubmissionCheckForUser(
   } else {
     lines.push("人間の承認が必要です:");
     lines.push("- GitHub PRで内容を確認し、問題なければ merge してください。");
-    lines.push("- merge 後、worker が Meta に PAUSED 状態で作成・更新します。");
-    lines.push("- ACTIVE化は別の承認境界です。配信開始する場合だけ「有効化して」と依頼してください。");
+    lines.push("- merge 後、worker が承認済みの内容を Meta に反映します。");
   }
   return lines.join("\n");
 }
@@ -2505,8 +2539,9 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
     urgencyRaw === "low" || urgencyRaw === "high" || urgencyRaw === "normal"
       ? urgencyRaw
       : undefined;
-  const accountKey = readOptionalString(args.accountKey);
+  const accountKey = readOptionalString(args.accountKey) ?? readOptionalString(args.account_key);
   const rationale = readOptionalString(args.rationale);
+  const operations = normalizeOpsOperations(args.operations);
   return {
     intent,
     ...(accountKey ? { accountKey } : {}),
@@ -2515,7 +2550,61 @@ function normalizeOpsProposalInput(args: Record<string, unknown>): OpsChangeProp
     ...(desiredChanges ? { desiredChanges } : {}),
     ...(rationale ? { rationale } : {}),
     ...(urgency ? { urgency } : {}),
+    ...(operations.length > 0 ? { operations } : {}),
   };
+}
+
+function normalizeOpsOperations(value: unknown): NonNullable<OpsChangeProposalInput["operations"]> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const resource = readOptionalString(item.resource);
+    const verb = readOptionalString(item.verb);
+    if (!resource || !verb) return [];
+    const args = readStringList(item.args);
+    if (args.length === 0) return [];
+    const entity = normalizeOpsOperationEntity(item.entity);
+    return [{
+      resource,
+      verb,
+      args,
+      ...(entity ? { entity } : {}),
+      ...(typeof item.externalIdRequired === "boolean"
+        ? { externalIdRequired: item.externalIdRequired }
+        : typeof item.external_id_required === "boolean"
+          ? { externalIdRequired: item.external_id_required }
+          : {}),
+    }];
+  });
+}
+
+function normalizeOpsOperationEntity(value: unknown): NonNullable<NonNullable<OpsChangeProposalInput["operations"]>[number]["entity"]> | null {
+  if (!isRecord(value)) return null;
+  const nodeType = readOptionalString(value.nodeType) ?? readOptionalString(value.node_type);
+  const nodeKey = readOptionalString(value.nodeKey) ?? readOptionalString(value.node_key);
+  const displayName = readOptionalString(value.displayName) ?? readOptionalString(value.display_name);
+  const parentNodeType = readOptionalString(value.parentNodeType) ?? readOptionalString(value.parent_node_type);
+  const parentNodeKey = readOptionalString(value.parentNodeKey) ?? readOptionalString(value.parent_node_key);
+  const status = readOptionalString(value.status);
+  const entity = {
+    ...(nodeType ? { nodeType } : {}),
+    ...(nodeKey ? { nodeKey } : {}),
+    ...(displayName ? { displayName } : {}),
+    ...(parentNodeType ? { parentNodeType } : {}),
+    ...(parentNodeKey ? { parentNodeKey } : {}),
+    ...(status ? { status } : {}),
+  };
+  return Object.keys(entity).length > 0 ? entity : null;
+}
+
+function readStringList(value: unknown): string[] {
+  if (typeof value === "string" && value.trim()) return value.split(/\s+/).filter(Boolean);
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+        const text = readOptionalString(item);
+        return text ? [text] : [];
+      })
+    : [];
 }
 
 function normalizeAutomationRuleProposalInput(

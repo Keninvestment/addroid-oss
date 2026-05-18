@@ -14,9 +14,10 @@
 //   - 画像 Provider 未設定でも常に 200 OK で描画する (UI design plan §0.21)。
 //   - 何も無いときは EmptyState で「画像 Provider なしでも動作する (任意)」
 //     と説明する (creative_copy_rules)。
-//   - storageRef が無い行 (= prompt-only fallback) は thumbnail を出さず、
-//     `prompt-only` ラベルを出す。metadata.json が読めない (storage 未到達) は
-//     `storage 未到達` のプレースホルダに倒す。
+//   - 通常一覧は storageRef/storagePath を持つ画像生成済み行だけを表示する。
+//     prompt-only / fallback_text_only 行は status/provider filter で明示表示する。
+//     metadata.json が読めない (storage 未到達) は `storage 未到達` の
+//     プレースホルダに倒す。
 //   - 再生成 / 編集 / Meta 直接反映の導線は **置かない** (UI design plan §0.30
 //     / creative_copy_rules)。
 
@@ -126,6 +127,10 @@ export default async function CreativesPage({
     } else if (providerParam !== "all") {
       where.provider = providerParam;
     }
+    if (statusParam === "all" && providerParam === "all") {
+      where.storageRef = { not: null };
+      where.storagePath = { not: null };
+    }
 
     creatives = await prisma.creative.findMany({
       where,
@@ -221,7 +226,7 @@ export default async function CreativesPage({
         subtitle={
           <>
             自動クリエイティブ生成で作成された広告クリエイティブの一覧です。
-            画像が未設定の環境でもテキスト案として記録され、Meta へ直接反映されることはありません。
+            通常表示では画像ファイルまで生成できたものだけを表示します。
           </>
         }
         actions={

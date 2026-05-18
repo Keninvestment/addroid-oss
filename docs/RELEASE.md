@@ -59,9 +59,9 @@ CHANGELOG.md の冒頭で定義したものを再掲します。
 
 - **Public surface:** `@addroid/cli` npm package (`addroid` / `addroid-cli` bin alias)、
   `addroid` CLI、`apps/web` SSR ルート / API、`prisma/schema.prisma`、
-  `~/.addroid/config.yaml`、`packages/yaml-schemas` (Ads YAML / cron.yaml / project.yaml)、
-  `packages/agent-runtime` の Agent tool manifest、ops template の `project.yaml` /
-  `brand.yaml` / `cron.yaml` / `budget-guard.yaml` / `automation-rules.yaml`、
+  `~/.addroid/config.yaml`、`packages/ops-schemas` (GitOps operation manifest)、
+  `packages/agent-runtime` の Agent tool manifest、ops template の `.addroid/project.json` /
+  `operations/*.json` / `budget-guard.json` / `automation-rules.yaml`、
   `docs/SECURITY.md` の outbound-only / localhost-only 契約。
 - **MAJOR (X.0.0):** Public surface に対する後方互換喪失。例: CLI サブコマンド削除 /
   既定挙動の逆転、Prisma の破壊的マイグレーション、YAML スキーマ非互換、`~/.addroid/`
@@ -126,8 +126,8 @@ private workspaces (`@addroid/web` / `@addroid/worker` / `@addroid/*`) の versi
       breaking / deprecation 対象としてレビュー済み
 - [ ] `packages/*/src/index.ts` の barrel export 削除・リネームが internal public API 変更として
       レビュー済み
-- [ ] `templates/addroid-ops-template/` の `project.yaml` / `brand.yaml` / `cron.yaml` /
-      `budget-guard.yaml` / `automation-rules.yaml` の変更が GitOps schema 互換性レビュー済み
+- [ ] `templates/addroid-ops-template/` の `.addroid/project.json` / `operations/*.json` /
+      `budget-guard.json` / `automation-rules.yaml` の変更が GitOps schema 互換性レビュー済み
 - [ ] 破壊的変更がある場合、CHANGELOG にアップグレードガイドを併記
 
 ### 4.4 メタデータ整合性

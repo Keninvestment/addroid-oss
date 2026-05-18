@@ -5,7 +5,7 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import {
   AutomationRulesYamlSchema,
   type AutomationRulesYaml,
-} from "@addroid/yaml-schemas";
+} from "@addroid/ops-schemas";
 import type { AutomationRuleCalibration } from "@addroid/queue";
 import type {
   CreatePullRequestFile,

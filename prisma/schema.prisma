@@ -106,12 +106,12 @@ model OAuthToken {
 }
 
 // =====================================================================
-// 3) ad_accounts — Meta 広告アカウント。`ads/accounts/<key>/brand.yaml` と一致。
+// 3) ad_accounts — Meta 広告アカウント。Mirror DB / operation manifest の account key と一致。
 // =====================================================================
 model AdAccount {
   id            String   @id @default(uuid())
   workspaceId   String
-  key           String // ads/accounts/<key> パスと一致
+  key           String // Meta account key (例: act_...)
   displayName   String
   metaAccountId String?
   businessId    String?
@@ -480,7 +480,7 @@ model Creative {
   creativeQaAiRunId String?
   // PR が立った後にリンクされる。PR 作成前 / fallback / qa_failed 時は null。
   pullRequestId     String?
-  key               String // ads/accounts/<account>/creatives/<key> 等の安定キー
+  key               String // operations / evidence から参照する安定キー
   displayName       String
   mediaType         String // "image" | "video" | "carousel" | "text"
   // the current implementation creative_status vocabulary:

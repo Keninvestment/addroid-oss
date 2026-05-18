@@ -1,10 +1,8 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import YAML from "yaml";
 import { LocalDiskStorage } from "@addroid/config";
 import { Prisma, type PrismaClient } from "@addroid/db";
-import type { CreatePullRequestFile, GithubAdapter } from "@addroid/github-adapter";
+import type { GithubAdapter } from "@addroid/github-adapter";
 import {
   fetchMetaAssetReadiness,
   type MetaAssetIdentityCandidate,
@@ -27,9 +25,11 @@ import { loadRecentPerformanceSnapshotContext } from "./improvement-pr-performan
 import { landingPageUrlForPrompt } from "./creative-landing-page-context.js";
 import { enrichCreativeGenerationContext } from "./creative-generation-context.js";
 import { selectImageProviderForWorker } from "./image-runtime.js";
-import { ensureOpsRepoLocalCheckout, resolveOpsRepoLocalDirForWorkspace } from "./ops-repo-local.js";
-import { runPlanForRoot } from "./plan-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
+import {
+  createOpsChangeProposal,
+  type OperationProposalAction,
+} from "./ops-proposal-runtime.js";
 
 export type CreativeSubmissionSource =
   | "web"
@@ -631,44 +631,21 @@ export async function createCreativeSubmissionProposal(opts: {
     throw new Error(`広告アカウント ${accountKey} が登録されていません。先に account sync/select を完了してください。`);
   }
 
-  const checkout = await ensureOpsRepoLocalCheckout({
-    prisma: opts.prisma as never,
-    workspaceId: opts.workspaceId,
-    env,
-  }).catch(() => null);
-  const rootDir =
-    checkout?.rootDir ??
-    (await resolveOpsRepoLocalDirForWorkspace({
-      prisma: opts.prisma as never,
-      workspaceId: opts.workspaceId,
-      env,
-    })).rootDir;
-  if (!rootDir) {
-    throw new Error("ops repo の local checkout を解決できません。GitHub 接続と ops repo bootstrap を完了してください。");
-  }
-  const brandPath = path.join(rootDir, "ads", "accounts", accountKey, "brand.yaml");
-  if (!fs.existsSync(brandPath)) {
-    throw new Error(`対象 account の brand.yaml が見つかりません: ads/accounts/${accountKey}/brand.yaml`);
-  }
-
-  const original = fs.readFileSync(brandPath, "utf8");
-  const brand = YAML.parse(original) as unknown;
-  if (!isRecord(brand)) throw new Error("brand.yaml の形式が不正です。");
-  migrateLegacyCreativeIdentityKeys(brand);
+  const draftState: Record<string, unknown> = { creatives: [], campaigns: [] };
 
   const normalized = { ...opts.input };
   await inferCreativeIdentity({
     prisma: opts.prisma,
     accountKey,
     adAccountId: account.metaAccountId ?? account.key,
-    brand,
+    state: draftState,
     input: normalized,
   });
   validateCreativeSubmissionInput(normalized);
   validateCreativeSubmissionCliCompatibility(normalized);
   const draftId = makeStableId(normalized.creativeName || normalized.adName || normalized.headline || "creative");
-  const creativeId = uniqueId(ensureArray(brand, "creatives"), draftId);
-  const adId = uniqueNestedAdId(brand, makeStableId(normalized.adName || normalized.creativeName || "ad"));
+  const creativeId = uniqueId(ensureArray(draftState, "creatives"), draftId);
+  const adId = uniqueNestedAdId(draftState, makeStableId(normalized.adName || normalized.creativeName || "ad"));
   const storage = new LocalDiskStorage({ env });
   await storage.ensureRoot();
   const creativeContext = await loadCreativeContextForSubmission(opts.prisma, {
@@ -745,106 +722,46 @@ export async function createCreativeSubmissionProposal(opts: {
     callToActions: normalized.callToActions,
     storageKey: preparedMedia.storageKeys[0],
   });
-  ensureArray(brand, "creatives").push(creative);
-  const placement = placeAdDraft(brand, {
+  ensureArray(draftState, "creatives").push(creative);
+  const placement = placeAdDraft(draftState, {
     input: normalized,
     creativeId,
     adId,
   });
 
-  const nextText = YAML.stringify(brand);
-  const file: CreatePullRequestFile = {
-    path: `ads/accounts/${accountKey}/brand.yaml`,
-    action: "update",
-    diff: fullFileDiff(nextText),
-  };
-  const baseDir = env.ADDROID_OPS_REPO_BASE_DIR?.trim() || null;
-  const plan = validateWithTempCheckout({ rootDir, baseDir, file, accountKey });
-  if (!plan.ok) {
-    throw new Error(formatDryRunFailure(plan));
-  }
-
-  const title = `[addroid] Creative submission: ${account.displayName || accountKey}`;
-  const body = creativeSubmissionBody({
-    accountKey,
-    accountCurrency: account.currency ?? workspace.defaultAdAccount?.currency ?? null,
-    actor: opts.actor,
-    source: opts.source,
+  const operations = buildCreativeSubmissionOperations({
     input: normalized,
+    accountKey,
+    accountCurrency: account.currency ?? workspace.defaultAdAccount?.currency ?? "USD",
     creativeId,
     adId,
     placement,
-    mediaType,
-    storageKeys: preparedMedia.storageKeys,
-    generatedImage: preparedMedia.generatedImage,
-    creativeContext: creativeContextWithLanding,
-    planSummary: summarizePlan(plan),
+    creative,
+    preparedStorageKeys: preparedMedia.storageKeys,
+    storage,
   });
-  const branchName = `addroid/creative-submission-${Date.now().toString(36)}`;
-  const created = await opts.githubAdapter.createPullRequest({
-    spec: {
-      owner: repo.owner,
-      name: repo.name,
-      defaultBranch: repo.defaultBranch,
+  const proposal = await createOpsChangeProposal({
+    prisma: opts.prisma,
+    githubAdapter: opts.githubAdapter,
+    workspaceId: opts.workspaceId,
+    input: {
+      intent: "other",
+      accountKey,
+      operations,
+      rationale: normalized.rationale ?? "Creative submission from AdDroid.",
+      urgency: normalized.urgency ?? "normal",
     },
-    title,
-    body,
-    branchName,
-    files: [file],
-    baseRef: repo.defaultBranch,
+    actor: opts.actor,
+    source: opts.source,
+    env,
   });
-
-  const preview = {
-    files: [
-      {
-        path: file.path,
-        action: file.action,
-        diffPreview: file.diff.slice(0, 4096),
-        diffTruncated: file.diff.length > 4096,
-        diffByteLength: Buffer.byteLength(file.diff, "utf8"),
-        additions: nextText.split(/\r?\n/).length,
-        deletions: 0,
-      },
-    ],
-    truncatedFileCount: 0,
-    totalFileCount: 1,
-  };
-  const prRow = await opts.prisma.githubPullRequest.upsert({
-    where: { repoId_number: { repoId: repo.id, number: created.number } },
-    update: {
-      title,
-      state: "open",
-      headSha: created.headSha,
-      baseRef: repo.defaultBranch,
-      htmlUrl: created.htmlUrl,
-      body,
-      filesChangedJson: preview as unknown as Prisma.InputJsonValue,
-      filesChangedCount: 1,
-      previewSource: "creative_submission",
-      previewUpdatedAt: new Date(),
-    },
-    create: {
-      repoId: repo.id,
-      number: created.number,
-      title,
-      state: "open",
-      headSha: created.headSha,
-      baseRef: repo.defaultBranch,
-      htmlUrl: created.htmlUrl,
-      body,
-      filesChangedJson: preview as unknown as Prisma.InputJsonValue,
-      filesChangedCount: 1,
-      previewSource: "creative_submission",
-      previewUpdatedAt: new Date(),
-    },
-    select: { id: true },
-  });
+  const prRow = { id: proposal.pullRequestId };
 
   await opts.prisma.creative.create({
     data: {
       accountId: account.id,
       pullRequestId: prRow.id,
-      key: `ads/accounts/${accountKey}/creatives/${creativeId}`,
+      key: `evidence/creatives/${accountKey}/${creativeId}`,
       displayName: String(creative.name),
       mediaType,
       status: "attached_to_pr",
@@ -853,6 +770,7 @@ export async function createCreativeSubmissionProposal(opts: {
       model: preparedMedia.model,
       parameters: {
         source: opts.source,
+        proposalSource: "creative_submission",
         generatedImage: preparedMedia.generatedImage,
         creativeContext: creativeContextToMetadata(creativeContextWithLanding),
         localMediaCount: (normalized.localMediaPaths?.length ?? 0) + (normalized.uploadedMedia?.length ?? 0),
@@ -867,34 +785,13 @@ export async function createCreativeSubmissionProposal(opts: {
     },
   }).catch(() => undefined);
 
-  await opts.prisma.approvalRecord.create({
-    data: {
-      workspaceId: opts.workspaceId,
-      pullRequestId: prRow.id,
-      targetType: "github_pull_request",
-      targetId: prRow.id,
-      approvedBy: "addroid",
-      decision: "approval_required",
-      comment: "Creative submission PR requires human review and merge.",
-      metadata: {
-        decisionSource: "creative_submission",
-        source: opts.source,
-        accountKey,
-        creativeId,
-        adId,
-        mediaType,
-        generatedImage: preparedMedia.generatedImage,
-        creativeContext: creativeContextToMetadata(creativeContextWithLanding),
-      } as Prisma.InputJsonValue,
-    },
-  });
   await opts.prisma.auditLog.create({
     data: {
       workspaceId: opts.workspaceId,
       actor: opts.actor,
       action: "creative_submission.pr_opened",
       target: `github_pull_request:${prRow.id}`,
-      ref: String(created.number),
+      ref: String(proposal.prNumber),
       metadata: {
         source: opts.source,
         accountKey,
@@ -904,24 +801,24 @@ export async function createCreativeSubmissionProposal(opts: {
         storageKeyCount: preparedMedia.storageKeys.length,
         generatedImage: preparedMedia.generatedImage,
         creativeContext: creativeContextToMetadata(creativeContextWithLanding),
-        planSummary: summarizePlan(plan),
+        planSummary: proposal.planSummary,
       } as Prisma.InputJsonValue,
     },
   }).catch(() => undefined);
 
   return {
-    prNumber: created.number,
-    htmlUrl: created.htmlUrl,
+    prNumber: proposal.prNumber,
+    htmlUrl: proposal.htmlUrl,
     pullRequestId: prRow.id,
-    headSha: created.headSha,
+    headSha: proposal.headSha,
     accountKey,
     creativeId,
     adId,
     mediaType,
     storageKeys: preparedMedia.storageKeys,
     generatedImage: preparedMedia.generatedImage,
-    planOk: plan.ok,
-    planSummary: summarizePlan(plan),
+    planOk: proposal.planOk,
+    planSummary: proposal.planSummary,
   };
 }
 
@@ -1817,72 +1714,10 @@ function buildAdsetOptions(input: CreativeSubmissionInput): Record<string, unkno
   });
 }
 
-function validateWithTempCheckout(input: {
-  rootDir: string;
-  baseDir: string | null;
-  file: CreatePullRequestFile;
-  accountKey: string;
-}): ReturnType<typeof runPlanForRoot> {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-submission-"));
-  try {
-    fs.cpSync(input.rootDir, tmp, { recursive: true, dereference: false });
-    const dest = path.join(tmp, input.file.path);
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(dest, extractAddedContentFromDiff(input.file.diff), "utf8");
-    return runPlanForRoot({
-      rootDir: tmp,
-      baseDir: input.baseDir ?? input.rootDir,
-      accountFilter: input.accountKey,
-    });
-  } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-}
-
-function summarizePlan(plan: ReturnType<typeof runPlanForRoot>): string {
-  const counts = plan.totalCounts;
-  return `creates=${counts.creates} updates=${counts.updates} deletes=${counts.deletes} errors=${counts.errors + plan.validationErrors.length} warnings=${counts.warnings + plan.validationWarnings.length}`;
-}
-
-function formatDryRunFailure(plan: ReturnType<typeof runPlanForRoot>): string {
-  const details = dryRunFailureDetails(plan);
-  return [
-    `dry-run で問題が見つかったため PR は作成しません: ${summarizePlan(plan)}`,
-    "この dry-run は Meta CLI ではなく、ops repo の一時コピーにPR差分を当てて YAML 検証と実行計画生成だけを行います。Meta には接続・反映していません。",
-    ...(details.length > 0 ? ["原因:", ...details.map((line) => `- ${line}`)] : []),
-  ].join("\n");
-}
-
-function dryRunFailureDetails(plan: ReturnType<typeof runPlanForRoot>): string[] {
-  const lines: string[] = [];
-  for (const err of plan.validationErrors.slice(0, 8)) {
-    lines.push(`${err.file}${err.pointer ? ` ${err.pointer}` : ""}: ${err.message}`);
-  }
-  for (const account of plan.perAccount) {
-    for (const finding of account.findings.filter((f) => f.level === "error").slice(0, 8)) {
-      lines.push(
-        `${account.account}${finding.pointer ? ` ${finding.pointer}` : ""}: ${finding.message}`
-      );
-    }
-  }
-  const total =
-    plan.validationErrors.length +
-    plan.perAccount.reduce(
-      (sum, account) => sum + account.findings.filter((f) => f.level === "error").length,
-      0
-    );
-  if (total > lines.length) {
-    lines.push(`ほか ${total - lines.length} 件のエラーがあります。`);
-  }
-  return lines;
-}
-
-function creativeSubmissionBody(input: {
-  accountKey: string;
-  accountCurrency: string | null;
-  actor: string;
-  source: string;
+function buildCreativeSubmissionOperations(input: {
   input: CreativeSubmissionInput;
+  accountKey: string;
+  accountCurrency: string;
   creativeId: string;
   adId: string;
   placement: {
@@ -1890,100 +1725,200 @@ function creativeSubmissionBody(input: {
     adsetId: string;
     createdCampaign: boolean;
     createdAdset: boolean;
-    adoptedCampaign?: boolean;
-    adoptedAdset?: boolean;
   };
-  mediaType: string;
-  storageKeys: string[];
-  generatedImage: boolean;
-  creativeContext: ImprovementPrCreativeGenerationContext | null;
-  planSummary: string;
-}): string {
-  const contextLines = formatCreativeContextForPrBody(input.creativeContext);
-  return [
-    "## Creative submission",
-    "",
-    `- Account: \`${input.accountKey}\``,
-    `- Account currency: \`${input.accountCurrency ?? "unknown"}\``,
-    `- Source: \`${input.source}\``,
-    `- Requested by: \`${input.actor}\``,
-    `- Creative: \`${input.creativeId}\``,
-    `- Ad: \`${input.adId}\``,
-    `- Placement: \`${input.placement.campaignId}/${input.placement.adsetId}\``,
-    `- New campaign: \`${input.placement.createdCampaign ? "yes" : "no"}\``,
-    `- New adset: \`${input.placement.createdAdset ? "yes" : "no"}\``,
-    `- Adopted existing campaign: \`${input.placement.adoptedCampaign ? "yes" : "no"}\``,
-    `- Adopted existing adset: \`${input.placement.adoptedAdset ? "yes" : "no"}\``,
-    `- Media type: \`${input.mediaType}\``,
-    `- Generated image: \`${input.generatedImage ? "yes" : "no"}\``,
-    `- Creative context: \`${input.creativeContext ? input.creativeContext.strategy : "none"}\``,
-    "",
-    "## Copy",
-    "",
-    `- Headline: ${input.input.headline ?? "(none)"}`,
-    `- Primary text: ${input.input.primaryText ?? input.input.prompt ?? "(none)"}`,
-    `- Description: ${input.input.description ?? "(none)"}`,
-    `- CTA: ${input.input.callToAction ?? "(none)"}`,
-    "",
-    "## Meta Ads CLI coverage",
-    "",
-    "- This PR only includes fields that AdDroid can apply through Meta Ads CLI 2026/04/29.",
-    ...(input.placement.adoptedCampaign || input.placement.adoptedAdset
-      ? [
-          "- Adopted campaign/adset entries are references to existing Meta objects; this PR does not create or update those parent objects.",
-        ]
-      : []),
-    "- Targeting supported at apply time: country codes only (`targeting-countries`).",
-    "- Not included: city/radius targeting, placement/platform selection, device targeting, Advantage audience, custom audience, excluded audience, flexible targeting, age, gender, and locale.",
-    "",
-    "## Assets",
-    "",
-    ...(input.storageKeys.length > 0
-      ? input.storageKeys.map((k) => `- \`${k}\``)
-      : ["- text-only creative; no local media asset was attached."]),
-    "",
-    "## Creative context",
-    "",
-    ...contextLines,
-    "",
-    "## Rationale",
-    "",
-    input.input.rationale?.trim() || "No additional rationale was provided.",
-    "",
-    "## Dry-run",
-    "",
-    input.planSummary,
-    "",
-    "Human review and PR merge are required before AdDroid applies this to Meta. Apply creates objects as PAUSED; activation remains a separate audited step.",
-    "",
-  ].join("\n");
+  creative: Record<string, unknown>;
+  preparedStorageKeys: string[];
+  storage: LocalDiskStorage;
+}): OperationProposalAction[] {
+  const mediaPath = input.preparedStorageKeys[0]
+    ? input.storage.resolve(input.preparedStorageKeys[0])
+    : null;
+  const creativeArgs = [
+    "ads",
+    "creative",
+    "create",
+    "--name",
+    String(input.creative.name ?? input.creativeId),
+    ...flagIfString("--page-id", input.input.pageId),
+    ...(mediaPath && input.input.mediaType !== "video" ? ["--image", mediaPath] : []),
+    ...(mediaPath && input.input.mediaType === "video" ? ["--video", mediaPath] : []),
+    ...flagIfString("--body", input.input.body ?? input.input.primaryText ?? input.input.prompt),
+    ...flagIfString("--title", input.input.title ?? input.input.headline),
+    ...flagIfString("--link-url", input.input.linkUrl),
+    ...flagIfString("--description", input.input.description),
+    ...flagIfString("--call-to-action", input.input.callToAction ? cliValue(input.input.callToAction) : undefined),
+    ...flagIfString("--instagram-actor-id", input.input.instagramUserId),
+    ...repeatFlags("--titles", input.input.titles),
+    ...repeatFlags("--bodies", input.input.bodies),
+    ...repeatFlags("--descriptions", input.input.descriptions),
+    ...repeatFlags("--call-to-actions", input.input.callToActions?.map((v) => v ? cliValue(v) : "")),
+  ];
+
+  const operations: OperationProposalAction[] = [
+    {
+      resource: "creative",
+      verb: "create",
+      args: creativeArgs,
+      entity: {
+        nodeType: "creative",
+        nodeKey: input.creativeId,
+        displayName: String(input.creative.name ?? input.creativeId),
+      },
+      externalIdRequired: true,
+    },
+  ];
+
+  let campaignRef = input.input.campaignId ?? input.placement.campaignId;
+  if (input.placement.createdCampaign) {
+    operations.push({
+      resource: "campaign",
+      verb: "create",
+      args: [
+        "ads",
+        "campaign",
+        "create",
+        "--name",
+        input.input.campaignName ?? input.placement.campaignId,
+        "--objective",
+        cliValue(input.input.objective ?? "OUTCOME_TRAFFIC"),
+        "--status",
+        "paused",
+        ...budgetFlagsForOperations(input.input, input.accountCurrency),
+        ...(input.input.adsetBudgetSharing !== undefined
+          ? [input.input.adsetBudgetSharing ? "--adset-budget-sharing" : "--no-adset-budget-sharing"]
+          : []),
+      ],
+      entity: {
+        nodeType: "campaign",
+        nodeKey: input.placement.campaignId,
+        displayName: input.input.campaignName ?? input.placement.campaignId,
+        status: "paused",
+      },
+      externalIdRequired: true,
+    });
+    campaignRef = operationRef("campaign", input.placement.campaignId);
+  }
+
+  let adsetRef = input.input.adsetId ?? input.placement.adsetId;
+  if (input.placement.createdAdset) {
+    operations.push({
+      resource: "adset",
+      verb: "create",
+      args: [
+        "ads",
+        "adset",
+        "create",
+        campaignRef,
+        "--name",
+        input.input.adsetName ?? input.placement.adsetId,
+        "--status",
+        "paused",
+        ...flagIfString("--optimization-goal", input.input.optimizationGoal ? cliValue(input.input.optimizationGoal) : undefined),
+        ...flagIfString("--billing-event", input.input.billingEvent ? cliValue(input.input.billingEvent) : undefined),
+        ...budgetFlagsForOperations(input.input, input.accountCurrency),
+        ...(input.input.bidAmount !== undefined
+          ? ["--bid-amount", amountToMinorUnitsForOperations(input.input.bidAmount, input.accountCurrency)]
+          : []),
+        ...flagIfString("--start-time", input.input.startTime),
+        ...flagIfString("--end-time", input.input.endTime),
+        ...((input.input.countries ?? []).length > 0
+          ? ["--targeting-countries", (input.input.countries ?? []).join(",")]
+          : []),
+        ...flagIfString("--pixel-id", input.input.pixelId),
+        ...flagIfString("--custom-event-type", input.input.customEventType ? cliValue(input.input.customEventType) : undefined),
+      ],
+      entity: {
+        nodeType: "adset",
+        nodeKey: input.placement.adsetId,
+        displayName: input.input.adsetName ?? input.placement.adsetId,
+        parentNodeType: "campaign",
+        parentNodeKey: input.placement.campaignId,
+        status: "paused",
+      },
+      externalIdRequired: true,
+    });
+    adsetRef = operationRef("adset", input.placement.adsetId);
+  }
+
+  operations.push({
+    resource: "ad",
+    verb: "create",
+    args: [
+      "ads",
+      "ad",
+      "create",
+      adsetRef,
+      "--name",
+      input.input.adName ?? input.input.creativeName ?? input.adId,
+      "--creative-id",
+      operationRef("creative", input.creativeId),
+      "--status",
+      "paused",
+      ...flagIfString("--pixel-id", input.input.adPixelId),
+      ...(input.input.trackingSpecs ? ["--tracking-specs", JSON.stringify(input.input.trackingSpecs)] : []),
+    ],
+    entity: {
+      nodeType: "ad",
+      nodeKey: input.adId,
+      displayName: input.input.adName ?? input.input.creativeName ?? input.adId,
+      parentNodeType: "adset",
+      parentNodeKey: input.placement.adsetId,
+      status: "paused",
+    },
+    externalIdRequired: true,
+  });
+
+  return operations;
 }
 
-function formatCreativeContextForPrBody(
-  context: ImprovementPrCreativeGenerationContext | null
-): string[] {
-  if (!context) return ["- No recent performance-linked creative context was available."];
-  const lines = [
-    `- Strategy: \`${context.strategy}\``,
-    context.target
-      ? `- Target: \`${context.target.hierarchy}/${context.target.displayName}\` (${context.target.rationale})`
-      : "- Target: `(none)`",
-  ];
-  if (context.references.length > 0) {
-    lines.push("- Winning references:");
-    for (const reference of context.references.slice(0, 3)) {
-      const creative = reference.creative;
-      lines.push(
-        `  - \`${reference.hierarchy}/${reference.displayName}\` ` +
-          [
-            creative?.displayName ? `creative=${creative.displayName}` : null,
-            creative?.mediaType ? `media=${creative.mediaType}` : null,
-            creative?.storageRef ? `storage=${creative.storageRef}` : null,
-          ].filter(Boolean).join(", ")
-      );
-    }
-  }
-  return lines;
+function operationRef(nodeType: string, nodeKey: string): string {
+  return `{{${nodeType}:${nodeKey}}}`;
+}
+
+function flagIfString(flag: string, value: unknown): string[] {
+  return typeof value === "string" && value.trim().length > 0 ? [flag, value.trim()] : [];
+}
+
+function repeatFlags(flag: string, values: readonly string[] | undefined): string[] {
+  return (values ?? []).filter((value) => value.trim().length > 0).flatMap((value) => [flag, value]);
+}
+
+function budgetFlagsForOperations(input: CreativeSubmissionInput, accountCurrency: string): string[] {
+  const out: string[] = [];
+  const daily = dailyBudget(input);
+  const lifetime = lifetimeBudget(input);
+  if (daily !== undefined) out.push("--daily-budget", amountToMinorUnitsForOperations(daily, accountCurrency));
+  if (lifetime !== undefined) out.push("--lifetime-budget", amountToMinorUnitsForOperations(lifetime, accountCurrency));
+  return out;
+}
+
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "BIF",
+  "CLP",
+  "DJF",
+  "GNF",
+  "JPY",
+  "KMF",
+  "KRW",
+  "MGA",
+  "PYG",
+  "RWF",
+  "UGX",
+  "VND",
+  "VUV",
+  "XAF",
+  "XOF",
+  "XPF",
+]);
+
+function amountToMinorUnitsForOperations(value: number, accountCurrency: string): string {
+  const currency = accountCurrency.trim().toUpperCase();
+  const multiplier = ZERO_DECIMAL_CURRENCIES.has(currency) ? 1 : 100;
+  return String(Math.round(value * multiplier));
+}
+
+function cliValue(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function creativeContextToMetadata(
@@ -2011,61 +1946,22 @@ function creativeNodeToMetadata(node: ImprovementPrCreativeNodeContext): Record<
   };
 }
 
-function fullFileDiff(content: string): string {
-  const body = content
-    .replace(/\r\n/g, "\n")
-    .split("\n")
-    .map((line) => `+${line}`)
-    .join("\n");
-  return [`--- /dev/null`, `+++ b/brand.yaml`, `@@`, body].join("\n");
-}
-
-function extractAddedContentFromDiff(diff: string): string {
-  const out: string[] = [];
-  for (const line of diff.split(/\r?\n/)) {
-    if (
-      line.startsWith("+++") ||
-      line.startsWith("---") ||
-      line.startsWith("@@") ||
-      line.startsWith("diff ") ||
-      line.startsWith("index ")
-    ) continue;
-    if (line.startsWith("-")) continue;
-    if (line.startsWith("+")) out.push(line.slice(1));
-    else if (line.startsWith(" ")) out.push(line.slice(1));
-    else out.push(line);
-  }
-  while (out.length > 1 && out[out.length - 1] === "") out.pop();
-  return out.join("\n") + "\n";
-}
-
 function readAccountKey(input: CreativeSubmissionInput, fallback: string | null): string {
   const key = input.accountKey?.trim() || fallback;
   if (!key) throw new Error("accountKey が未指定で、デフォルト広告アカウントも未設定です。");
   return key;
 }
 
-function migrateLegacyCreativeIdentityKeys(brand: Record<string, unknown>): void {
-  const creatives = Array.isArray(brand.creatives) ? brand.creatives.filter(isRecord) : [];
-  for (const creative of creatives) {
-    const legacy = readString(creative.instagramActorId);
-    if (legacy && !readString(creative.instagramUserId)) {
-      creative.instagramUserId = legacy;
-    }
-    delete creative.instagramActorId;
-  }
-}
-
 async function inferCreativeIdentity(input: {
   prisma: PrismaClient;
   accountKey: string;
   adAccountId: string;
-  brand: Record<string, unknown>;
+  state: Record<string, unknown>;
   input: CreativeSubmissionInput;
 }): Promise<void> {
   if (input.input.pageId && input.input.instagramUserId) return;
   const candidates = [
-    ...identityCandidatesFromBrand(input.brand),
+    ...identityCandidatesFromState(input.state),
     ...(await identityCandidatesFromMeta(input.prisma, input.adAccountId)),
   ];
   const chosen = chooseIdentityCandidate(candidates, input.input);
@@ -2075,8 +1971,8 @@ async function inferCreativeIdentity(input: {
   }
 }
 
-function identityCandidatesFromBrand(brand: Record<string, unknown>): MetaAssetIdentityCandidate[] {
-  const creatives = Array.isArray(brand.creatives) ? brand.creatives.filter(isRecord) : [];
+function identityCandidatesFromState(state: Record<string, unknown>): MetaAssetIdentityCandidate[] {
+  const creatives = Array.isArray(state.creatives) ? state.creatives.filter(isRecord) : [];
   return creatives
     .slice()
     .reverse()

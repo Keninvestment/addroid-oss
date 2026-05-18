@@ -9,15 +9,13 @@
 
 import type { ReactNode } from "react";
 import type {
+  OperationPlanAction,
   PerAccountPlanSummary,
+  PlanFinding,
   PlanCounts,
   PlanRiskLevel,
-} from "../../../worker/src/lib/plan-runtime";
-import type {
-  PlanAction,
-  PlanFinding,
   ValidationFinding,
-} from "@addroid/yaml-schemas";
+} from "../../../worker/src/lib/plan-runtime";
 import { StatusBadge } from "./StatusBadge";
 import { InlineCode } from "./CodeBlock";
 import { EmptyState } from "./EmptyState";
@@ -45,7 +43,7 @@ export function PlanPreview({
     return (
       <EmptyState
         title="plan に該当する変更はありません。"
-        description="brand.yaml が空、あるいは base 状態と一致しているため apply 対象がありません。"
+        description="operations/*.json に apply 対象の Meta CLI 操作がありません。"
       />
     );
   }
@@ -93,13 +91,13 @@ export function PlanPreview({
 
 function AccountSection({ summary }: { summary: PerAccountPlanSummary }) {
   const creates = summary.actions.filter((a) =>
-    a.kind.startsWith("create_")
+    a.verb === "create"
   );
   const updates = summary.actions.filter((a) =>
-    a.kind.startsWith("update_")
+    a.verb === "update"
   );
   const deletes = summary.actions.filter((a) =>
-    a.kind.startsWith("delete_")
+    a.verb === "delete"
   );
   return (
     <div className="plan-preview__account">
@@ -151,7 +149,7 @@ function ActionGroup({
   title: string;
   tone: "ok" | "info" | "warn";
   sigil: "+" | "~" | "-";
-  actions: PlanAction[];
+  actions: OperationPlanAction[];
   emptyHint: string;
 }) {
   return (
@@ -167,9 +165,9 @@ function ActionGroup({
       ) : (
         <ul className="plan-preview__list">
           {actions.map((a, i) => (
-            <li key={`${a.kind}-${actionIdentity(a)}-${i}`}>
+            <li key={`${a.resource}-${a.verb}-${actionIdentity(a)}-${i}`}>
               <span className="plan-preview__sigil mono">{sigil}</span>
-              <span className="plan-preview__kind mono">{a.kind}</span>
+              <span className="plan-preview__kind mono">{a.resource}:{a.verb}</span>
               <span className="plan-preview__detail">{describeAction(a)}</span>
             </li>
           ))}
@@ -220,6 +218,7 @@ function FindingsBlock({
 function PlanFindingsBlock({ findings }: { findings: PlanFinding[] }) {
   const errors = findings.filter((f) => f.level === "error");
   const warnings = findings.filter((f) => f.level === "warning");
+  const info = findings.filter((f) => f.level === "info");
   return (
     <>
       {errors.length > 0 ? (
@@ -244,156 +243,32 @@ function PlanFindingsBlock({ findings }: { findings: PlanFinding[] }) {
           }))}
         />
       ) : null}
+      {info.length > 0 ? (
+        <FindingsBlock
+          title="Plan Info"
+          tone="warn"
+          findings={info.map((f) => ({
+            file: "",
+            ...(f.pointer ? { pointer: f.pointer } : {}),
+            message: f.message,
+          }))}
+        />
+      ) : null}
     </>
   );
 }
 
-function actionIdentity(a: PlanAction): string {
-  switch (a.kind) {
-    case "create_campaign":
-    case "update_campaign":
-    case "delete_campaign":
-      return a.campaignId;
-    case "create_adset":
-    case "update_adset":
-    case "delete_adset":
-      return `${a.campaignId}/${a.adsetId}`;
-    case "create_ad":
-    case "update_ad":
-    case "delete_ad":
-      return `${a.campaignId}/${a.adsetId}/${a.adId}`;
-    case "create_creative":
-    case "update_creative":
-    case "delete_creative":
-      return a.creativeId;
-    case "create_experiment":
-    case "update_experiment":
-    case "delete_experiment":
-      return a.experimentId;
-  }
+function actionIdentity(a: OperationPlanAction): string {
+  return a.args.join(" ");
 }
 
-function describeAction(a: PlanAction): ReactNode {
-  switch (a.kind) {
-    case "create_campaign":
-      return (
-        <>
-          campaign <InlineCode>{a.campaignId}</InlineCode> &quot;{a.name}&quot;
-          objective={a.objective} initialState={a.initialState}{" "}
-          {budgetSummary(a.budget)}
-        </>
-      );
-    case "update_campaign":
-      return (
-        <>
-          campaign <InlineCode>{a.campaignId}</InlineCode> fields=
-          {Object.keys(a.changes).join(",") || "(none)"}
-        </>
-      );
-    case "delete_campaign":
-      return (
-        <>
-          campaign <InlineCode>{a.campaignId}</InlineCode>
-        </>
-      );
-    case "create_adset":
-      return (
-        <>
-          adset <InlineCode>{a.adsetId}</InlineCode> &quot;{a.name}&quot;
-          parent=<InlineCode>{a.campaignId}</InlineCode> initialState=
-          {a.initialState}{" "}
-          {a.budget ? budgetSummary(a.budget) : "(parent budget)"}{" "}
-          targeting=[{a.targeting.countries.join(",") || "(any country)"}]
-        </>
-      );
-    case "update_adset":
-      return (
-        <>
-          adset <InlineCode>{a.adsetId}</InlineCode> parent=
-          <InlineCode>{a.campaignId}</InlineCode> fields=
-          {Object.keys(a.changes).join(",") || "(none)"}
-        </>
-      );
-    case "delete_adset":
-      return (
-        <>
-          adset <InlineCode>{a.adsetId}</InlineCode> parent=
-          <InlineCode>{a.campaignId}</InlineCode>
-        </>
-      );
-    case "create_ad":
-      return (
-        <>
-          ad <InlineCode>{a.adId}</InlineCode> &quot;{a.name}&quot; parent=
-          <InlineCode>{a.adsetId}</InlineCode> creative=
-          <InlineCode>{a.creativeRef}</InlineCode> initialState=
-          {a.initialState}
-        </>
-      );
-    case "update_ad":
-      return (
-        <>
-          ad <InlineCode>{a.adId}</InlineCode> parent=
-          <InlineCode>{a.adsetId}</InlineCode> fields=
-          {Object.keys(a.changes).join(",") || "(none)"}
-        </>
-      );
-    case "delete_ad":
-      return (
-        <>
-          ad <InlineCode>{a.adId}</InlineCode> parent=
-          <InlineCode>{a.adsetId}</InlineCode>
-        </>
-      );
-    case "create_creative":
-      return (
-        <>
-          creative <InlineCode>{a.creativeId}</InlineCode> &quot;{a.name}&quot;
-          mediaType={a.mediaType}
-        </>
-      );
-    case "update_creative":
-      return (
-        <>
-          creative <InlineCode>{a.creativeId}</InlineCode> fields=
-          {Object.keys(a.changes).join(",") || "(none)"}
-        </>
-      );
-    case "delete_creative":
-      return (
-        <>
-          creative <InlineCode>{a.creativeId}</InlineCode>
-        </>
-      );
-    case "create_experiment":
-      return (
-        <>
-          experiment <InlineCode>{a.experimentId}</InlineCode> &quot;{a.name}
-          &quot; campaign=<InlineCode>{a.campaignId}</InlineCode> variants=
-          {a.variants.length}
-        </>
-      );
-    case "update_experiment":
-      return (
-        <>
-          experiment <InlineCode>{a.experimentId}</InlineCode> fields=
-          {Object.keys(a.changes).join(",") || "(none)"}
-        </>
-      );
-    case "delete_experiment":
-      return (
-        <>
-          experiment <InlineCode>{a.experimentId}</InlineCode>
-        </>
-      );
-  }
-}
-
-function budgetSummary(b: { dailyBudget?: number; lifetimeBudget?: number }): string {
-  const parts: string[] = [];
-  if (b.dailyBudget !== undefined) parts.push(`dailyBudget=${b.dailyBudget}`);
-  if (b.lifetimeBudget !== undefined) parts.push(`lifetimeBudget=${b.lifetimeBudget}`);
-  return parts.length === 0 ? "(no budget)" : parts.join(" ");
+function describeAction(a: OperationPlanAction): ReactNode {
+  return (
+    <>
+      account=<InlineCode>{a.account}</InlineCode> args=
+      <InlineCode>{a.args.join(" ")}</InlineCode>
+    </>
+  );
 }
 
 function badgeStateForRisk(risk: PlanRiskLevel): "ok" | "warn" | "error" {

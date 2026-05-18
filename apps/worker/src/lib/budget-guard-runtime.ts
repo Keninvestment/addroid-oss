@@ -34,7 +34,7 @@ import type {
   BudgetGuardStore,
   DailyReportAdAccountSnapshot,
 } from "@addroid/queue";
-import { loadBudgetGuardPolicy as loadBudgetGuardPolicyYaml } from "@addroid/yaml-schemas";
+import { loadBudgetGuardPolicy as loadBudgetGuardPolicyYaml } from "@addroid/ops-schemas";
 
 // ---------------------------------------------------------------------
 // Snapshot store — Prisma 実装 (findAdAccount + createAiRun)

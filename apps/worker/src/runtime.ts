@@ -74,6 +74,7 @@ import {
   resolveOpsRepoLocalDirForWorkspace,
 } from "./lib/ops-repo-local.js";
 import { resolveApplyExecutor } from "./lib/apply-meta-executor.js";
+import { runMetaMirrorSync } from "./lib/meta-mirror-runtime.js";
 import { resolveAutomationMutationExecutor } from "./lib/automation-action-executor.js";
 import { buildPrismaMetaAdapterSelection } from "./lib/meta-runtime.js";
 import { createPostgresAdAccountLockProvider } from "./lib/account-lock.js";
@@ -451,6 +452,23 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             const summaries: DailyReportSummary[] = [];
             const errors: string[] = [];
             for (const acc of accounts) {
+              const lease = await metaAdapterSelection.adapter
+                .loadAccessTokenPlaintext()
+                .catch(() => null);
+              if (lease?.accessToken) {
+                await runMetaMirrorSync({
+                  prisma,
+                  workspaceId: workspace.id,
+                  accessToken: lease.accessToken,
+                  accountKey: acc.key,
+                  actor: "agent:daily-report",
+                  source: presetName,
+                }).catch((err) => {
+                  log.warn(
+                    `[worker] ${presetName}: mirror sync failed for ${acc.key}: ${(err as Error).message}`
+                  );
+                });
+              }
               const effectiveMode = resolveExecutionMode(
                 wsMode,
                 acc.modeOverride
@@ -1159,7 +1177,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     }
   });
 
-  // execute_apply: merged PR の YAML を読み、buildExecutionPlan で plan を組み、
+  // execute_apply: merged PR の operation manifest を読み、実行 action を組み、
   // PAUSED-by-default で Meta CLI / mock executor に流す。
   // regression fix: meta adapter は CLI / web と同じ Prisma 永続 token store 経由で
   //   組み立てる (`buildPrismaMetaAdapterSelection`)。OAuth 未連携時は Stub に倒れ、
@@ -1257,6 +1275,27 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
         log.info(
           `[worker] execute_apply ${applyJobId}: ${summary.state} (succeeded=${summary.succeeded}, failed=${summary.failed}, skipped=${summary.skipped}, paused-rewrites=${summary.pausedRewrites})`
         );
+        if (summary.state === "succeeded") {
+          const lease = await metaAdapterSelection.adapter
+            .loadAccessTokenPlaintext()
+            .catch(() => null);
+          if (lease?.accessToken) {
+            for (const accountKey of collectAccountKeysFromOutcomes(summary.outcomes)) {
+              await runMetaMirrorSync({
+                prisma,
+                workspaceId: workspace.id,
+                accessToken: lease.accessToken,
+                accountKey,
+                actor: "agent:execute-apply",
+                source: "apply_success",
+              }).catch((err) => {
+                log.warn(
+                  `[worker] apply ${applyJobId}: mirror sync failed for ${accountKey}: ${(err as Error).message}`
+                );
+              });
+            }
+          }
+        }
         // regression fix: Apply 終端で `apply.completed` または `apply.failed`
         // を Slack 通知する。`simulated` は実 Meta mutation を伴わないため通知
         // 価値が低く、`/apply` から確認できれば十分なので skip。

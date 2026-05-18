@@ -4,9 +4,9 @@
 // 同じ pure 関数を呼び、同じ persistence boundary 経由で `execution_logs` に
 // 履歴を残せるようにする。
 //
-//   - runPlanForRoot(input) — ops repo を読み、buildExecutionPlan を回し、
+//   - runPlanForRoot(input) — ops repo の operations/*.json を読み、
 //     UI/CLI が必要とする per-account サマリと findings を 1 つの構造体で返す。
-//     I/O はファイルシステム + YAML パースのみ (Prisma / network 不使用)。
+//     I/O はファイルシステム + JSON パースのみ (Prisma / network 不使用)。
 //   - createPrismaPlanStore(prisma) — Prisma を裏に持つ PlanRunStore を返す。
 //     テストでは PlanRunStore を fake で差し替えられる。
 //   - persistPlanRun(store, input) — runPlanForRoot の結果を 1 行の
@@ -17,16 +17,9 @@
 //     execution_logs で十分。
 
 import { Prisma, type PrismaClient } from "@addroid/db";
-import {
-  buildExecutionPlan,
-  loadAndValidateOpsRepo,
-  loadPreviousOpsRepoState,
-  type BrandYaml,
-  type PlanAction,
-  type PlanFinding,
-  type PreviousOpsRepoState,
-  type ValidationFinding,
-} from "@addroid/yaml-schemas";
+import fs from "node:fs";
+import path from "node:path";
+import { isSupportedMetaCliOperation } from "@addroid/meta-adapter";
 
 export type PlanRunSource = "web" | "web-chat" | "slack-chat" | "agent-task" | "ci" | "cli";
 
@@ -40,9 +33,29 @@ export interface PlanCounts {
 
 export type PlanRiskLevel = "ok" | "warn" | "error";
 
+export interface ValidationFinding {
+  file: string;
+  message: string;
+  pointer?: string;
+}
+
+export interface PlanFinding {
+  level: "info" | "warning" | "error";
+  message: string;
+  pointer?: string;
+}
+
+export interface OperationPlanAction {
+  kind: "meta_cli_operation";
+  account: string;
+  resource: string;
+  verb: string;
+  args: string[];
+}
+
 export interface PerAccountPlanSummary {
   account: string;
-  actions: PlanAction[];
+  actions: OperationPlanAction[];
   findings: PlanFinding[];
   counts: PlanCounts;
   risk: PlanRiskLevel;
@@ -55,7 +68,7 @@ export interface PlanRunOutput {
   /** ops repo / file 単位の Zod / 整合性 error。account を持たない repo-wide エラー。 */
   validationErrors: ValidationFinding[];
   validationWarnings: ValidationFinding[];
-  /** account 単位の plan サマリ。filter 指定があれば 1 件、無指定なら全 brand 件。 */
+  /** account 単位の plan サマリ。filter 指定があれば 1 件、無指定なら全 operation manifest 件。 */
   perAccount: PerAccountPlanSummary[];
   /** 集計値 (UI 表示用に precomputed)。 */
   totalCounts: PlanCounts;
@@ -65,14 +78,14 @@ export interface PlanRunOutput {
 
 export interface PlanRunInput {
   rootDir: string;
-  /** base ブランチ checkout (任意)。assertBudgetChangeIsSafe / 既存 id 判定で使う。 */
+  /** 互換引数。operation manifest 経路では参照しない。 */
   baseDir?: string | null;
-  /** 指定すると、その accountKey の brand のみ plan 結果に含める。validation は全件回る。 */
+  /** 指定すると、その accountKey の operation manifest のみ plan 結果に含める。 */
   accountFilter?: string | null;
 }
 
 /**
- * Ops repo を読み、buildExecutionPlan を per-brand に回し、UI/CLI 用の
+ * Ops repo を読み、operations/*.json を per-account にまとめ、UI/CLI 用の
  * `PlanRunOutput` を返す。
  *
  * - validation 失敗時も throw しない。`ok=false`, `validationErrors` を埋めて返す。
@@ -84,42 +97,36 @@ export interface PlanRunInput {
  */
 export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
   const startedAt = Date.now();
-  const previous: PreviousOpsRepoState | undefined =
-    input.baseDir ? loadPreviousOpsRepoState(input.baseDir) : undefined;
-  const validation = loadAndValidateOpsRepo(input.rootDir, undefined, {
-    ...(previous !== undefined ? { previous } : {}),
-  });
-
   const perAccount: PerAccountPlanSummary[] = [];
-  const accumulatedErrors: ValidationFinding[] = [...validation.errors];
-  const accumulatedWarnings: ValidationFinding[] = [...validation.warnings];
+  const accumulatedErrors: ValidationFinding[] = [];
+  const accumulatedWarnings: ValidationFinding[] = [];
+  const grouped = new Map<string, { actions: OperationPlanAction[]; findings: PlanFinding[] }>();
+  for (const file of findOperationFiles(input.rootDir)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(path.join(input.rootDir, file), "utf8"));
+    } catch (err) {
+      accumulatedErrors.push({ file, message: `operation manifest JSON を読めません: ${(err as Error).message}` });
+      continue;
+    }
+    const normalized = normalizeOperationManifest(file, parsed);
+    accumulatedErrors.push(...normalized.errors);
+    accumulatedWarnings.push(...normalized.warnings);
+    if (!normalized.accountKey || (input.accountFilter && normalized.accountKey !== input.accountFilter)) continue;
+    const current = grouped.get(normalized.accountKey) ?? { actions: [], findings: [] };
+    current.actions.push(...normalized.actions);
+    current.findings.push(...normalized.findings);
+    grouped.set(normalized.accountKey, current);
+  }
 
-  // validation error があっても、可能な範囲で per-account plan を埋める方針にする。
-  // ただし brand-level エラーで brands が空のままなら、perAccount は空のまま。
-  for (const b of validation.loaded.brands) {
-    if (input.accountFilter && b.accountKey !== input.accountFilter) continue;
-    const previousBrand: BrandYaml | null =
-      previous?.brands.get(b.accountKey) ?? null;
-    const planned = buildExecutionPlan({
-      account: b.accountKey,
-      next: b.brand,
-      previous: previousBrand,
-    });
-    const counts = countActions(planned.actions, planned.findings);
-    const accountErrors = planned.findings
-      .filter((f) => f.level === "error")
-      .map((f) => toValidationFinding(b.relPath, f));
-    const accountWarnings = planned.findings
-      .filter((f) => f.level === "warning")
-      .map((f) => toValidationFinding(b.relPath, f));
-    accumulatedErrors.push(...accountErrors);
-    accumulatedWarnings.push(...accountWarnings);
+  for (const [account, group] of grouped.entries()) {
+    const counts = countActions(group.actions, group.findings);
     const risk: PlanRiskLevel =
       counts.errors > 0 ? "error" : counts.warnings > 0 ? "warn" : "ok";
     perAccount.push({
-      account: b.accountKey,
-      actions: planned.actions,
-      findings: planned.findings,
+      account,
+      actions: group.actions,
+      findings: group.findings,
       counts,
       risk,
     });
@@ -137,7 +144,7 @@ export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
   );
 
   const ok =
-    validation.errors.length === 0 &&
+    accumulatedErrors.length === 0 &&
     perAccount.every((p) => p.counts.errors === 0);
   const risk: PlanRiskLevel = !ok
     ? "error"
@@ -158,16 +165,16 @@ export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
 }
 
 function countActions(
-  actions: readonly PlanAction[],
+  actions: readonly OperationPlanAction[],
   findings: readonly PlanFinding[]
 ): PlanCounts {
   let creates = 0;
   let updates = 0;
   let deletes = 0;
   for (const a of actions) {
-    if (a.kind.startsWith("create_")) creates += 1;
-    else if (a.kind.startsWith("update_")) updates += 1;
-    else if (a.kind.startsWith("delete_")) deletes += 1;
+    if (a.verb === "create") creates += 1;
+    else if (a.verb === "update" || a.verb === "connect" || a.verb === "disconnect" || a.verb === "assign-user") updates += 1;
+    else if (a.verb === "delete") deletes += 1;
   }
   let errors = 0;
   let warnings = 0;
@@ -178,13 +185,81 @@ function countActions(
   return { creates, updates, deletes, errors, warnings };
 }
 
-function toValidationFinding(
+function findOperationFiles(rootDir: string): string[] {
+  const operationsDir = path.join(rootDir, "operations");
+  if (!fs.existsSync(operationsDir)) return [];
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        out.push(path.relative(rootDir, abs).replace(/\\/g, "/"));
+      }
+    }
+  };
+  walk(operationsDir);
+  return out.sort();
+}
+
+function normalizeOperationManifest(
   file: string,
-  f: PlanFinding
-): ValidationFinding {
-  const out: ValidationFinding = { file, message: f.message };
-  if (f.pointer) out.pointer = f.pointer;
-  return out;
+  value: unknown
+): {
+  accountKey: string | null;
+  actions: OperationPlanAction[];
+  findings: PlanFinding[];
+  errors: ValidationFinding[];
+  warnings: ValidationFinding[];
+} {
+  if (!isRecord(value)) {
+    return { accountKey: null, actions: [], findings: [], errors: [{ file, message: "operation manifest must be an object" }], warnings: [] };
+  }
+  const accountKey = readString(value.accountKey);
+  const errors: ValidationFinding[] = [];
+  const warnings: ValidationFinding[] = [];
+  const findings: PlanFinding[] = [];
+  const actions: OperationPlanAction[] = [];
+  if (!accountKey) errors.push({ file, message: "accountKey is required" });
+  const rawActions = Array.isArray(value.actions) ? value.actions : [];
+  if (rawActions.length === 0) errors.push({ file, message: "actions[] is required" });
+  rawActions.forEach((raw, index) => {
+    const pointer = `/actions/${index}`;
+    if (!isRecord(raw)) {
+      errors.push({ file, pointer, message: "operation action must be an object" });
+      return;
+    }
+    const resource = readString(raw.resource);
+    const verb = readString(raw.verb);
+    const args = Array.isArray(raw.args) ? raw.args.filter((v): v is string => typeof v === "string" && v.length > 0) : [];
+    if (!resource || !verb || args.length === 0) {
+      errors.push({ file, pointer, message: "operation action requires resource, verb and args[]" });
+      return;
+    }
+    const support = isSupportedMetaCliOperation(args);
+    if (!support.supported) {
+      const message = `unsupported Meta CLI operation: ${resource}:${verb}`;
+      errors.push({ file, pointer, message });
+      findings.push({ level: "error", pointer, message });
+      return;
+    }
+    actions.push({
+      kind: "meta_cli_operation",
+      account: accountKey ?? "",
+      resource,
+      verb,
+      args,
+    });
+  });
+  return { accountKey, actions, findings, errors, warnings };
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ---------------------------------------------------------------------

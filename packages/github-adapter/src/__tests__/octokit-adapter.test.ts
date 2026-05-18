@@ -216,14 +216,14 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo and commits t
     ".addroid/project.yaml",
     ".github/workflows/addroid-validate.yml",
     "README.md",
-    "ads/accounts/primary/brand.yaml",
+    "operations/.gitkeep",
     "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
   ].sort());
 });
 
-test("OctokitGithubAdapter.bootstrapOpsRepo includes brand.yaml for all initially synced ad accounts", async () => {
+test("OctokitGithubAdapter.bootstrapOpsRepo keeps template account-independent", async () => {
   const { adapter, getLastApi } = makeAdapter({ login: "octo-test-user" });
   const begin = await adapter.beginOAuth();
   await adapter.completeOAuth({ code: "c", state: begin.state });
@@ -235,11 +235,11 @@ test("OctokitGithubAdapter.bootstrapOpsRepo includes brand.yaml for all initiall
       { key: "act_333", displayName: "Third Account" },
     ],
   });
-  assert.equal(result.filesCommitted, 9);
+  assert.equal(result.filesCommitted, 7);
   const paths = getLastApi()?.calls.templateCommits[0]?.files.map((f) => f.path).sort() ?? [];
-  assert.ok(paths.includes("ads/accounts/primary/brand.yaml"));
-  assert.ok(paths.includes("ads/accounts/act_222/brand.yaml"));
-  assert.ok(paths.includes("ads/accounts/act_333/brand.yaml"));
+  assert.ok(paths.includes("operations/.gitkeep"));
+  const legacyAccountsPrefix = ["ads", "accounts"].join("/") + "/";
+  assert.equal(paths.some((p) => p.startsWith(legacyAccountsPrefix)), false);
 });
 
 test("OctokitGithubAdapter.bootstrapOpsRepo refuses without a connected token", async () => {

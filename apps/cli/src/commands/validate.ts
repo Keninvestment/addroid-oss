@@ -1,26 +1,11 @@
-// `addroid validate` — ops repo (cwd または --root) の YAML を Zod スキーマで検証する。
-//
-// このコマンドは AdDroid 本体だけでなく、ops repo 側 GitHub Actions
-// (`.github/workflows/addroid-validate.yml`) からも `npx addroid-cli validate` として
-// 呼ばれる。ファイル群:
-//   - .addroid/project.yaml
-//   - workflows/cron.yaml
-//   - ads/accounts/<account_key>/brand.yaml
-//
-// 失敗したら exit code 1、警告のみなら 0、エラー無しなら 0。
-//
-// 使い方:
-//   addroid validate                 # cwd を ops repo として走査
-//   addroid validate --root ./ops    # 任意ディレクトリ
-//   addroid validate --json          # 機械可読出力 (CI ログ用)
+// `addroid validate` — ops repo の operation manifest を検証する。
 
 import path from "node:path";
 import {
-  loadAndValidateOpsRepo,
-  loadPreviousOpsRepoState,
-  type OpsRepoValidationResult,
+  runPlanForRoot,
+  type PlanRunOutput,
   type ValidationFinding,
-} from "@addroid/yaml-schemas";
+} from "../../../worker/src/lib/plan-runtime.js";
 
 interface ValidateOptions {
   root: string;
@@ -31,14 +16,16 @@ interface ValidateOptions {
 export async function runValidate(args: string[]): Promise<number> {
   const opts = parseArgs(args);
   if (opts === null) return 2;
-  const previous = opts.base ? loadPreviousOpsRepoState(opts.base) : undefined;
-  const result = loadAndValidateOpsRepo(opts.root, undefined, { previous });
+  const result = runPlanForRoot({
+    rootDir: opts.root,
+    baseDir: opts.base,
+  });
   if (opts.json) {
     process.stdout.write(`${JSON.stringify(toJson(opts.root, result), null, 2)}\n`);
   } else {
     printHuman(opts.root, result);
   }
-  return result.errors.length > 0 ? 1 : 0;
+  return result.validationErrors.length > 0 ? 1 : 0;
 }
 
 function parseArgs(args: string[]): ValidateOptions | null {
@@ -84,15 +71,14 @@ function parseArgs(args: string[]): ValidateOptions | null {
 function printHelp() {
   process.stdout.write(
     [
-      "addroid validate — Ads YAML / cron.yaml / project.yaml を Zod で検証",
+      "addroid validate — operations/*.json を検証",
       "",
       "Usage:",
       "  addroid validate [--root <dir>] [--base <dir>] [--json]",
       "",
       "Options:",
       "  --root, -r <dir>   検証対象の ops repo ルート (default: cwd)",
-      "  --base <dir>       前回 / base 状態の ops repo ルート。指定すると既存キャンペーン",
-      "                     との差分から budget 変更や initialState の安全性を比較する",
+      "  --base <dir>       互換オプション。operation manifest 経路では参照しません",
       "  --json             機械可読 JSON で結果を出力",
       "  --help, -h         このヘルプ",
       "",
@@ -100,53 +86,52 @@ function printHelp() {
   );
 }
 
-function printHuman(root: string, r: OpsRepoValidationResult): void {
+function printHuman(root: string, result: PlanRunOutput): void {
   const lines: string[] = [];
   lines.push("[addroid validate]");
   lines.push("");
-  lines.push(`  root        : ${root}`);
-  lines.push(`  project     : ${r.loaded.project ? "ok" : "missing/invalid"}`);
-  lines.push(`  cron        : ${r.loaded.cron ? "ok" : "missing/invalid"}`);
-  lines.push(`  brand files : ${r.loaded.brands.length}`);
+  lines.push(`  root            : ${root}`);
+  lines.push(`  operation files : ${result.perAccount.reduce((sum, p) => sum + p.actions.length, 0)}`);
   lines.push("");
-  if (r.errors.length === 0 && r.warnings.length === 0) {
-    lines.push("  result      : [ ok  ] no issues");
+  if (result.validationErrors.length === 0 && result.validationWarnings.length === 0) {
+    lines.push("  result          : [ ok  ] no issues");
     lines.push("");
     process.stdout.write(lines.join("\n"));
     return;
   }
-  if (r.errors.length > 0) {
-    lines.push(`  errors      : ${r.errors.length}`);
-    for (const f of r.errors) lines.push(`    [error] ${formatFinding(f)}`);
-  }
-  if (r.warnings.length > 0) {
-    lines.push(`  warnings    : ${r.warnings.length}`);
-    for (const f of r.warnings) lines.push(`    [warn ] ${formatFinding(f)}`);
-  }
+  appendFindings(lines, "errors", "error", result.validationErrors);
+  appendFindings(lines, "warnings", "warn ", result.validationWarnings);
   lines.push("");
-  lines.push(
-    `  result      : ${r.errors.length > 0 ? "[error]" : "[warn ]"} ${
-      r.errors.length > 0 ? "failed" : "passed with warnings"
-    }`
-  );
+  lines.push(`  result          : ${result.validationErrors.length > 0 ? "[error] failed" : "[warn ] passed with warnings"}`);
   lines.push("");
   process.stdout.write(lines.join("\n"));
 }
 
-function formatFinding(f: ValidationFinding): string {
-  return f.pointer ? `${f.file} :: ${f.pointer} — ${f.message}` : `${f.file} — ${f.message}`;
+function appendFindings(
+  lines: string[],
+  title: string,
+  label: string,
+  findings: ValidationFinding[]
+): void {
+  if (findings.length === 0) return;
+  lines.push(`  ${title.padEnd(15)}: ${findings.length}`);
+  for (const f of findings) lines.push(`    [${label}] ${formatFinding(f)}`);
 }
 
-function toJson(root: string, r: OpsRepoValidationResult) {
+function formatFinding(f: ValidationFinding): string {
+  return f.pointer ? `${f.file} :: ${f.pointer} - ${f.message}` : `${f.file} - ${f.message}`;
+}
+
+function toJson(root: string, result: PlanRunOutput) {
   return {
     root,
-    ok: r.ok,
+    ok: result.validationErrors.length === 0,
     counts: {
-      errors: r.errors.length,
-      warnings: r.warnings.length,
-      brandFiles: r.loaded.brands.length,
+      errors: result.validationErrors.length,
+      warnings: result.validationWarnings.length,
+      operations: result.perAccount.reduce((sum, p) => sum + p.actions.length, 0),
     },
-    errors: r.errors,
-    warnings: r.warnings,
+    errors: result.validationErrors,
+    warnings: result.validationWarnings,
   };
 }

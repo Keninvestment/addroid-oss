@@ -1,7 +1,7 @@
 # AdDroid OSS — GitOps Flow
 
-AdDroid は Meta 広告変更を **GitOps** として管理します。Ads YAML が単一ソースであり、
-すべての変更は ops repo の Pull Request としてレビューされ、merge → Apply (PAUSED) →
+AdDroid は Meta 広告変更を **GitOps** として管理します。Meta Mirror DB を読み取りの単一ビュー、
+operation manifest を変更提案の単位として扱います。すべての変更は ops repo の Pull Request としてレビューされ、merge → Apply (PAUSED) →
 Activate (ACTIVE) の 2 段階で Meta に反映されます。
 
 ---
@@ -14,22 +14,16 @@ ops repo は AdDroid に bootstrap されたリポジトリで、`packages/ops-t
 ```
 ops-repo/
 ├── .addroid/
-│   └── project.yaml        # workspace / ad_account / brand 設定
-├── ads/
-│   ├── accounts/
-│   │   └── <account_key>/  # ad_accounts.key に対応
-│   │       ├── campaign-<name>.yaml
-│   │       ├── adset-<name>.yaml
-│   │       └── ad-<name>.yaml
-│   └── creatives/
-│       └── <creative_id>/
-├── brand.yaml              # ブランドトーン / 禁止表現
-├── cron.yaml               # cron preset の有効化 / schedule 上書き
+│   └── project.json        # workspace / account 設定
+├── operations/
+│   └── <operation-id>.json # create/update/pause/creative submission などの提案
+├── evidence/
+│   └── creatives/          # 生成クリエイティブの監査用参照
 └── .github/
     └── workflows/          # ops repo 側の CI (任意)
 ```
 
-Ads YAML / cron.yaml / project.yaml はすべて `packages/yaml-schemas` の Zod スキーマで
+operation manifest / project.json はすべて `packages/ops-schemas` の Zod スキーマで
 検証され、不正な構造 / 安全でない予算変更 / 初期 active キャンペーン作成は拒否されます。
 
 ---

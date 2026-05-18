@@ -1,9 +1,4 @@
-// AdDroid OSS — improvement_pr-runtime のユニットテスト
-// (Regression fix).
-//
-// `createImprovementPrPlanValidator` が gitops 出力を実際の fixture ops repo
-// 作業 copy に適用してから `runPlanForRoot` を回し、CLI / `/api/plan` と同等の
-// 検証結果を返すことを fixture-based テストで検証する。
+// AdDroid OSS — improvement_pr-runtime の operation manifest validator テスト。
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -26,29 +21,31 @@ function writeFixture(files: Record<string, string>): {
   return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
-const VALID_PROJECT = `version: 1
-workspace:
-  slug: default
-  displayName: "Default Workspace"
-`;
-const VALID_CRON = `version: 1
-schedules:
-  - name: github_poll
-    cron: "*/2 * * * *"
-    enabled: true
-`;
-const BASE_BRAND = `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-campaigns:
-  - id: fall-promo
-    name: Fall Promo
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget:
-      dailyBudget: 50
-`;
+function manifest(amount: string): string {
+  return JSON.stringify(
+    {
+      version: 1,
+      accountKey: "primary",
+      intent: "set_budget",
+      actions: [
+        {
+          resource: "adsets",
+          verb: "update",
+          args: ["ads", "adset", "update", "as_123", "--daily-budget", amount],
+        },
+      ],
+    },
+    null,
+    2
+  );
+}
+
+function diff(content: string): string {
+  return content
+    .split("\n")
+    .map((l) => `+${l}`)
+    .join("\n");
+}
 
 test("plan validator returns available=false when rootDir is null", async () => {
   const validator = createImprovementPrPlanValidator({ rootDir: null });
@@ -68,26 +65,19 @@ test("plan validator returns available=false when rootDir does not exist", async
   assert.match(out.summary, /does not exist/);
 });
 
-test("plan validator applies gitops update and runs runPlanForRoot ok", async () => {
+test("plan validator applies gitops operation manifest and runs runPlanForRoot ok", async () => {
   const { dir, cleanup } = writeFixture({
-    ".addroid/project.yaml": VALID_PROJECT,
-    "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": BASE_BRAND,
+    "operations/primary/existing.json": manifest("200"),
   });
   try {
     const validator = createImprovementPrPlanValidator({ rootDir: dir });
-    // gitops outputs a diff that lowers dailyBudget from 50 to 40.
-    const newBrand = BASE_BRAND.replace("dailyBudget: 50", "dailyBudget: 40");
     const out = await validator.validate({
       accountKey: "primary",
       files: [
         {
-          path: "ads/accounts/primary/brand.yaml",
-          action: "update",
-          diff: newBrand
-            .split("\n")
-            .map((l) => `+${l}`)
-            .join("\n"),
+          path: "operations/primary/2026-05-17-budget.json",
+          action: "create",
+          diff: diff(manifest("300")),
         },
       ],
     });
@@ -96,93 +86,41 @@ test("plan validator applies gitops update and runs runPlanForRoot ok", async ()
     assert.equal(out.risk, "ok");
     assert.equal(out.errors.length, 0);
     assert.match(out.summary, /plan ok for account=primary/);
-    // 元のディレクトリには手を入れない (= 一時ディレクトリで動作する)。
-    const stillOriginal = fs.readFileSync(
-      path.join(dir, "ads/accounts/primary/brand.yaml"),
-      "utf8"
+    assert.equal(
+      fs.existsSync(path.join(dir, "operations/primary/2026-05-17-budget.json")),
+      false
     );
-    assert.match(stillOriginal, /dailyBudget: 50/);
   } finally {
     cleanup();
   }
 });
 
-test("plan validator surfaces validation errors when applied diff is invalid", async () => {
-  const { dir, cleanup } = writeFixture({
-    ".addroid/project.yaml": VALID_PROJECT,
-    "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": BASE_BRAND,
-  });
+test("plan validator surfaces validation errors when applied operation is invalid", async () => {
+  const { dir, cleanup } = writeFixture({});
   try {
     const validator = createImprovementPrPlanValidator({ rootDir: dir });
-    // Flip schema version to a value the Zod schema does not accept.
-    const broken = BASE_BRAND.replace("version: 1", "version: 99");
     const out = await validator.validate({
       accountKey: "primary",
       files: [
         {
-          path: "ads/accounts/primary/brand.yaml",
-          action: "update",
-          diff: broken
-            .split("\n")
-            .map((l) => `+${l}`)
-            .join("\n"),
+          path: "operations/primary/broken.json",
+          action: "create",
+          diff: diff(JSON.stringify({ version: 1, accountKey: "primary", actions: [] })),
         },
       ],
     });
     assert.equal(out.available, true);
     assert.equal(out.ok, false);
     assert.equal(out.risk, "error");
-    assert.ok(out.errors.length > 0);
+    assert.ok(out.errors.some((e) => /actions\[\] is required/.test(e.message)));
   } finally {
     cleanup();
   }
 });
 
-test("plan validator confines unsafe path writes to the working copy", async () => {
+test("plan validator sanitizes traversal-looking paths without mutating source root", async () => {
   const { dir, cleanup } = writeFixture({
-    ".addroid/project.yaml": VALID_PROJECT,
-    "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": BASE_BRAND,
-  });
-  // 一時ディレクトリの外側 (parent dir / ホームディレクトリ等) に
-  // diff 内容が書き出されないことを最低限確認する。
-  const parentDir = path.dirname(dir);
-  const sentinelPath = path.join(parentDir, "addroid-sentinel-leak");
-  const before = fs.existsSync(sentinelPath);
-  try {
-    const validator = createImprovementPrPlanValidator({ rootDir: dir });
-    await validator.validate({
-      accountKey: "primary",
-      files: [
-        {
-          path: "../addroid-sentinel-leak",
-          action: "update",
-          diff: "+pwn\n",
-        },
-      ],
-    });
-    const after = fs.existsSync(sentinelPath);
-    // 親ディレクトリの sentinel は (前後で) 変化しない。
-    assert.equal(after, before);
-  } finally {
-    cleanup();
-    // 念のため後始末: ここに到達した時点でリークしていればテストは既に失敗済み。
-    if (!before && fs.existsSync(sentinelPath)) {
-      fs.rmSync(sentinelPath, { force: true });
-    }
-  }
-});
-
-test("plan validator handles delete action by removing the file", async () => {
-  const { dir, cleanup } = writeFixture({
-    ".addroid/project.yaml": VALID_PROJECT,
-    "workflows/cron.yaml": VALID_CRON,
-    "ads/accounts/primary/brand.yaml": BASE_BRAND,
-    "ads/accounts/primary/old-brand.yaml": BASE_BRAND.replace(
-      "primary",
-      "old-primary"
-    ),
+    "operations/primary/existing.json": manifest("200"),
   });
   try {
     const validator = createImprovementPrPlanValidator({ rootDir: dir });
@@ -190,19 +128,15 @@ test("plan validator handles delete action by removing the file", async () => {
       accountKey: "primary",
       files: [
         {
-          path: "ads/accounts/primary/old-brand.yaml",
-          action: "delete",
-          diff: "",
+          path: "../escape.json",
+          action: "create",
+          diff: diff(manifest("300")),
         },
       ],
     });
-    // 元のディレクトリから old-brand.yaml は消えていない (作業 copy のみ削除)。
-    assert.equal(
-      fs.existsSync(path.join(dir, "ads/accounts/primary/old-brand.yaml")),
-      true
-    );
-    // primary account の plan は引き続き走る。
     assert.equal(out.available, true);
+    assert.equal(out.ok, true);
+    assert.equal(fs.existsSync(path.join(dir, "../escape.json")), false);
   } finally {
     cleanup();
   }

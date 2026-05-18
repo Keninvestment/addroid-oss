@@ -2,7 +2,7 @@ name: addroid-validate
 on:
   pull_request:
     paths:
-      - "ads/**"
+      - "operations/**"
       - "workflows/cron.yaml"
       - ".addroid/project.yaml"
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
           cd .addroid-ci-deps
           printf '{"name":"addroid-ci-deps","private":true}\n' > package.json
           npm install --no-audit --no-fund --silent js-yaml@4.1.0
-      - name: Structural check (project.yaml, cron.yaml, brand.yaml)
+      - name: Structural check (project.yaml, cron.yaml, operations)
         env:
           NODE_PATH: .addroid-ci-deps/node_modules
         run: |
@@ -101,37 +101,40 @@ jobs:
             }
           }
 
-          // ads/accounts/<key>/brand.yaml
-          const accountsDir = path.join(root, "ads", "accounts");
-          if (fs.existsSync(accountsDir)) {
-            for (const entry of fs.readdirSync(accountsDir, { withFileTypes: true })) {
-              if (!entry.isDirectory()) continue;
-              const rel = `ads/accounts/${entry.name}/brand.yaml`;
-              const brand = readYaml(rel);
-              if (brand === null) continue;
-              if (!brand || typeof brand !== "object") {
-                errors.push(`${rel} — top-level must be a mapping`);
-                continue;
-              }
-              if (typeof brand.version !== "number") {
-                errors.push(`${rel} :: version — must be a number`);
-              }
-              const acct = brand.account;
-              if (!acct || typeof acct !== "object") {
-                errors.push(`${rel} :: account — must be a mapping`);
-              } else {
-                if (typeof acct.key !== "string" || acct.key.length === 0) {
-                  errors.push(`${rel} :: account.key — must be a non-empty string`);
-                } else if (acct.key !== entry.name) {
-                  errors.push(
-                    `${rel} :: account.key — '${acct.key}' must match directory name '${entry.name}'`
-                  );
+          // operations/<account>/*.json
+          const operationsDir = path.join(root, "operations");
+          if (fs.existsSync(operationsDir)) {
+            const walk = (dir, prefix) => {
+              for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+                const abs = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                  walk(abs, rel);
+                  continue;
+                }
+                if (!entry.isFile() || !rel.endsWith(".json")) continue;
+                const opRel = `operations/${rel}`;
+                let manifest;
+                try {
+                  manifest = JSON.parse(fs.readFileSync(abs, "utf8"));
+                } catch (e) {
+                  errors.push(`${opRel} — JSON parse error: ${e.message}`);
+                  continue;
+                }
+                if (!manifest || typeof manifest !== "object") {
+                  errors.push(`${opRel} — top-level must be an object`);
+                  continue;
+                }
+                if (manifest.version !== 1) errors.push(`${opRel} :: version — must be 1`);
+                if (typeof manifest.accountKey !== "string" || manifest.accountKey.length === 0) {
+                  errors.push(`${opRel} :: accountKey — must be a non-empty string`);
+                }
+                if (!Array.isArray(manifest.actions)) {
+                  errors.push(`${opRel} :: actions — must be a list`);
                 }
               }
-              if (!Array.isArray(brand.campaigns)) {
-                errors.push(`${rel} :: campaigns — must be a list`);
-              }
-            }
+            };
+            walk(operationsDir, "");
           }
 
           if (errors.length > 0) {
@@ -148,7 +151,7 @@ jobs:
           console.log("[addroid-validate] structural check ok");
           console.log(
             "Note: full Zod validation (unsafe budget changes, mismatched account keys, " +
-              "initial active campaign creation, etc.) runs server-side via the AdDroid " +
+              "operation matrix support, approval status, and apply safety checks run server-side via the AdDroid " +
               "worker on merged PRs."
           );
           NODE

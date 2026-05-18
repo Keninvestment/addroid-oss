@@ -36,7 +36,7 @@ export { withAccountLock };
 
 /**
  * Activate 対象 (`ads_hierarchy` の 1 行) のスナップショット。
- * `accountKey` は `ads/accounts/<key>` のキーで、Meta CLI runner の env 注入に使う。
+ * `accountKey` は AdDroid の ad account key で、Meta CLI runner の env 注入に使う。
  * `externalId` は Meta 側で確定済みの campaign/adset/ad ID。null の場合は Activate 不可
  * (Apply によって external_id がまだ確定していない)。
  */

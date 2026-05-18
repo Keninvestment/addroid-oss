@@ -120,7 +120,7 @@ export interface PerformanceSnapshotUpsertResult {
 export interface DailyReportAdAccountSnapshot {
   /** Prisma の ad_accounts.id */
   id: string;
-  /** ads/accounts/<key> と一致 */
+  /** AdDroid の ad account key と一致 */
   key: string;
   displayName: string;
   /** Meta 側 ad account ID (例: act_123)。なければ null。 */
@@ -221,7 +221,7 @@ export interface RunDailyReportOptions {
   workspaceId: string;
   /** workspace 全体の execution mode (cron 起動時の値で固定する)。 */
   mode: DailyReportExecutionMode;
-  /** 当該 workspace に紐付く ad_account のキー (`ads/accounts/<key>`)。 */
+  /** 当該 workspace に紐付く ad_account のキー。 */
   accountKey: string;
   /**
    * 対象日 (YYYY-MM-DD)。

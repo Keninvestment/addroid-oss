@@ -1,5 +1,5 @@
 {
-  "name": "@addroid/yaml-schemas",
+  "name": "@addroid/ops-schemas",
   "version": "0.0.0",
   "private": true,
   "type": "module",

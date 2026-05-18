@@ -292,7 +292,7 @@ class FakePipelineRunner implements ImprovementPrPipelineRunner {
       (decision === "propose"
         ? [
             {
-              path: "ads/accounts/primary/campaigns/cmp_1.yaml",
+              path: "operations/primary/cmp_1.json",
               action: "update",
               diff: "--- a\n+++ b\n+headline: 'tweaked'\n",
             },
@@ -500,14 +500,13 @@ test("pipeline: runImprovementPrOnce runs all 8 agents, opens PR, writes audit",
   // result (not the LLM-authored dryRunSummary) is rendered into ## Dry-run.
   assert.equal(planValidator.calls.length, 1);
   assert.equal(planValidator.calls[0]!.accountKey, "primary");
-  // implementation item: plan validator now sees gitops files PLUS one creative-attachment
-  // manifest YAML per persisted creative (default fixture has 1 image variant).
-  // The 2nd file is `ads/accounts/primary/creatives/<creative_id>.yaml`, which
-  // is independent of brand.yaml schema and so does NOT change plan counts.
+  // implementation item: plan validator now sees gitops files PLUS one creative
+  // evidence YAML per persisted creative (default fixture has 1 image variant).
+  // The 2nd file is independent of operation manifests and does NOT change plan counts.
   assert.equal(planValidator.calls[0]!.files.length, 2);
   assert.equal(
     planValidator.calls[0]!.files[1]!.path,
-    "ads/accounts/primary/creatives/creative-1.yaml"
+    "evidence/creatives/primary/creative-1.yaml"
   );
   assert.equal(planValidator.calls[0]!.files[1]!.action, "create");
   assert.match(publisher.calls[0]!.prBody, /status: `ok`/);
@@ -566,6 +565,8 @@ test("pipeline: auto_creative_generation stops after creative QA and does not op
     planValidator,
     audit,
     cronRunId: "cr-1",
+    imageProvider: new MockImageProvider(),
+    creativeStorage: new FakeCreativeStorage(),
   });
   assert.equal(summary.status, "succeeded");
   assert.deepEqual(pipeline.calls, [
@@ -577,6 +578,8 @@ test("pipeline: auto_creative_generation stops after creative QA and does not op
   ]);
   assert.equal(store.creativeCalls.length, 1);
   assert.deepEqual(summary.creativeIds, ["creative-1"]);
+  assert.equal(store.creativeCalls[0]!.storageRef, "storage://creatives/primary/imgrun_run-4");
+  assert.equal(store.creativeCalls[0]!.provider, "mock");
   assert.equal(publisher.calls.length, 0);
   assert.equal(planValidator.calls.length, 0);
   assert.equal(audit.calls.length, 1);
@@ -585,6 +588,43 @@ test("pipeline: auto_creative_generation stops after creative QA and does not op
     audit.calls[0]!.metadata.skippedAt,
     "auto_creative_generation_complete"
   );
+  const imageGeneration = audit.calls[0]!.metadata.imageGeneration as {
+    persistedImageCount: number;
+  };
+  assert.equal(imageGeneration.persistedImageCount, 1);
+});
+
+test("pipeline: auto_creative_generation reports skipped when no image asset is persisted", async () => {
+  const store = new FakeImprovementPrStore(ACCOUNT);
+  const pipeline = new FakePipelineRunner();
+  const publisher = new FakePublisher();
+  const audit = new FakeAuditWriter();
+  const planValidator = new FakePlanValidator();
+  const summary = await runImprovementPrOnce({
+    workspaceId: "ws-1",
+    mode: "proposal",
+    workflowIntent: "auto_creative_generation",
+    accountKey: "primary",
+    repo: "myorg/ads-config",
+    store,
+    pipeline,
+    publisher,
+    planValidator,
+    audit,
+    cronRunId: "cr-1",
+  });
+  assert.equal(summary.status, "skipped_no_proposal");
+  assert.match(summary.errorMessage ?? "", /image provider is not configured/);
+  assert.equal(store.creativeCalls.length, 1);
+  assert.equal(store.creativeCalls[0]!.storageRef, null);
+  assert.equal(publisher.calls.length, 0);
+  assert.equal(audit.calls.length, 1);
+  const imageGeneration = audit.calls[0]!.metadata.imageGeneration as {
+    persistedImageCount: number;
+    fallback: boolean;
+  };
+  assert.equal(imageGeneration.persistedImageCount, 0);
+  assert.equal(imageGeneration.fallback, true);
 });
 
 // ---------------------------------------------------------------------
@@ -603,7 +643,7 @@ test("plan: validator errors land in PR body and audit metadata, PR is still ope
     counts: { creates: 0, updates: 1, deletes: 0, errors: 1, warnings: 0 },
     errors: [
       {
-        file: "ads/accounts/primary/campaigns/cmp_1.yaml",
+        file: "operations/primary/cmp_1.json",
         message: "dailyBudget must be > 0",
         pointer: "/campaigns/0/budget/dailyBudget",
       },
@@ -642,7 +682,7 @@ test("plan: validator errors land in PR body and audit metadata, PR is still ope
   assert.equal(planMeta.errors.length, 1);
   assert.equal(
     planMeta.errors[0]!.file,
-    "ads/accounts/primary/campaigns/cmp_1.yaml"
+    "operations/primary/cmp_1.json"
   );
 });
 
@@ -1829,10 +1869,10 @@ test("policy: AI auto_blocked skips PR even when policy would allow auto_approve
 });
 
 // ---------------------------------------------------------------------
-// this implementation — generated creatives are added to Ads YAML and PR body
+// this implementation — generated creatives are added to evidence files and PR body
 // ---------------------------------------------------------------------
 
-test("attachment: PR diff includes one creative manifest YAML per attached creative under ads/accounts/<key>/creatives/", async () => {
+test("attachment: PR diff includes one creative evidence YAML per attached creative", async () => {
   const store = new FakeImprovementPrStore(ACCOUNT);
   const pipeline = new FakePipelineRunner({
     imagePromptVariants: [
@@ -1866,17 +1906,17 @@ test("attachment: PR diff includes one creative manifest YAML per attached creat
   // First file is the original gitops change.
   assert.equal(
     sentFiles[0]!.path,
-    "ads/accounts/primary/campaigns/cmp_1.yaml"
+    "operations/primary/cmp_1.json"
   );
-  // Manifest files land under ads/accounts/<key>/creatives/<creative_id>.yaml.
+  // Evidence files land under evidence/creatives/<key>/<creative_id>.yaml.
   assert.equal(
     sentFiles[1]!.path,
-    "ads/accounts/primary/creatives/creative-1.yaml"
+    "evidence/creatives/primary/creative-1.yaml"
   );
   assert.equal(sentFiles[1]!.action, "create");
   assert.equal(
     sentFiles[2]!.path,
-    "ads/accounts/primary/creatives/creative-2.yaml"
+    "evidence/creatives/primary/creative-2.yaml"
   );
   assert.equal(sentFiles[2]!.action, "create");
   // The manifest YAML carries: creative id/key, mediaType, prompt + rationale,

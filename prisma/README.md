@@ -13,7 +13,7 @@
 |---|---|---|
 | `workspaces` | ローカルワークスペース (config + ops repo メタ) | `Workspace` |
 | `oauth_tokens` | GitHub / Meta などの OAuth トークン (暗号化保存) | `OAuthToken` |
-| `ad_accounts` | Meta 広告アカウント (`ads/accounts/<key>` と紐付け) | `AdAccount` |
+| `ad_accounts` | Meta 広告アカウント (Meta Mirror DB / operation manifests と紐付け) | `AdAccount` |
 | `ads_hierarchy` | campaign / adset / ad の正規化ツリー | `AdsHierarchyNode` |
 | `performance_snapshots` | 日次メトリクスの冪等スナップショット | `PerformanceSnapshot` |
 | `ai_runs` | AI 生成 / 改善提案ジョブの実行記録 (agent / workflow / provider / model / prompt / inputs / outputs / decision / confidence / tokens / costUsd / linkedRef) | `AiRun` |

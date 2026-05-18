@@ -10,7 +10,7 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import {
   loadBudgetGuardPolicy,
   type BudgetGuardPolicyYaml,
-} from "@addroid/yaml-schemas";
+} from "@addroid/ops-schemas";
 import {
   ensureOpsRepoLocalCheckout,
   resolveOpsRepoLocalDirForWorkspace,

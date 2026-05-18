@@ -1,4 +1,4 @@
-// AdDroid OSS — execute_apply 用の Ads YAML loader (apps/worker side).
+// AdDroid OSS — execute_apply 用の operation manifest loader (apps/worker side).
 //
 // the current implementation 受入の "Apply a valid YAML change as PAUSED resources or a mocked
 // equivalent in local tests" を満たすために、以下 2 つの動作モードを持つ:
@@ -6,14 +6,14 @@
 //   - real: `ADDROID_OPS_REPO_LOCAL_DIR` が指すローカル checkout を使う。
 //     承認済み PR の merge commit と、その first parent の差分だけを `next` /
 //     `previous` として読み込む。Apply は PR 単位で独立し、過去/後続 PR の
-//     desired-state 差分を別PRの承認で巻き込まない。
+//     operation manifest 差分を別PRの承認で巻き込まない。
 //   - mocked: env が未設定の場合は `accounts: []` を返し、orchestrator 側で
 //     `simulated` 状態に倒す。the current implementation の "mocked equivalent in local tests"
 //     経路をこれで吸収する (UI/audit には source=unavailable を表示する)。
 //
 // regression fix: real モードでは `loadForApply` 呼び出し時に
 // `AdsLoaderInput.context` の `headSha` / `repoId` を必ず検証する。
-//   - 承認済み merge commit / parent commit / changed brand.yaml を解決できない、または
+//   - 承認済み merge commit / parent commit / changed operations/*.json を解決できない、または
 //   - 起動時に解決した workspace の opsRepoId が `context.repoId` と一致しない、
 // 場合は fail-closed (source=unavailable) で返し、Meta mutation 経路に到達させない。
 // これにより「承認済み PR の差分だけが Apply に流れる」契約 (gitops-only
@@ -28,16 +28,12 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import {
-  DEFAULT_OPS_REPO_LAYOUT,
-  loadAndValidateOpsRepo,
-  loadPreviousOpsRepoState,
-} from "@addroid/yaml-schemas";
 import type {
-  AccountAdsState,
+  ApplyAction,
   AdsLoader,
   AdsLoaderInput,
   AdsLoadResult,
+  MetaCliOperationAction,
 } from "@addroid/queue";
 
 const execFileAsync = promisify(execFile);
@@ -110,21 +106,10 @@ async function readGitChangedFiles(
   }
 }
 
-function changedAccountKeys(files: readonly string[]): Set<string> {
-  const out = new Set<string>();
-  for (const file of files) {
-    const normalized = file.replace(/\\/g, "/");
-    const parts = normalized.split("/");
-    if (
-      parts.length >= 4 &&
-      parts[0] === "ads" &&
-      parts[1] === "accounts" &&
-      parts[3] === "brand.yaml"
-    ) {
-      out.add(parts[2]!);
-    }
-  }
-  return out;
+function changedOperationFiles(files: readonly string[]): string[] {
+  return files
+    .map((file) => file.replace(/\\/g, "/"))
+    .filter((file) => /^operations\/.+\.json$/.test(file));
 }
 
 async function materializeGitCommit(dir: string, sha: string): Promise<{
@@ -293,63 +278,93 @@ export class LocalDirAdsLoader implements AdsLoader {
         accounts: [],
       };
     }
-    const changedAccounts = changedAccountKeys(changedFiles);
-    if (changedAccounts.size === 0) {
+    const operationFiles = changedOperationFiles(changedFiles);
+    if (operationFiles.length === 0) {
       return {
         source: "unavailable",
-        detail: `approved PR #${context.prNumber} does not change any ads/accounts/*/brand.yaml file; no Meta apply actions are allowed for this PR.`,
+        detail: `approved PR #${context.prNumber} does not change operations/*.json; no Meta apply actions are allowed for this PR.`,
         accounts: [],
       };
     }
     let loadDir = this.localDir;
     let cleanup: (() => Promise<void>) | null = null;
-    let previousCleanup: (() => Promise<void>) | null = null;
     if (head !== mergeSha) {
       const materialized = await this.materializeCommit(this.localDir, mergeSha);
       loadDir = materialized.dir;
       cleanup = materialized.cleanup;
     }
-    const previous = await this.materializeCommit(this.localDir, parentSha);
-    const previousDir = previous.dir;
-    previousCleanup = previous.cleanup;
-    // 3) 検証済 — 既存の YAML loader でロード。
     try {
-      const previousState = loadPreviousOpsRepoState(previousDir);
-      const validation = loadAndValidateOpsRepo(loadDir, undefined, { previous: previousState });
-      if (!validation.ok) {
+      const directActions = await loadOperationActions(loadDir, operationFiles);
+      if (directActions.length === 0) {
         return {
           source: "unavailable",
-          detail: `ops repo at ${loadDir} failed validation (${validation.errors.length} errors)`,
-          accounts: [],
-        };
-      }
-      const accounts: AccountAdsState[] = validation.loaded.brands
-        .filter((b) => changedAccounts.has(b.accountKey))
-        .map((b) => ({
-          accountKey: b.accountKey,
-          next: b.brand,
-          previous: previousState.brands.get(b.accountKey) ?? null,
-        }));
-      if (accounts.length === 0) {
-        return {
-          source: "unavailable",
-          detail: `${path.join(loadDir, DEFAULT_OPS_REPO_LAYOUT.accountsDir)} has no changed accounts for approved PR #${context.prNumber}`,
+          detail: `approved PR #${context.prNumber} changed operation files, but no executable actions were found.`,
           accounts: [],
         };
       }
       return {
         source: "local_dir",
-        detail:
-          head === mergeSha
-            ? `loaded ${accounts.length} changed account(s) from approved PR merge diff ${parentSha}..${mergeSha}`
-            : `loaded ${accounts.length} changed account(s) from approved PR merge ${mergeSha} using local checkout ${this.localDir} @ ${head}`,
-        accounts,
+        detail: `loaded ${directActions.reduce((sum, item) => sum + item.actions.length, 0)} operation action(s) from approved PR #${context.prNumber}`,
+        accounts: [],
+        directActions,
       };
     } finally {
       await cleanup?.();
-      await previousCleanup?.();
     }
   }
+}
+
+async function loadOperationActions(
+  rootDir: string,
+  files: readonly string[]
+): Promise<Array<{ accountKey: string; actions: ApplyAction[] }>> {
+  const grouped = new Map<string, ApplyAction[]>();
+  for (const file of files) {
+    const abs = path.join(rootDir, file);
+    const text = await fsp.readFile(abs, "utf8");
+    const parsed = JSON.parse(text) as unknown;
+    const actions = normalizeOperationManifest(parsed);
+    for (const action of actions) {
+      const current = grouped.get(action.account) ?? [];
+      current.push(action);
+      grouped.set(action.account, current);
+    }
+  }
+  return [...grouped.entries()].map(([accountKey, actions]) => ({ accountKey, actions }));
+}
+
+function normalizeOperationManifest(value: unknown): MetaCliOperationAction[] {
+  if (!isRecord(value)) throw new Error("operation manifest must be an object");
+  const accountKey = readString(value.accountKey);
+  if (!accountKey) throw new Error("operation manifest accountKey is required");
+  const rawActions = Array.isArray(value.actions) ? value.actions : [];
+  if (rawActions.length === 0) throw new Error("operation manifest actions[] is required");
+  return rawActions.map((raw): MetaCliOperationAction => {
+    if (!isRecord(raw)) throw new Error("operation action must be an object");
+    const resource = readString(raw.resource);
+    const verb = readString(raw.verb);
+    const args = Array.isArray(raw.args) ? raw.args.filter((v): v is string => typeof v === "string") : [];
+    if (!resource || !verb || args.length === 0) {
+      throw new Error("operation action requires resource, verb and args[]");
+    }
+    return {
+      kind: "meta_cli_operation",
+      account: accountKey,
+      resource,
+      verb,
+      args,
+      ...(isRecord(raw.entity) ? { entity: raw.entity as MetaCliOperationAction["entity"] } : {}),
+      ...(raw.externalIdRequired === true ? { externalIdRequired: true } : {}),
+    };
+  });
+}
+
+function readString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

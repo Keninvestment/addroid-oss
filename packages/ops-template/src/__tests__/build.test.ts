@@ -27,22 +27,18 @@ test("buildOpsTemplate emits the required paths", () => {
     ".addroid/project.yaml",
     ".github/workflows/addroid-validate.yml",
     "README.md",
-    "ads/accounts/primary/brand.yaml",
+    "operations/.gitkeep",
     "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
   ]);
 });
 
-test("buildOpsTemplate substitutes the account-key directory placeholder", () => {
+test("buildOpsTemplate does not emit account-key directory placeholders", () => {
   const files = buildOpsTemplate({
     ...SAMPLE_INPUT,
     initialAccountKey: "acme-co",
   });
-  assert.ok(
-    files.some((f) => f.path === "ads/accounts/acme-co/brand.yaml"),
-    "brand.yaml path should reflect the supplied account key"
-  );
   assert.equal(
     files.some((f) => f.path.includes("__account_key__")),
     false,
@@ -57,15 +53,6 @@ test("buildOpsTemplate substitutes content placeholders in project.yaml", () => 
   assert.match(project!.content, /slug:\s+default/);
   assert.match(project!.content, /displayName:\s+"Default Workspace"/);
   assert.equal(project!.content.includes("{{"), false);
-});
-
-test("buildOpsTemplate substitutes content placeholders in brand.yaml", () => {
-  const files = buildOpsTemplate(SAMPLE_INPUT);
-  const brand = files.find((f) => f.path === "ads/accounts/primary/brand.yaml");
-  assert.ok(brand);
-  assert.match(brand!.content, /key:\s+primary/);
-  assert.match(brand!.content, /displayName:\s+"Primary Account"/);
-  assert.equal(brand!.content.includes("{{"), false);
 });
 
 test("buildOpsTemplate substitutes the README workspace heading", () => {
@@ -100,7 +87,7 @@ test("buildOpsTemplate emits the validate workflow on PR paths", () => {
   assert.ok(wf);
   assert.match(wf!.content, /name: addroid-validate/);
   assert.match(wf!.content, /pull_request:/);
-  assert.match(wf!.content, /"ads\/\*\*"/);
+  assert.match(wf!.content, /"operations\/\*\*"/);
 });
 
 test("buildOpsTemplate workflow runs a self-contained structural check without depending on @addroid/cli", () => {
@@ -118,10 +105,10 @@ test("buildOpsTemplate workflow runs a self-contained structural check without d
   assert.match(wf!.content, /js-yaml@/);
   assert.match(wf!.content, /"name":"addroid-ci-deps"/);
   assert.equal(wf!.content.includes("npm init -y"), false);
-  assert.match(wf!.content, /Structural check \(project\.yaml, cron\.yaml, brand\.yaml\)/);
+  assert.match(wf!.content, /Structural check \(project\.yaml, cron\.yaml, operations\)/);
   assert.match(wf!.content, /\.addroid\/project\.yaml/);
   assert.match(wf!.content, /workflows\/cron\.yaml/);
-  assert.match(wf!.content, /ads\/accounts/);
+  assert.match(wf!.content, /operations\/<account>/);
 });
 
 test("buildOpsTemplate result mirrors the on-disk template tree shape", () => {

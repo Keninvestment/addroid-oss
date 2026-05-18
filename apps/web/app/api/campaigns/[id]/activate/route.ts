@@ -6,7 +6,7 @@
 //   - Web UI は Meta を直接変更しない。
 //   - 配信開始は GitOps PR を作成し、人間の merge 後に apply 経路で反映する。
 //   - PAUSED でないノードは拒否する。
-//   - Meta から同期しただけで ops repo に未登録のノードは PR 化できないため拒否する。
+//   - Meta から同期しただけのノードも operations/*.json PR として扱う。
 
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
@@ -65,8 +65,6 @@ export async function POST(
         displayName: true,
         status: true,
         externalId: true,
-        spec: true,
-        lastCommitSha: true,
         account: { select: { key: true, metaAccountId: true } },
       },
     });
@@ -92,17 +90,6 @@ export async function POST(
         { status: 409 }
       );
     }
-    if (isMetaGraphOnlyNode(node)) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            "この広告オブジェクトは Meta から読み取っただけで、ops repo の brand.yaml に未登録です。Web UI から直接配信開始は行いません。GitOps 管理対象にしてから PR を作成してください。",
-        },
-        { status: 409 }
-      );
-    }
-
     const { adapter } = await getActiveGithubAdapter();
     const result = await createOpsChangeProposal({
       prisma,
@@ -147,20 +134,4 @@ export async function POST(
       { status: 500 }
     );
   }
-}
-
-function isMetaGraphOnlyNode(node: {
-  spec: unknown;
-  lastCommitSha: string | null;
-  externalId: string | null;
-  nodeKey: string;
-}): boolean {
-  if (node.lastCommitSha) return false;
-  const spec = isRecord(node.spec) ? node.spec : null;
-  if (spec?.source === "meta_graph_sync") return true;
-  return Boolean(node.externalId && node.nodeKey === node.externalId);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

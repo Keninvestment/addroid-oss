@@ -171,7 +171,7 @@ export function recommendActionForExit(
  * `args` には access token を含めない (含まれた場合は redact してから spawn する)。
  */
 export interface MetaCliInvocation {
-  /** ad_account の安定キー (`ads/accounts/<key>`)。env var 名と監査ログの scoping に使う。 */
+  /** ad_account の安定キー。env var 名と監査ログの scoping に使う。 */
   accountKey: string;
   /**
    * Meta 側の ad account id。公式 `meta-ads` CLI は `AD_ACCOUNT_ID` を読む。
@@ -394,7 +394,7 @@ export interface SupportedMetaCliOperation {
 /**
  * 実装時に動作確認済みの (resource, verb) リスト。
  *
- * Ads YAML → plan → CLI で必要となる最小集合のみを列挙する。新しい操作を
+ * operation manifest → CLI で必要となる最小集合のみを列挙する。新しい操作を
  * 追加するときは:
  *   1. meta-ads-cli の対応バージョンで実機 / 録画テストにより成功を確認する。
  *   2. このマトリクスに行を追加し、対応する unit test (cli-runner.test.ts) で
@@ -412,24 +412,28 @@ export interface SupportedMetaCliOperation {
 export const META_CLI_SUPPORTED_OPERATIONS: readonly SupportedMetaCliOperation[] = [
   { resource: "accounts", verb: "list", mutates: false, verifiedAt: "verified" },
   { resource: "accounts", verb: "get", mutates: false, verifiedAt: "verified" },
+  { resource: "accounts", verb: "current", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
 
   { resource: "campaigns", verb: "list", mutates: false, verifiedAt: "verified" },
   { resource: "campaigns", verb: "get", mutates: false, verifiedAt: "verified" },
   { resource: "campaigns", verb: "create", mutates: true, verifiedAt: "verified" },
   { resource: "campaigns", verb: "update", mutates: true, verifiedAt: "verified" },
-  { resource: "campaigns", verb: "activate", mutates: true, verifiedAt: "verified" },
+  { resource: "campaigns", verb: "activate", mutates: true, verifiedAt: "legacy activate path" },
+  { resource: "campaigns", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
 
   { resource: "adsets", verb: "list", mutates: false, verifiedAt: "verified" },
   { resource: "adsets", verb: "get", mutates: false, verifiedAt: "verified" },
   { resource: "adsets", verb: "create", mutates: true, verifiedAt: "verified" },
   { resource: "adsets", verb: "update", mutates: true, verifiedAt: "verified" },
-  { resource: "adsets", verb: "activate", mutates: true, verifiedAt: "verified" },
+  { resource: "adsets", verb: "activate", mutates: true, verifiedAt: "legacy activate path" },
+  { resource: "adsets", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
 
   { resource: "ads", verb: "list", mutates: false, verifiedAt: "verified" },
   { resource: "ads", verb: "get", mutates: false, verifiedAt: "verified" },
   { resource: "ads", verb: "create", mutates: true, verifiedAt: "verified" },
   { resource: "ads", verb: "update", mutates: true, verifiedAt: "verified" },
-  { resource: "ads", verb: "activate", mutates: true, verifiedAt: "verified" },
+  { resource: "ads", verb: "activate", mutates: true, verifiedAt: "legacy activate path" },
+  { resource: "ads", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
 
   { resource: "insights", verb: "get", mutates: false, verifiedAt: "verified" },
 
@@ -437,6 +441,41 @@ export const META_CLI_SUPPORTED_OPERATIONS: readonly SupportedMetaCliOperation[]
   { resource: "creatives", verb: "get", mutates: false, verifiedAt: "verified" },
   { resource: "creatives", verb: "create", mutates: true, verifiedAt: "verified" },
   { resource: "creatives", verb: "update", mutates: true, verifiedAt: "verified" },
+  { resource: "creatives", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "catalogs", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "catalogs", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "catalogs", verb: "create", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "catalogs", verb: "update", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "catalogs", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "datasets", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "datasets", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "datasets", verb: "create", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "datasets", verb: "connect", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "datasets", verb: "disconnect", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "datasets", verb: "assign-user", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "pages", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "pages", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "product-feeds", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-feeds", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-feeds", verb: "create", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-feeds", verb: "update", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-feeds", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "product-items", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-items", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-items", verb: "create", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-items", verb: "update", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-items", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+
+  { resource: "product-sets", verb: "list", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-sets", verb: "get", mutates: false, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-sets", verb: "create", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-sets", verb: "update", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
+  { resource: "product-sets", verb: "delete", mutates: true, verifiedAt: "meta 1.0.1 help 2026-05-17" },
 ];
 
 export interface MetaCliOperationCheckResult {
@@ -493,11 +532,29 @@ function normalizeMetaCliResource(resource: string): string {
       return "ads";
     case "creative":
       return "creatives";
+    case "catalog":
+      return "catalogs";
+    case "dataset":
+      return "datasets";
+    case "page":
+      return "pages";
+    case "product-feed":
+      return "product-feeds";
+    case "product-item":
+      return "product-items";
+    case "product-set":
+      return "product-sets";
     case "accounts":
     case "campaigns":
     case "adsets":
     case "ads":
     case "creatives":
+    case "catalogs":
+    case "datasets":
+    case "pages":
+    case "product-feeds":
+    case "product-items":
+    case "product-sets":
       return resource;
     default:
       return resource;

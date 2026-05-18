@@ -1,6 +1,6 @@
-// AdDroid OSS — PlanAction → MetaActionExecutor adapter (apps/worker side).
+// AdDroid OSS — operation action → MetaActionExecutor adapter (apps/worker side).
 //
-// `runExecuteApply` から渡される 1 つの PlanAction を Meta CLI runner の
+// `runExecuteApply` から渡される 1 つの action を Meta CLI runner の
 // invocation に翻訳して実行し、`ExecuteActionResult` (sanitized) に再構成する。
 //
 // 動作モード:
@@ -43,14 +43,15 @@ import {
   type MetaCliVersionVerification,
 } from "@addroid/meta-adapter";
 import type {
+  ApplyAction,
   ExecuteActionInput,
   ExecuteActionResult,
   JsonValue,
   MetaActionExecutor,
 } from "@addroid/queue";
-import type { PlanAction } from "@addroid/yaml-schemas";
 
 const META_GRAPH_API_VERSION = "v25.0";
+type CreateCreativeApplyAction = ApplyAction & { kind: "create_creative" };
 
 // ---------------------------------------------------------------------
 // regression fix: canonical pre-spawn payload shape
@@ -166,11 +167,11 @@ function mockSuccessPayloadEnvelope(
 }
 
 // ---------------------------------------------------------------------
-// PlanAction → CLI args
+// Operation action → CLI args
 // ---------------------------------------------------------------------
 
 /**
- * 1 つの PlanAction を公式 `meta ads <resource> <verb> ...` 形式の CLI args に変換する。
+ * 1 つの action を公式 `meta ads <resource> <verb> ...` 形式の CLI args に変換する。
  *
  * - resource/verb は `META_CLI_SUPPORTED_OPERATIONS` のマトリクスに含まれるもののみ使う。
  *   experiment 系はマトリクスに無いため、現契約では skipped を返し、別契約での
@@ -178,12 +179,18 @@ function mockSuccessPayloadEnvelope(
  * - access token / ad account id は決して args に乗せない。CLI runner 側が公式
  *   CLI 互換 env (`ACCESS_TOKEN` / `AD_ACCOUNT_ID`) として注入する。
  */
-function planActionToCliArgs(action: PlanAction, accountCurrency = "USD"): {
+function planActionToCliArgs(action: ApplyAction, accountCurrency = "USD"): {
   args: string[];
   resource: string;
   verb: string;
 } | null {
   switch (action.kind) {
+    case "meta_cli_operation":
+      return {
+        resource: action.resource,
+        verb: action.verb,
+        args: action.args,
+      };
     case "create_campaign":
       return {
         resource: "campaigns",
@@ -287,7 +294,7 @@ function planActionToCliArgs(action: PlanAction, accountCurrency = "USD"): {
           ...(action.linkUrl ? ["--link-url", action.linkUrl] : []),
           ...(action.description ? ["--description", action.description] : []),
           ...(action.callToAction ? ["--call-to-action", cliEnum(action.callToAction)] : []),
-          ...(action.instagramUserId ? ["--instagram-user-id", action.instagramUserId] : []),
+          ...(action.instagramUserId ? ["--instagram-actor-id", action.instagramUserId] : []),
           ...repeatFlags("--images", action.images?.map(fileArg)),
           ...repeatFlags("--videos", action.videos?.map(fileArg)),
           ...repeatFlags("--titles", action.titles),
@@ -302,7 +309,31 @@ function planActionToCliArgs(action: PlanAction, accountCurrency = "USD"): {
         verb: "update",
         args: ["ads", "creative", "update", action.creativeId, ...changeFlags(action.changes, accountCurrency)],
       };
-    // delete_* / experiment_* は META_CLI_SUPPORTED_OPERATIONS に未登録 (fail closed)。
+    case "delete_campaign":
+      return {
+        resource: "campaigns",
+        verb: "delete",
+        args: ["ads", "campaign", "delete", action.campaignId, "--force"],
+      };
+    case "delete_adset":
+      return {
+        resource: "adsets",
+        verb: "delete",
+        args: ["ads", "adset", "delete", action.adsetId, "--force"],
+      };
+    case "delete_ad":
+      return {
+        resource: "ads",
+        verb: "delete",
+        args: ["ads", "ad", "delete", action.adId, "--force"],
+      };
+    case "delete_creative":
+      return {
+        resource: "creatives",
+        verb: "delete",
+        args: ["ads", "creative", "delete", action.creativeId, "--force"],
+      };
+    // experiment_* は META_CLI_SUPPORTED_OPERATIONS に未登録 (fail closed)。
     default:
       return null;
   }
@@ -421,7 +452,7 @@ function changeFlags(
         out.push("--call-to-action", cliEnum(String(value)));
         break;
       case "instagramUserId":
-        out.push("--instagram-user-id", String(value));
+        out.push("--instagram-actor-id", String(value));
         break;
       case "storageKey":
         out.push("--image", fileArg(String(value)));
@@ -555,7 +586,7 @@ function extractImageHash(json: unknown): string | null {
 
 function graphLogPayload(input: {
   accountKey: string;
-  action: PlanAction;
+  action: ApplyAction;
   sanitizedCommand: string;
   sanitizedArgs: string[];
   refs: GraphApplyRefs;
@@ -603,7 +634,7 @@ function graphLogPayload(input: {
   return out;
 }
 
-function buildImageCreativeObjectStorySpec(action: Extract<PlanAction, { kind: "create_creative" }>, imageHash: string): Record<string, unknown> {
+function buildImageCreativeObjectStorySpec(action: CreateCreativeApplyAction, imageHash: string): Record<string, unknown> {
   if (!action.pageId) throw new Error("create_creative requires pageId for Meta Graph apply");
   if (!action.linkUrl) throw new Error("create_creative image link ad requires linkUrl for Meta Graph apply");
   const linkData: Record<string, unknown> = {
@@ -633,7 +664,7 @@ function buildImageCreativeObjectStorySpec(action: Extract<PlanAction, { kind: "
 
 /**
  * Apply success が ads_hierarchy 永続化のために external_id を必須とする
- * PlanAction kinds (= Activate 経路がこの行を読むため)。
+ * action kinds (= Activate 経路がこの行を読むため)。
  *
  * - `create_campaign` / `create_adset` / `create_ad` は新規 row を生成するため
  *   external_id 無しで永続化すると Activate が「external_id 未確定」で永久に
@@ -641,12 +672,18 @@ function buildImageCreativeObjectStorySpec(action: Extract<PlanAction, { kind: "
  * - `create_creative` は ads_hierarchy 対象外 (creatives テーブル管轄)。
  * - `update_*` は既存 row 上書きで external_id を保持できるため対象外。
  */
-function isCreateRequiringExternalId(kind: PlanAction["kind"]): boolean {
+function isCreateRequiringExternalId(kind: ApplyAction["kind"]): boolean {
   return (
     kind === "create_campaign" ||
     kind === "create_adset" ||
-    kind === "create_ad"
+    kind === "create_ad" ||
+    kind === "meta_cli_operation"
   );
+}
+
+function actionRequiresExternalId(action: ApplyAction): boolean {
+  if (action.kind === "meta_cli_operation") return action.externalIdRequired === true;
+  return isCreateRequiringExternalId(action.kind);
 }
 
 /**
@@ -739,7 +776,7 @@ function extractIdField(value: unknown): string | undefined {
  * `creative` は ads_hierarchy 対象外だが、payload の可観測性のため同じ規則で
  * 値を返す。
  */
-function deterministicMockExternalId(action: PlanAction): string | undefined {
+function deterministicMockExternalId(action: ApplyAction): string | undefined {
   switch (action.kind) {
     case "create_campaign":
     case "update_campaign":
@@ -753,6 +790,8 @@ function deterministicMockExternalId(action: PlanAction): string | undefined {
     case "create_creative":
     case "update_creative":
       return `mock-${action.account}-cr-${action.creativeId}`;
+    case "meta_cli_operation":
+      return action.entity?.nodeKey ? `mock-${action.account}-${action.entity.nodeType ?? "op"}-${action.entity.nodeKey}` : undefined;
     default:
       return undefined;
   }
@@ -906,6 +945,7 @@ export class CliApplyExecutor implements MetaActionExecutor {
   private readonly resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
   private readonly resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
   private readonly createdCreativeExternalIds = new Map<string, string>();
+  private readonly createdOperationExternalIds = new Map<string, string>();
   constructor(opts: CliApplyExecutorOptions) {
     this.runner = opts.runner;
     this.metaAdapter = opts.metaAdapter;
@@ -969,7 +1009,7 @@ export class CliApplyExecutor implements MetaActionExecutor {
 
     if (action.kind === "create_creative") {
       return this.executeGraphCreateCreative({
-        action,
+        action: action as CreateCreativeApplyAction,
         invocation,
         refs: graphRefs,
         args,
@@ -1102,9 +1142,21 @@ export class CliApplyExecutor implements MetaActionExecutor {
     // ここで externalId が undefined のままだと create_* を fail-closed して
     // ads_hierarchy に null externalId 行を作らないため、抽出可否がそのまま
     // Activate 経路の可用性を決める。
-    if (status === "success" && isCreateRequiringExternalId(action.kind)) {
+    if (status === "success" && actionRequiresExternalId(action)) {
       const ext = extractExternalIdFromCliStdout(result.stdout);
       if (ext) out.externalId = ext;
+    }
+    if (
+      status === "success" &&
+      action.kind === "meta_cli_operation" &&
+      out.externalId &&
+      action.entity?.nodeType &&
+      action.entity.nodeKey
+    ) {
+      this.createdOperationExternalIds.set(
+        `${action.account}:${action.entity.nodeType}:${action.entity.nodeKey}`,
+        out.externalId
+      );
     }
 
     // regression fix: production 経路は recommendedAction を読み、
@@ -1137,14 +1189,24 @@ export class CliApplyExecutor implements MetaActionExecutor {
     return out;
   }
 
-  private rewriteActionRefs(action: PlanAction): PlanAction {
+  private rewriteActionRefs(action: ApplyAction): ApplyAction {
+    if (action.kind === "meta_cli_operation") return this.rewriteOperationRefs(action);
     if (action.kind !== "create_ad") return action;
     const resolved = this.createdCreativeExternalIds.get(`${action.account}:${action.creativeRef}`);
     return resolved ? { ...action, creativeRef: resolved } : action;
   }
 
+  private rewriteOperationRefs(action: Extract<ApplyAction, { kind: "meta_cli_operation" }>): ApplyAction {
+    const args = action.args.map((arg) =>
+      arg.replace(/\{\{([A-Za-z0-9_-]+):([^}]+)\}\}/g, (match, nodeType: string, nodeKey: string) =>
+        this.createdOperationExternalIds.get(`${action.account}:${nodeType}:${nodeKey}`) ?? match
+      )
+    );
+    return args.some((arg, index) => arg !== action.args[index]) ? { ...action, args } : action;
+  }
+
   private async executeGraphCreateCreative(input: {
-    action: Extract<PlanAction, { kind: "create_creative" }>;
+    action: CreateCreativeApplyAction;
     invocation: MetaCliInvocation;
     refs: GraphApplyRefs;
     args: { args: string[]; resource: string; verb: string };
@@ -1328,7 +1390,7 @@ export interface ResolveApplyExecutorOptions {
   env?: NodeJS.ProcessEnv;
   metaAdapter: MetaAdapter;
   /**
-   * accountKey (`ads/accounts/<key>`) から Meta 公式 CLI が要求する
+   * accountKey から Meta 公式 CLI が要求する
    * `AD_ACCOUNT_ID` (`act_<digits>`) を解決する。未指定時は accountKey を fallback。
    */
   resolveAdAccountId?: (accountKey: string) => Promise<string | null>;

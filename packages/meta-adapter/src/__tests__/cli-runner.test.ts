@@ -807,16 +807,16 @@ test("META_CLI_SUPPORTED_OPERATIONS enumerates only verified resource/verb pairs
       (op) => op.resource === "campaigns" && op.verb === "list" && op.mutates === false
     )
   );
-  // mutating 操作も含まれるが PAUSED-by-default の create/update のみ
+  // mutating 操作も含まれる。PR 承認後は delete も実行対象。
   assert.ok(
     META_CLI_SUPPORTED_OPERATIONS.some(
       (op) => op.resource === "campaigns" && op.verb === "create" && op.mutates === true
     )
   );
-  // delete は別契約での明示的検証が必要 — 現マトリクスには含めない
-  assert.equal(
-    META_CLI_SUPPORTED_OPERATIONS.some((op) => op.verb === "delete"),
-    false
+  assert.ok(
+    META_CLI_SUPPORTED_OPERATIONS.some(
+      (op) => op.resource === "campaigns" && op.verb === "delete" && op.mutates === true
+    )
   );
   // activate は release readiness で campaigns/adsets/ads に対し検証済み
   for (const resource of ["campaigns", "adsets", "ads"] as const) {
@@ -862,8 +862,8 @@ test("isSupportedMetaCliOperation rejects unverified resource/verb combinations"
   assert.equal(isSupportedMetaCliOperation(["ads", "campaign"]).supported, false);
   // 全く知らないリソース
   assert.equal(isSupportedMetaCliOperation(["sleep", "long"]).supported, false);
-  // 知っているリソースだが verb が未承認 (delete はマトリクスに無い)
-  assert.equal(isSupportedMetaCliOperation(["ads", "campaign", "delete"]).supported, false);
+  // delete は PR 承認後に実行可能な verified mutation。
+  assert.equal(isSupportedMetaCliOperation(["ads", "campaign", "delete"]).supported, true);
   // 第 1 引数が flag (positional でない)
   assert.equal(isSupportedMetaCliOperation(["--help"]).supported, false);
   // 第 2 引数が flag — verb として採用しない

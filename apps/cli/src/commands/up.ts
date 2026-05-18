@@ -98,9 +98,9 @@ async function loadNextFactory(webDir: string): Promise<NextFactory> {
   }
   const requireFromWeb = createRequire(path.join(webDir, "package.json"));
   const nextEntry = requireFromWeb.resolve("next");
-  const nextModule = (await import(pathToFileURL(nextEntry).href)) as typeof import("next");
+  const nextModule = (await import(pathToFileURL(nextEntry).href)) as unknown;
   const factory =
-    (nextModule as unknown as { default?: typeof nextModule }).default ?? nextModule;
+    (nextModule as { default?: unknown }).default ?? nextModule;
   return factory as unknown as NextFactory;
 }
 

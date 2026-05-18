@@ -235,7 +235,7 @@ export function createPrismaImprovementPrStore(
       // 強制する。理由:
       //   - acceptance: "creatives table links generated assets to ... storage
       //     ref, and PR" — pullRequestId を持つ行は実 asset が背後に存在することが
-      //     前提 (Ads YAML manifest が storage ref を載せ、PR レビュアが proxy
+      //     前提 (creative evidence が storage ref を載せ、PR レビュアが proxy
       //     経由で preview できる)。
       //   - prompt-only fallback (Provider 未注入 / 失敗) で生まれた qa_passed 行は
       //     creatives テーブルに audit metadata として残るが、PR 添付経路は通さない。

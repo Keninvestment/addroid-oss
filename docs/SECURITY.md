@@ -123,8 +123,8 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
   Pull Request + 監査ログ (`audit_logs`) の二重記録を必須とします。
 - Apply (PR merge → PAUSED 作成) と Activate (PAUSED → ACTIVE 遷移) は別の承認境界です。
   両者は `approval_records` の polymorphic targetType で区別され、独立に許可 / 却下できます。
-- Zod スキーマ (`packages/yaml-schemas`) で以下を必ず拒否します:
-  - 不正な Ads YAML / cron.yaml の構造
+- Zod スキーマ (`packages/ops-schemas`) と dry-run plan で以下を必ず拒否します:
+  - 不正な GitOps operation manifest / cron 設定の構造
   - `account.key` パスの不整合
   - 安全でない予算変更 (例: 一気に 10x)
   - 初期 active キャンペーンの作成

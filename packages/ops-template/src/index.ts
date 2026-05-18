@@ -7,8 +7,8 @@
 // リポジトリに置くほうが OSS ユーザーにとって inspect / 編集しやすい。コード側は
 // loader に徹する。
 //
-// 含まれるファイル (acceptance より):
-//   - ads/accounts/<account_key>/brand.yaml
+// 含まれるファイル:
+//   - operations/.gitkeep
 //   - workflows/cron.yaml
 //   - .addroid/project.yaml
 //   - .github/workflows/addroid-validate.yml
@@ -34,10 +34,6 @@ const TEMPLATE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../templates/addroid-ops-template"
 );
-
-// ディレクトリ名のプレースホルダ。`{{...}}` はファイルシステム上では避けるため
-// アンダースコア区切りで表現する。
-const ACCOUNT_KEY_PATH_PLACEHOLDER = "__account_key__";
 
 export const OPS_TEMPLATE_DIR = TEMPLATE_DIR;
 
@@ -97,8 +93,6 @@ function substituteContent(
 function substitutePath(relPath: string, accountKey: string): string {
   return relPath
     .split("/")
-    .map((segment) =>
-      segment === ACCOUNT_KEY_PATH_PLACEHOLDER ? accountKey : segment
-    )
+    .map((segment) => segment.replaceAll("__account_key__", accountKey))
     .join("/");
 }

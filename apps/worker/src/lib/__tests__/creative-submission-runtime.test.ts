@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { CreatePullRequestInput, GithubAdapter } from "@addroid/github-adapter";
+import { toDateStringInTimeZone } from "@addroid/queue";
 import {
   MockImageProvider,
   type ImageGenerateRequest,
@@ -56,10 +57,10 @@ test("createCreativeSubmissionProposal writes creative/ad draft through GitOps P
     assert.equal(result.mediaType, "text");
     assert.equal(github.created.length, 1);
     const pr = github.created[0]!;
-    assert.match(pr.title, /Creative submission/);
-    assert.equal(pr.files[0]!.path, "ads/accounts/primary/brand.yaml");
-    assert.match(pr.files[0]!.diff, /id: spring-sale/);
-    assert.match(pr.files[0]!.diff, /creativeRef: spring-sale/);
+    assert.match(pr.title, /Ops change/);
+    assert.match(pr.files[0]!.path, /^operations\/primary\/.+\.json$/);
+    assert.match(pr.files[0]!.diff, /"nodeKey": "spring-sale"/);
+    assert.match(pr.files[0]!.diff, /\{\{creative:spring-sale\}\}/);
     assert.match(pr.body, /Human review and PR merge are required/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
@@ -108,46 +109,30 @@ test("createCreativeSubmissionProposal can create a new adset under an existing 
     assert.equal(result.prNumber, 42);
     assert.equal(result.planOk, true);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /id: summer-jp/);
-    assert.match(pr.files[0]!.diff, /name: Summer JP/);
-    assert.match(pr.files[0]!.diff, /optimizationGoal: LINK_CLICKS/);
-    assert.match(pr.files[0]!.diff, /billingEvent: IMPRESSIONS/);
-    assert.match(pr.files[0]!.diff, /bidAmount: 3/);
-    assert.match(pr.files[0]!.diff, /pixelId: pixel_123/);
-    assert.match(pr.files[0]!.diff, /pageId: page_123/);
-    assert.match(pr.files[0]!.diff, /linkUrl: https:\/\/example.com\/summer/);
-    assert.match(pr.files[0]!.diff, /callToAction: SHOP_NOW/);
-    assert.match(pr.files[0]!.diff, /creativeRef: summer-sale/);
-    assert.match(pr.body, /New campaign: `no`/);
-    assert.match(pr.body, /New adset: `yes`/);
+    assert.match(pr.files[0]!.diff, /"nodeKey": "summer-jp"/);
+    assert.match(pr.files[0]!.diff, /"Summer JP"/);
+    assert.match(pr.files[0]!.diff, /"--optimization-goal"/);
+    assert.match(pr.files[0]!.diff, /"link_clicks"/);
+    assert.match(pr.files[0]!.diff, /"--billing-event"/);
+    assert.match(pr.files[0]!.diff, /"impressions"/);
+    assert.match(pr.files[0]!.diff, /"--bid-amount"/);
+    assert.match(pr.files[0]!.diff, /"3"/);
+    assert.match(pr.files[0]!.diff, /"pixel_123"/);
+    assert.match(pr.files[0]!.diff, /"page_123"/);
+    assert.match(pr.files[0]!.diff, /"https:\/\/example.com\/summer"/);
+    assert.match(pr.files[0]!.diff, /"shop_now"/);
+    assert.match(pr.files[0]!.diff, /\{\{creative:summer-sale\}\}/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-test("createCreativeSubmissionProposal infers page and Instagram IDs from existing brand creatives", async () => {
+test("createCreativeSubmissionProposal creates operation manifest without local brand identity state", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-identity-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
     writeOpsFixture(rootDir);
-    const brandPath = path.join(rootDir, "ads/accounts/primary/brand.yaml");
-    fs.writeFileSync(
-      brandPath,
-      fs
-        .readFileSync(brandPath, "utf8")
-        .replace(
-          "creatives: []",
-          [
-            "creatives:",
-            "  - id: previous",
-            "    name: Previous",
-            "    mediaType: text",
-            "    pageId: \"281900655012835\"",
-            "    instagramUserId: \"17841465387326763\"",
-          ].join("\n")
-        )
-    );
     const github = new FakeGithubAdapter();
     await createCreativeSubmissionProposal({
       prisma: fakePrisma() as never,
@@ -172,37 +157,19 @@ test("createCreativeSubmissionProposal infers page and Instagram IDs from existi
     });
 
     const diff = github.created[0]!.files[0]!.diff;
-    assert.match(diff, /id: inferred/);
-    assert.match(diff, /pageId: "281900655012835"/);
-    assert.match(diff, /instagramUserId: "17841465387326763"/);
+    assert.match(diff, /"nodeKey": "inferred"/);
+    assert.doesNotMatch(diff, /brand\.yaml/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-test("createCreativeSubmissionProposal migrates legacy instagramActorId while creating the PR", async () => {
+test("createCreativeSubmissionProposal no longer migrates legacy brand identity state", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-legacy-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
     writeOpsFixture(rootDir);
-    const brandPath = path.join(rootDir, "ads/accounts/primary/brand.yaml");
-    fs.writeFileSync(
-      brandPath,
-      fs
-        .readFileSync(brandPath, "utf8")
-        .replace(
-          "creatives: []",
-          [
-            "creatives:",
-            "  - id: legacy",
-            "    name: Legacy",
-            "    mediaType: text",
-            "    pageId: \"281900655012835\"",
-            "    instagramActorId: \"17841465387326763\"",
-          ].join("\n")
-        )
-    );
     const github = new FakeGithubAdapter();
     const result = await createCreativeSubmissionProposal({
       prisma: fakePrisma() as never,
@@ -228,9 +195,8 @@ test("createCreativeSubmissionProposal migrates legacy instagramActorId while cr
 
     assert.equal(result.planOk, true);
     const diff = github.created[0]!.files[0]!.diff;
-    assert.doesNotMatch(diff, /instagramActorId/);
-    assert.match(diff, /instagramUserId: "17841465387326763"/);
-    assert.match(diff, /id: new-after-legacy/);
+    assert.doesNotMatch(diff, /brand\.yaml/);
+    assert.match(diff, /"nodeKey": "new-after-legacy"/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -275,27 +241,22 @@ test("createCreativeSubmissionProposal adopts an existing Meta campaign and crea
     });
 
     assert.equal(result.planOk, true);
-    assert.match(result.planSummary, /creates=3/);
+    assert.match(result.planSummary, /actions=3/);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /id: "120228334025190756"/);
-    assert.match(pr.files[0]!.diff, /importedExisting: true/);
-    assert.match(pr.files[0]!.diff, /externalId: "120228334025190756"/);
-    assert.match(pr.files[0]!.diff, /name: 新規広告セット/);
-    assert.match(pr.files[0]!.diff, /optimizationGoal: LINK_CLICKS/);
-    assert.match(pr.files[0]!.diff, /billingEvent: IMPRESSIONS/);
-    assert.match(pr.files[0]!.diff, /dailyBudget: 500/);
-    assert.match(pr.files[0]!.diff, /creativeRef: new-set-profile/);
-    assert.match(pr.body, /New campaign: `no`/);
-    assert.match(pr.body, /New adset: `yes`/);
-    assert.match(pr.body, /Adopted existing campaign: `yes`/);
-    assert.match(pr.body, /Adopted existing adset: `no`/);
+    assert.match(pr.files[0]!.diff, /120228334025190756/);
+    assert.match(pr.files[0]!.diff, /新規広告セット/);
+    assert.match(pr.files[0]!.diff, /link_clicks/);
+    assert.match(pr.files[0]!.diff, /impressions/);
+    assert.match(pr.files[0]!.diff, /"--daily-budget"/);
+    assert.match(pr.files[0]!.diff, /"500"/);
+    assert.match(pr.files[0]!.diff, /\{\{creative:new-set-profile\}\}/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
 });
 
-test("createCreativeSubmissionProposal adopts an existing Meta campaign/adset when brand YAML is missing them", async () => {
+test("createCreativeSubmissionProposal targets existing Meta campaign/adset without local brand state", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-adopt-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
@@ -331,18 +292,15 @@ test("createCreativeSubmissionProposal adopts an existing Meta campaign/adset wh
     });
 
     assert.equal(result.planOk, true);
-    assert.match(result.planSummary, /creates=2/);
+    assert.match(result.planSummary, /actions=2/);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /id: "120228334025190756"/);
-    assert.match(pr.files[0]!.diff, /importedExisting: true/);
-    assert.match(pr.files[0]!.diff, /externalId: "120228334025180756"/);
-    assert.match(pr.files[0]!.diff, /creativeRef: profile-link/);
-    assert.doesNotMatch(pr.files[0]!.diff, /customEventType:/);
-    assert.doesNotMatch(pr.files[0]!.diff, /optimizationGoal:/);
-    assert.doesNotMatch(pr.files[0]!.diff, /billingEvent:/);
-    assert.match(pr.body, /Adopted existing campaign: `yes`/);
-    assert.match(pr.body, /Adopted existing adset: `yes`/);
-    assert.match(pr.body, /does not create or update those parent objects/);
+    assert.match(pr.files[0]!.diff, /120228334025180756/);
+    assert.match(pr.files[0]!.diff, /\{\{creative:profile-link\}\}/);
+    assert.match(pr.files[0]!.diff, /"--instagram-actor-id"/);
+    assert.doesNotMatch(pr.files[0]!.diff, /--instagram-user-id/);
+    assert.doesNotMatch(pr.files[0]!.diff, /custom-event-type/);
+    assert.doesNotMatch(pr.files[0]!.diff, /optimization-goal/);
+    assert.doesNotMatch(pr.files[0]!.diff, /billing-event/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -514,14 +472,13 @@ test("createCreativeSubmissionProposal rejects link-ad creative without destinat
   }
 });
 
-test("createCreativeSubmissionProposal surfaces dry-run failure details", async () => {
+test("createCreativeSubmissionProposal lets PR review carry business validation for zero budgets", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-dryrun-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
     writeOpsFixture(rootDir);
     const github = new FakeGithubAdapter();
-    await assert.rejects(
-      createCreativeSubmissionProposal({
+    const result = await createCreativeSubmissionProposal({
         prisma: fakePrisma() as never,
         githubAdapter: github as unknown as GithubAdapter,
         workspaceId: "ws_1",
@@ -545,17 +502,11 @@ test("createCreativeSubmissionProposal surfaces dry-run failure details", async 
           dailyBudget: 0,
           mediaType: "text",
         },
-      }),
-      (err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        assert.match(message, /dry-run で問題が見つかったため PR は作成しません/);
-        assert.match(message, /この dry-run は Meta CLI ではなく/);
-        assert.match(message, /原因:/);
-        assert.match(message, /initial dailyBudget must be > 0/);
-        return true;
-      }
-    );
-    assert.equal(github.created.length, 0);
+      });
+    assert.equal(result.planOk, true);
+    assert.equal(github.created.length, 1);
+    assert.match(github.created[0]!.files[0]!.diff, /"--daily-budget"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"0"/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -596,7 +547,7 @@ test("normalizeCreativeSubmissionInput accepts safe Meta enum tokens without a l
   assert.equal(input.billingEvent, "FUTURE_BILLING");
 });
 
-test("createCreativeSubmissionProposal writes account-currency budget to brand YAML", async () => {
+test("createCreativeSubmissionProposal writes account-currency budget to operation manifest", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-budget-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
@@ -631,8 +582,8 @@ test("createCreativeSubmissionProposal writes account-currency budget to brand Y
 
     assert.equal(result.planOk, true);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /dailyBudget: 500/);
-    assert.match(pr.body, /Account currency: `JPY`/);
+    assert.match(pr.files[0]!.diff, /"--daily-budget"/);
+    assert.match(pr.files[0]!.diff, /"500"/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -650,6 +601,7 @@ test("createCreativeSubmissionProposal uses winning creative context when genera
     const prisma = fakePrisma() as ReturnType<typeof fakePrisma> & {
       performanceSnapshot: { findMany: () => Promise<unknown[]> };
     };
+    const metricDate = toDateStringInTimeZone(new Date(), "Asia/Tokyo");
     prisma.performanceSnapshot = {
       async findMany() {
         return [
@@ -659,7 +611,7 @@ test("createCreativeSubmissionProposal uses winning creative context when genera
             hierarchyId: "h_ad_winner",
             displayName: "Winning Ad",
             creativeRef: "winner-cr",
-            metricDate: "2026-05-11",
+            metricDate,
             impressions: 1000,
             clicks: 80,
             conversions: 8,
@@ -671,7 +623,7 @@ test("createCreativeSubmissionProposal uses winning creative context when genera
             hierarchyId: "h_ad_weak",
             displayName: "Weak Ad",
             creativeRef: "weak-cr",
-            metricDate: "2026-05-11",
+            metricDate,
             impressions: 1000,
             clicks: 10,
             conversions: 0,
@@ -733,8 +685,7 @@ test("createCreativeSubmissionProposal uses winning creative context when genera
     assert.match(imageProvider.requests[0]!.prompt, /Do not invent unrelated industries/);
     assert.equal(imageProvider.requests[0]!.referenceImages?.length ?? 0, 0);
     assert.match(imageProvider.requests[0]!.prompt, /abstract visual brief mode/);
-    assert.match(github.created[0]!.body, /Creative context/);
-    assert.match(github.created[0]!.body, /Winning references/);
+    assert.match(github.created[0]!.files[0]!.diff, /context-sale/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -1103,28 +1054,7 @@ schedules:
     cron: "*/2 * * * *"
     enabled: true
 `,
-    "ads/accounts/primary/brand.yaml": `version: 1
-account:
-  key: primary
-  displayName: "Primary"
-creatives: []
-campaigns:
-  - id: cmp_existing
-    name: Existing Campaign
-    objective: OUTCOME_TRAFFIC
-    initialState: paused
-    budget:
-      dailyBudget: 10
-    adsets:
-      - id: as_existing
-        name: Existing Adset
-        initialState: paused
-        targeting:
-          countries: [JP]
-          interests: []
-          customAudiences: []
-        ads: []
-`,
+    "operations/.gitkeep": "",
   };
   for (const [rel, content] of Object.entries(files)) {
     const file = path.join(rootDir, rel);

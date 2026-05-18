@@ -308,28 +308,12 @@ export class OctokitGithubAdapter implements GithubAdapter {
 }
 
 function buildBootstrapTemplateFiles(input: BootstrapOpsRepoInput): OpsTemplateFile[] {
-  const primary = buildOpsTemplate({
+  return buildOpsTemplate({
     workspaceSlug: input.workspaceSlug,
     workspaceDisplayName: input.workspaceDisplayName,
     initialAccountKey: input.initialAccountKey,
     initialAccountDisplayName: input.initialAccountDisplayName,
   });
-  const files = new Map(primary.map((file) => [file.path, file]));
-  for (const account of input.initialAccounts ?? []) {
-    if (account.key === input.initialAccountKey) continue;
-    const accountTemplate = buildOpsTemplate({
-      workspaceSlug: input.workspaceSlug,
-      workspaceDisplayName: input.workspaceDisplayName,
-      initialAccountKey: account.key,
-      initialAccountDisplayName: account.displayName,
-    });
-    for (const file of accountTemplate) {
-      if (file.path === `ads/accounts/${account.key}/brand.yaml`) {
-        files.set(file.path, file);
-      }
-    }
-  }
-  return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 // ---------------------------------------------------------------------

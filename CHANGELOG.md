@@ -18,9 +18,9 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **Public surface:** `@addroid/cli` npm package (`addroid` / `addroid-cli` bin alias)、
   `addroid` CLI、`apps/web` の SSR ルートと API、`prisma/schema.prisma`、
-  `~/.addroid/config.yaml` のスキーマ、`packages/yaml-schemas` で定義する Ads YAML / cron.yaml /
-  project.yaml のスキーマ、`packages/agent-runtime` の Agent tool manifest、ops template の
-  `project.yaml` / `brand.yaml` / `cron.yaml` / `budget-guard.yaml` /
+  `~/.addroid/config.yaml` のスキーマ、`packages/ops-schemas` で定義する GitOps operation
+  manifest のスキーマ、`packages/agent-runtime` の Agent tool manifest、ops template の
+  `.addroid/project.json` / `cron.json` / `budget-guard.json` /
   `automation-rules.yaml`、`docs/SECURITY.md` で定義する outbound-only / localhost-only 契約。
 - **MAJOR (X.0.0):** Public surface に対する breaking change (CLI サブコマンド削除 / 既定挙動の
   逆転、Prisma の破壊的マイグレーション、YAML スキーマの後方互換喪失、`~/.addroid/` レイアウトの
@@ -91,7 +91,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Added — GitOps + Apply / Activate split
 
 - GitHub OAuth + Octokit + ETag-aware ポーリングで merged PR を検知 (Webhook 不使用)。
-- ops repo bootstrap (`@addroid/ops-template` 由来の brand.yaml ほか)。
+- ops repo bootstrap (`@addroid/ops-template` 由来の operation manifest skeleton ほか)。
 - Apply executor が新規オブジェクトを **すべて PAUSED で作成** し、ACTIVE 化は別経路
   (`addroid activate` / Web UI / Slack) に分離。
 - `audit_logs` の polymorphic targetType による Apply / Activate の独立承認境界。

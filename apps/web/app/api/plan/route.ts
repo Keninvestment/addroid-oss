@@ -2,7 +2,7 @@
 //
 // Web UI の /plans ページから呼ばれる。CLI/CI と同じ runPlanForRoot を共有する
 // ことで、UI からの dry-run と CLI からの dry-run が完全に同等の結果になる
-// (acceptance: "Ads YAML can be converted into a dry-run plan ...")。
+// (acceptance: operation manifests can be converted into a dry-run plan)。
 //
 // 入力:
 //   POST /api/plan
