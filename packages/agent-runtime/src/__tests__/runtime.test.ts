@@ -303,6 +303,41 @@ test("runAgentTurn resolves creative generation as a library-only tool on chat s
   }
 });
 
+test("runAgentTurn resolves creative submission context resolver as a read-only tool", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "不足情報を確認します。",
+      tools: [
+        {
+          name: "resolve_creative_submission_context",
+          args: {
+            creativeId: "creative_1",
+            preferActiveCampaign: true,
+            sameAsExistingAd: true,
+          },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "Creative ID creative_1 を現在オンのキャンペーン配下に入稿したい。不足情報を確認して。",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "web-chat",
+  });
+  const tool = result.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "resolve_creative_submission_context");
+  assert.equal(tool.command, null);
+  assert.equal(tool.toolArgs.creativeId, "creative_1");
+});
+
 test("runAgentTurn keeps creative submission args for new adset placement", async () => {
   const provider = new StaticProvider(
     JSON.stringify({

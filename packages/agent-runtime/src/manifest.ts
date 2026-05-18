@@ -186,6 +186,17 @@ export const AGENT_TOOL_MANIFEST = [
       "Use this for requests like '画像を参考に新しいクリエイティブを生成して' or '既存のアクティブ広告も参考にして案を作って' when the user did not ask to submit/create an ad, create a campaign/adset, or open a PR. If the user provides a landing/destination URL, pass it as linkUrl or destinationUrl so the creative generator can ask the LLM to inspect it. Preserve attached images in referenceImagePaths. Do not ask about unsupported Meta delivery settings because this tool does not submit to Meta.",
   },
   {
+    name: "resolve_creative_submission_context",
+    description:
+      "保存済みCreativeを入稿PRに回す前に、現在のMeta状態から配信先・既存広告のページ/Instagram/遷移先など不足情報をまとめて確認する。",
+    args:
+      "{creativeId:string, accountKey?:string, campaignId?:string, adsetId?:string, preferActiveCampaign?:boolean, sameAsExistingAd?:boolean}",
+    effects: ["read"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this before promote_creative_submission when the user asks to submit an existing Creative ID but placement/page/Instagram/link info is missing or says to use the currently active campaign/adset or same settings as an existing ad. This resolver performs real-time Meta read-only checks and returns suggestedPromotionArgs. Do not dump broad Meta lists; use its message to ask concise confirmation. After the user confirms, call promote_creative_submission with suggestedPromotionArgs rather than re-running broad inspection.",
+  },
+  {
     name: "promote_creative_submission",
     description:
       "/creatives に保存済みの生成クリエイティブを、画像と広告テキスト込みで ops repo の入稿PRに回す。Meta には直接反映しない。",

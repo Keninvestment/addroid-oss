@@ -282,7 +282,7 @@ function appendSlackReferenceImageContext(input: string, paths: string[]): strin
     "",
     "Slack 添付画像はこのローカルパスに保存済みです。",
     "新しいクリエイティブ案だけを生成する場合は generate_creatives の referenceImagePaths にこの配列を指定してください。",
-    "/creatives の Creative ID を指定して入稿PRに回す場合は promote_creative_submission を使ってください。",
+    "/creatives の Creative ID を指定して入稿PRに回す場合は promote_creative_submission を使ってください。配信先や既存広告と同じページ/遷移先が未確定なら、先に resolve_creative_submission_context を使ってください。",
     "広告作成・入稿・PR作成を明示された場合は propose_creative_submission の referenceImagePaths に指定してください。",
     "遷移先URLが依頼文にある場合は generate_creatives / propose_creative_submission / promote_creative_submission の linkUrl または destinationUrl に指定してください。",
     "添付そのものを最終広告素材として入稿する場合だけ localMediaPaths に指定してください。",
@@ -319,17 +319,23 @@ function formatSlackAgentReply(
 ): string {
   const lines = [failed ? "完了しましたが、一部の処理で問題がありました。" : "完了しました。"];
   if (message.trim()) lines.push("", sanitizeText(message.trim()));
-  if (executions.length > 0) {
+  const visibleExecutions = executions.filter(isSlackVisibleExecution);
+  if (visibleExecutions.length > 0) {
     lines.push("", "実行内容:");
-    for (const execution of executions.slice(0, 8)) {
+    for (const execution of visibleExecutions.slice(0, 8)) {
       lines.push(
         `- ${sanitizeText(execution.display)}: ${execution.status} - ${sanitizeText(execution.message)}`
       );
     }
-    if (executions.length > 8) {
-      lines.push(`- ...ほか ${executions.length - 8} 件`);
+    if (visibleExecutions.length > 8) {
+      lines.push(`- ...ほか ${visibleExecutions.length - 8} 件`);
     }
   }
   const text = lines.join("\n");
   return text.length > 3500 ? `${text.slice(0, 3490)}...` : text;
+}
+
+function isSlackVisibleExecution(execution: { display: string; status: string }): boolean {
+  if (execution.status !== "ok") return true;
+  return execution.display !== "Meta Ads CLI read-only query";
 }

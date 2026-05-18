@@ -65,6 +65,10 @@ import {
   normalizeCreativePromotionBatchInput,
 } from "../../worker/src/lib/creative-promotion-runtime";
 import {
+  normalizeCreativeSubmissionContextResolverInput,
+  resolveCreativeSubmissionContext,
+} from "../../worker/src/lib/creative-submission-context-resolver";
+import {
   createAutomationRuleCalibrationUpdateProposal,
   createAutomationRuleProposal,
   type AutomationRuleCalibrationUpdateInput,
@@ -98,6 +102,7 @@ export interface WebAgentExecution {
   status: "ok" | "error" | "denied" | "unsupported";
   message: string;
   data?: unknown;
+  visible?: boolean;
 }
 
 export interface WebAgentReply {
@@ -182,13 +187,14 @@ export async function runWebAgentChat(
     );
     executions.push(execution);
     message = execution.message;
+    const publicExecutions = visibleAgentExecutions(executions);
     await recordAgentAudit(workspace.id, options.auditAction ?? CHAT_AUDIT_ACTION, {
       sessionId,
       surface,
       channel: "web",
       input: userText,
       message,
-      executions: executions.map((e) => ({
+      executions: publicExecutions.map((e) => ({
         display: e.display,
         status: e.status,
         message: e.message,
@@ -197,7 +203,7 @@ export async function runWebAgentChat(
     return {
       ok: execution.status === "ok",
       message,
-      executions,
+      executions: publicExecutions,
       sessionId,
     };
   }
@@ -236,13 +242,14 @@ export async function runWebAgentChat(
     }
     if (!executedAny) break;
   }
+  const publicExecutions = visibleAgentExecutions(executions);
   await recordAgentAudit(workspace.id, options.auditAction ?? CHAT_AUDIT_ACTION, {
     sessionId,
     surface,
     channel: "web",
     input: userText || text,
     message,
-    executions: executions.map((e) => ({
+    executions: publicExecutions.map((e) => ({
       display: e.display,
       status: e.status,
       message: e.message,
@@ -251,9 +258,13 @@ export async function runWebAgentChat(
   return {
     ok: executions.every((e) => e.status !== "error" && e.status !== "denied" && e.status !== "unsupported"),
     message,
-    executions,
+    executions: publicExecutions,
     sessionId,
   };
+}
+
+function visibleAgentExecutions(executions: readonly WebAgentExecution[]): WebAgentExecution[] {
+  return executions.filter((execution) => execution.visible !== false);
 }
 
 interface WebChatMemoryTurn {
@@ -465,7 +476,7 @@ export async function executeWebAgentTool(
       case "show_logs":
         return await showRecentLogs(tool.toolArgs, tool.display);
       case "query_meta_ads":
-        return await runMetaAdsReadOnlyTool(workspaceId, tool.toolArgs, tool.display, provider);
+        return await runMetaAdsReadOnlyTool(workspaceId, tool.toolArgs, tool.display);
       case "sync_meta_mirror":
         return await syncMetaMirrorTool(workspaceId, tool.toolArgs, tool.display);
       case "start_delivery":
@@ -493,6 +504,12 @@ export async function executeWebAgentTool(
           tool.display,
           webUrl,
           provider
+        );
+      case "resolve_creative_submission_context":
+        return await resolveCreativeSubmissionContextTool(
+          workspaceId,
+          tool.toolArgs,
+          tool.display
         );
       case "promote_creative_submission":
         return await promoteCreativeSubmissionTool(
@@ -696,6 +713,32 @@ async function generateCreativesTool(
     message: `${result.message}\n${webUrl}/creatives`,
     data: result,
   };
+}
+
+async function resolveCreativeSubmissionContextTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  try {
+    const result = await resolveCreativeSubmissionContext({
+      prisma,
+      workspaceId,
+      input: normalizeCreativeSubmissionContextResolverInput(args),
+    });
+    return {
+      display,
+      status: "ok",
+      message: result.message,
+      data: result,
+    };
+  } catch (err) {
+    return {
+      display,
+      status: "error",
+      message: `入稿PRの不足情報を確認できませんでした: ${(err as Error).message}`,
+    };
+  }
 }
 
 async function promoteCreativeSubmissionTool(
@@ -1608,8 +1651,7 @@ async function runSubmissionCheck(
 async function runMetaAdsReadOnlyTool(
   workspaceId: string,
   args: Record<string, unknown>,
-  display: string,
-  provider?: LLMProvider
+  display: string
 ): Promise<WebAgentExecution> {
   try {
     const plan = buildMetaAdsReadOnlyInvocation(args);
@@ -1641,8 +1683,9 @@ async function runMetaAdsReadOnlyTool(
     return {
       display,
       status: "ok",
-      message: await formatMetaAdsReadOnlyResult(plan, result.stdout, provider),
+      message: formatMetaAdsReadOnlyExecutionSummary(plan.label, rows.length),
       data: { label: plan.label, rows, rowCount: rows.length },
+      visible: false,
     };
   } catch (err) {
     return {
@@ -1651,6 +1694,10 @@ async function runMetaAdsReadOnlyTool(
       message: `Meta Ads の読み取りを実行できませんでした: ${(err as Error).message}`,
     };
   }
+}
+
+function formatMetaAdsReadOnlyExecutionSummary(label: string, rowCount: number): string {
+  return `Meta Ads の ${label} を確認しました (${rowCount}件)。`;
 }
 
 function buildMetaAdsReadOnlyInvocation(args: Record<string, unknown>): {
@@ -1796,242 +1843,6 @@ async function spawnMetaAdsCli(input: {
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
-}
-
-async function formatMetaAdsReadOnlyResult(
-  plan: { label: string },
-  stdout: string,
-  provider?: LLMProvider
-): Promise<string> {
-  const payload = parseUnknownJson(stdout);
-  const rows = extractUnknownRows(payload);
-  const fallback = formatMetaAdsReadOnlyResultFallback(plan, rows);
-  if (!provider || provider.name === "mock" || rows.length === 0) return fallback;
-  try {
-    const res = await provider.complete({
-      temperature: 0.2,
-      maxOutputTokens: 1_800,
-      purpose: "web:meta-ads-presentation",
-      messages: [
-        {
-          role: "system",
-          content: buildMetaAdsPresentationPrompt(),
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            label: plan.label,
-            rows: rows.slice(0, 20),
-            rowCount: rows.length,
-          }),
-        },
-      ],
-    });
-    const text = res.content.trim();
-    return text || fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function formatMetaAdsReadOnlyResultFallback(
-  plan: { label: string },
-  rows: unknown[]
-): string {
-  const lines = [`Meta Ads から ${plan.label} を取得しました。`];
-  if (rows.length === 0) {
-    lines.push("結果: 0件");
-    return lines.join("\n");
-  }
-  lines.push(`結果: ${rows.length}件`);
-  for (const row of rows.slice(0, 8)) {
-    if (!isRecord(row)) continue;
-    const label = [readOptionalString(row.name), readOptionalString(row.id)].filter(Boolean).join(" / ");
-    if (plan.label === "insights") {
-      const insightsLabel = formatInsightsRowLabel(row);
-      if (insightsLabel) lines.push(insightsLabel);
-      const prefix = insightsLabel ? "  " : "";
-      const mainMetrics = formatInsightsMainMetrics(row);
-      if (mainMetrics.length > 0) {
-        lines.push(`${prefix}主な数字:`);
-        for (const metric of mainMetrics) lines.push(`${prefix}- ${metric}`);
-      }
-      const extraMetrics = [
-        ...formatInsightsActions(row.actions),
-        ...formatInsightsAdditionalFields(row),
-      ];
-      if (extraMetrics.length > 0) {
-        lines.push(`${prefix}追加指標:`);
-        for (const metric of extraMetrics.slice(0, 12)) lines.push(`${prefix}- ${metric}`);
-        if (extraMetrics.length > 12) lines.push(`${prefix}- ほか ${extraMetrics.length - 12} 件`);
-      }
-      continue;
-    }
-    const metrics = [
-      ["spend", row.spend],
-      ["impressions", row.impressions],
-      ["clicks", row.clicks],
-      ["ctr", row.ctr],
-      ["cpc", row.cpc],
-      ["reach", row.reach],
-    ]
-      .filter(([, value]) => value !== undefined && value !== null)
-      .map(([key, value]) => `${key}=${String(value)}`)
-      .join(", ");
-    lines.push(label ? `- ${label}${metrics ? `: ${metrics}` : ""}` : `- ${metrics || "詳細なし"}`);
-  }
-  if (rows.length > 8) lines.push(`- ほか ${rows.length - 8} 件`);
-  return lines.join("\n");
-}
-
-function buildMetaAdsPresentationPrompt(): string {
-  return [
-    "You format Meta Ads CLI JSON results for non-engineer Japanese users.",
-    "Return plain Japanese text only. Do not use markdown tables.",
-    "The format may vary to fit the data, but follow these rules:",
-    "- Always state what was retrieved and the row count.",
-    "- For insights rows, show date/period and target name/id when present.",
-    "- Do not invent values. Do not print missing metrics as '-'; simply omit them or say 未取得 only when important.",
-    "- Include all returned scalar metrics that look useful, including frequency, cpm, cpp, ctr, cpc, reach, spend, impressions, clicks.",
-    "- Include actions arrays. Show action_type and value; use a Japanese label when obvious, but preserve uncommon action_type text.",
-    "- Keep it compact. For many rows, one block per date or target is fine.",
-    "- Separate measured facts from interpretation. Do not make automation decisions from display text.",
-  ].join("\n");
-}
-
-function formatInsightsRowLabel(row: Record<string, unknown>): string | null {
-  const dateStart =
-    readOptionalString(row.date_start) ??
-    readOptionalString(row.dateStart) ??
-    readOptionalString(row.date);
-  const dateStop =
-    readOptionalString(row.date_stop) ??
-    readOptionalString(row.dateStop);
-  const dateLabel = dateStart && dateStop && dateStart !== dateStop
-    ? `${dateStart} - ${dateStop}`
-    : dateStart ?? dateStop;
-  const objectLabel = [
-    readOptionalString(row.campaign_name) ?? readOptionalString(row.campaignName),
-    readOptionalString(row.adset_name) ?? readOptionalString(row.adsetName),
-    readOptionalString(row.ad_name) ?? readOptionalString(row.adName),
-    readOptionalString(row.name),
-    readOptionalString(row.campaign_id) ?? readOptionalString(row.campaignId),
-    readOptionalString(row.adset_id) ?? readOptionalString(row.adsetId),
-    readOptionalString(row.ad_id) ?? readOptionalString(row.adId),
-    readOptionalString(row.id),
-  ].find(Boolean);
-  return [dateLabel, objectLabel].filter(Boolean).join(" / ") || null;
-}
-
-function formatInsightsMainMetrics(row: Record<string, unknown>): string[] {
-  const lines: string[] = [];
-  if (hasMetaMetric(row.spend)) lines.push(`消化: ${formatMetaMetric(row.spend)}`);
-  const delivery = [
-    hasMetaMetric(row.impressions) ? `表示: ${formatMetaMetric(row.impressions)}` : null,
-    hasMetaMetric(row.clicks) ? `クリック: ${formatMetaMetric(row.clicks)}` : null,
-    hasMetaMetric(row.ctr) ? `CTR: ${formatMetaMetric(row.ctr)}%` : null,
-  ].filter(Boolean);
-  if (delivery.length > 0) lines.push(delivery.join(" / "));
-  const efficiency = [
-    hasMetaMetric(row.cpc) ? `CPC: ${formatMetaMetric(row.cpc)}` : null,
-    hasMetaMetric(row.reach) ? `リーチ: ${formatMetaMetric(row.reach)}` : null,
-    hasMetaMetric(row.frequency) ? `頻度: ${formatMetaMetric(row.frequency)}` : null,
-  ].filter(Boolean);
-  if (efficiency.length > 0) lines.push(efficiency.join(" / "));
-  return lines;
-}
-
-function formatInsightsActions(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (!isRecord(item)) return [];
-    const type = readOptionalString(item.action_type) ?? readOptionalString(item.actionType);
-    const rawValue = item.value;
-    if (!type || !hasMetaMetric(rawValue)) return [];
-    return [`${friendlyActionType(type)}: ${formatMetaMetric(rawValue)}`];
-  });
-}
-
-function formatInsightsAdditionalFields(row: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  for (const [key, value] of Object.entries(row)) {
-    if (INSIGHTS_DISPLAYED_KEYS.has(key)) continue;
-    if (!hasMetaMetric(value)) continue;
-    out.push(`${friendlyInsightField(key)}: ${formatMetaMetric(value)}`);
-  }
-  return out;
-}
-
-const INSIGHTS_DISPLAYED_KEYS = new Set([
-  "spend",
-  "impressions",
-  "clicks",
-  "ctr",
-  "cpc",
-  "reach",
-  "frequency",
-  "actions",
-  "date",
-  "date_start",
-  "dateStart",
-  "date_stop",
-  "dateStop",
-  "name",
-  "id",
-  "campaign_name",
-  "campaignName",
-  "campaign_id",
-  "campaignId",
-  "adset_name",
-  "adsetName",
-  "adset_id",
-  "adsetId",
-  "ad_name",
-  "adName",
-  "ad_id",
-  "adId",
-]);
-
-function hasMetaMetric(value: unknown): boolean {
-  return value !== undefined && value !== null && value !== "";
-}
-
-function friendlyActionType(type: string): string {
-  const labels: Record<string, string> = {
-    page_engagement: "ページエンゲージメント",
-    post_engagement: "投稿エンゲージメント",
-    link_click: "リンククリック",
-    landing_page_view: "LPビュー",
-    purchase: "購入",
-    lead: "リード",
-    comment: "コメント",
-    post_reaction: "リアクション",
-    post: "投稿",
-    like: "いいね",
-    video_view: "動画再生",
-  };
-  return labels[type] ?? type;
-}
-
-function friendlyInsightField(key: string): string {
-  const labels: Record<string, string> = {
-    unique_clicks: "ユニーククリック",
-    unique_ctr: "ユニークCTR",
-    inline_link_clicks: "リンククリック",
-    inline_link_click_ctr: "リンククリックCTR",
-    cost_per_inline_link_click: "リンククリック単価",
-    cpp: "CPP",
-    cpm: "CPM",
-  };
-  return labels[key] ?? key;
-}
-
-function formatMetaMetric(value: unknown): string {
-  if (value === undefined || value === null || value === "") return "-";
-  if (typeof value === "number" && Number.isFinite(value)) return formatNumber(value);
-  const numeric = typeof value === "string" ? Number(value) : Number.NaN;
-  if (Number.isFinite(numeric)) return formatNumber(numeric);
-  return String(value);
 }
 
 function sanitizeMetaCliText(text: string, token: string): string {

@@ -43,6 +43,10 @@ import {
   normalizeCreativePromotionBatchInput,
 } from "./creative-promotion-runtime.js";
 import {
+  normalizeCreativeSubmissionContextResolverInput,
+  resolveCreativeSubmissionContext,
+} from "./creative-submission-context-resolver.js";
+import {
   createAutomationRuleProposal,
   type AutomationRuleProposalInput,
 } from "./automation-rule-proposal-runtime.js";
@@ -556,6 +560,19 @@ export async function executeWorkerAgentTool(opts: {
           actor: opts.actor ?? "agent:scheduled-task",
           source: normalizeCreativeGenerationSource(opts.source),
           llmProvider: opts.provider ?? null,
+        });
+        return {
+          display: readyTool.display,
+          status: "ok",
+          message: result.message,
+          data: result,
+        };
+      }
+      case "resolve_creative_submission_context": {
+        const result = await resolveCreativeSubmissionContext({
+          prisma: opts.prisma,
+          workspaceId: opts.workspaceId,
+          input: normalizeCreativeSubmissionContextResolverInput(readyTool.toolArgs),
         });
         return {
           display: readyTool.display,
