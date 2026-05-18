@@ -1863,6 +1863,7 @@ function extractUnknownRows(payload: unknown): unknown[] {
     if (Array.isArray(payload.data)) return payload.data;
     if (Array.isArray(payload.rows)) return payload.rows;
     if (Array.isArray(payload.results)) return payload.results;
+    if (Object.keys(payload).length > 0) return [payload];
   }
   return [];
 }

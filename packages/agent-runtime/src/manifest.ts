@@ -249,6 +249,8 @@ export const AGENT_TOOL_MANIFEST = [
     args: "{resource:'insights'|'adaccount'|'campaign'|'adset'|'ad'|'creative'|'catalog'|'dataset'|'page'|'product_feed'|'product_item'|'product_set', action?:'get'|'list'|'current', accountKey?:string, businessId?:string, catalogId?:string, since?:'YYYY-MM-DD', until?:'YYYY-MM-DD', datePreset?:'today'|'yesterday'|'last_3d'|'last_7d'|'last_14d'|'last_30d'|'last_90d'|'this_month'|'last_month', timeIncrement?:'daily'|'weekly'|'monthly'|'all_days', breakdowns?:string[], fields?:string[], campaignId?:string, adsetId?:string, adId?:string, id?:string, limit?:number}",
     effects: ["read"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use narrow read-only lookups to resolve factual missing values before asking the user, especially pageId, instagramUserId, linkUrl, existing creative, current active campaign/adset/ad, budget fields, status, objective, optimization, and billing fields. Prefer get by known ID or parent-filtered list with a small limit. Do not use this for mutations.",
   },
   {
     name: "sync_meta_mirror",

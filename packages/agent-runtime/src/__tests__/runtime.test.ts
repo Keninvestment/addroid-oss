@@ -77,6 +77,19 @@ test("system prompt exposes read-only Meta query and GitOps proposal to schedule
   assert.doesNotMatch(prompt, /^- start_delivery:/m);
 });
 
+test("system prompt tells the agent to resolve Meta-readable missing values before asking", () => {
+  const prompt = buildAgentSystemPrompt(
+    {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    "web-chat"
+  );
+  assert.match(prompt, /Before asking the user for missing ad-operation details/);
+  assert.match(prompt, /narrow query_meta_ads follow-up lookups/);
+});
+
 test("runAgentTurn resolves create_scheduled_agent_task on cli-chat", async () => {
   const provider = new StaticProvider(
     JSON.stringify({

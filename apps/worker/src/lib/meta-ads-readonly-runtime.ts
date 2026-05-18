@@ -37,7 +37,7 @@ export async function runMetaAdsReadOnlyQuery(opts: {
       ].join("\n")
     );
   }
-  const rows = extractUnknownRows(parseUnknownJson(result.stdout));
+  const rows = extractMetaAdsReadOnlyRows(parseUnknownJson(result.stdout));
   return {
     label: plan.label,
     rows,
@@ -258,12 +258,13 @@ function parseUnknownJson(text: string): unknown {
   try { return JSON.parse(text); } catch { return null; }
 }
 
-function extractUnknownRows(payload: unknown): unknown[] {
+export function extractMetaAdsReadOnlyRows(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload;
   if (isRecord(payload)) {
     if (Array.isArray(payload.data)) return payload.data;
     if (Array.isArray(payload.rows)) return payload.rows;
     if (Array.isArray(payload.results)) return payload.results;
+    if (Object.keys(payload).length > 0) return [payload];
   }
   return [];
 }
