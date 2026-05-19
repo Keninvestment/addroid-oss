@@ -231,7 +231,8 @@ export async function runWebAgentChat(
         agentContext.webUrl,
         workspace.id,
         selection.provider,
-        options.referenceImagePaths ?? []
+        options.referenceImagePaths ?? [],
+        sessionId
       );
       executions.push(execution);
       executedAny = true;
@@ -494,7 +495,8 @@ export async function executeWebAgentTool(
   webUrl: string,
   workspaceId: string,
   provider?: LLMProvider,
-  referenceImagePaths: string[] = []
+  referenceImagePaths: string[] = [],
+  sessionId?: string
 ): Promise<WebAgentExecution> {
   if (tool.status === "denied") {
     return {
@@ -600,7 +602,8 @@ export async function executeWebAgentTool(
           tool.toolArgs,
           tool.display,
           webUrl,
-          provider
+          provider,
+          sessionId
         );
       case "propose_automation_rule":
         return await proposeAutomationRuleTool(workspaceId, tool.toolArgs, tool.display, webUrl);
@@ -829,14 +832,25 @@ async function promoteCreativeSubmissionTool(
   args: Record<string, unknown>,
   display: string,
   webUrl: string,
-  provider?: LLMProvider
+  provider?: LLMProvider,
+  sessionId?: string
 ): Promise<WebAgentExecution> {
   const selection = await getActiveGithubAdapter();
+  const hydratedArgs = await hydratePromotionArgsFromSession(workspaceId, sessionId, args);
+  const missingInstagramActor = needsInstagramActorId(hydratedArgs) && !readOptionalString(hydratedArgs.instagramActorId);
+  if (missingInstagramActor) {
+    return {
+      display,
+      status: "error",
+      message:
+        "Instagram遷移先の入稿に必要な Instagram actor を直前の確認結果から引き継げなかったため、壊れたPRを作らずに止めました。もう一度「足りない配信先情報を確認して」と依頼してください。Metaの最新情報から再確認します。",
+    };
+  }
   const result = await createCreativePromotionProposals({
     prisma,
     githubAdapter: selection.adapter,
     workspaceId,
-    input: normalizeCreativePromotionBatchInput(args),
+    input: normalizeCreativePromotionBatchInput(hydratedArgs),
     actor: "agent:web-chat",
     source: "web-chat",
     llmProvider: provider ?? null,
@@ -854,6 +868,96 @@ async function promoteCreativeSubmissionTool(
       `merge 後に PAUSED で作成され、配信開始は別途 Activate で確認します。\n${result.htmlUrls.join("\n")}`,
     data: result,
   };
+}
+
+async function hydratePromotionArgsFromSession(
+  workspaceId: string,
+  sessionId: string | undefined,
+  args: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (!sessionId) return args;
+  const suggested = await loadLatestSuggestedPromotionArgs(workspaceId, sessionId, args);
+  if (!suggested) return args;
+  return mergePromotionArgs(suggested, args);
+}
+
+async function loadLatestSuggestedPromotionArgs(
+  workspaceId: string,
+  sessionId: string,
+  args: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  const rows = await prisma.auditLog.findMany({
+    where: { workspaceId, action: { in: [...CHAT_AUDIT_ACTIONS] } },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+    select: { id: true, metadata: true },
+  });
+  for (const row of rows) {
+    const metadata = row.metadata;
+    if (!isRecord(metadata)) continue;
+    const rowSessionId = readOptionalString(metadata.sessionId) ?? row.id;
+    if (rowSessionId !== sessionId) continue;
+    const executions = Array.isArray(metadata.executions) ? metadata.executions : [];
+    for (const execution of executions.slice().reverse()) {
+      const suggested = suggestedPromotionArgsFromAuditExecution(execution);
+      if (suggested && promotionArgsMatch(args, suggested)) return suggested;
+    }
+  }
+  return null;
+}
+
+function suggestedPromotionArgsFromAuditExecution(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value) || !isRecord(value.data)) return null;
+  const suggested = value.data.suggestedPromotionArgs;
+  return isRecord(suggested) ? suggested : null;
+}
+
+function promotionArgsMatch(args: Record<string, unknown>, suggested: Record<string, unknown>): boolean {
+  const currentIds = promotionCreativeIds(args);
+  const suggestedIds = promotionCreativeIds(suggested);
+  if (currentIds.length === 0) return suggestedIds.length > 0;
+  return currentIds.some((id) => suggestedIds.includes(id));
+}
+
+function promotionCreativeIds(args: Record<string, unknown>): string[] {
+  const ids = Array.isArray(args.creativeIds)
+    ? args.creativeIds
+    : Array.isArray(args.creativeId)
+      ? args.creativeId
+      : [args.creativeId ?? args.id];
+  return ids.flatMap((value) => {
+    const text = readOptionalString(value);
+    return text ? [text] : [];
+  });
+}
+
+function mergePromotionArgs(
+  suggested: Record<string, unknown>,
+  current: Record<string, unknown>
+): Record<string, unknown> {
+  const merged = { ...suggested };
+  for (const [key, value] of Object.entries(current)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim().length === 0) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    merged[key] = value;
+  }
+  if (readOptionalString(current.creativeId) && !Array.isArray(current.creativeIds)) {
+    delete merged.creativeIds;
+  }
+  return merged;
+}
+
+function needsInstagramActorId(args: Record<string, unknown>): boolean {
+  const linkUrl = readOptionalString(args.linkUrl ?? args.destinationUrl);
+  if (!linkUrl) return false;
+  try {
+    const url = new URL(linkUrl);
+    const host = url.hostname.toLowerCase();
+    return host === "instagram.com" || host.endsWith(".instagram.com");
+  } catch {
+    return /(^|\/\/)(www\.)?instagram\.com\//i.test(linkUrl);
+  }
 }
 
 async function proposeAutomationRuleTool(
