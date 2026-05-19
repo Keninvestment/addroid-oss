@@ -234,6 +234,10 @@ async function resolveAdset(
     action: "list",
     campaignId,
     limit: 100,
+  }).catch(async (err) => {
+    if (!isRateLimitLikeError(err)) throw err;
+    const fallback = await resolveAdsetFromLocalMirror(opts, accountKey, campaignId, env);
+    return fallback ? [fallback] : [];
   });
   const active = rows.map(summarizeMetaObject).filter((row): row is MetaObjectSummary =>
     Boolean(row && isActiveMetaObject(row))
@@ -260,6 +264,10 @@ async function resolveExistingAd(
     action: "list",
     adsetId,
     limit: 100,
+  }).catch(async (err) => {
+    if (!isRateLimitLikeError(err)) throw err;
+    const fallback = await resolveExistingAdFromLocalMirror(opts, accountKey, adsetId, env);
+    return fallback ? [fallback] : [];
   });
   const summarized = rows.map(summarizeMetaObject).filter((row): row is MetaObjectSummary =>
     Boolean(row)
@@ -268,6 +276,111 @@ async function resolveExistingAd(
   const selected = active ?? summarized[0] ?? null;
   if (!selected) missing.push("existingAd");
   return selected;
+}
+
+async function resolveAdsetFromLocalMirror(
+  opts: {
+    prisma: PrismaClient;
+    workspaceId: string;
+    input: CreativeSubmissionContextResolverInput;
+  },
+  accountKey: string | undefined,
+  campaignId: string,
+  env: NodeJS.ProcessEnv
+): Promise<MetaObjectSummary | null> {
+  const account = await findAdAccount(opts.prisma, opts.workspaceId, accountKey);
+  if (!account) return null;
+  const campaign = await opts.prisma.adsHierarchyNode.findFirst({
+    where: {
+      accountId: account.id,
+      nodeType: "campaign",
+      externalId: campaignId,
+    },
+    select: { id: true },
+  });
+  if (!campaign) return null;
+  const candidates = await opts.prisma.adsHierarchyNode.findMany({
+    where: {
+      accountId: account.id,
+      parentId: campaign.id,
+      nodeType: "adset",
+      status: "active",
+      externalId: { not: null },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      externalId: true,
+      displayName: true,
+      status: true,
+    },
+  });
+  if (candidates.length !== 1 || !candidates[0]?.externalId) return null;
+  const rows = await readMetaRows(opts, accountKey, env, {
+    resource: "adset",
+    action: "get",
+    adsetId: candidates[0].externalId,
+  }).catch(() => []);
+  const live = summarizeMetaObject(rows[0]);
+  if (live && isActiveMetaObject(live)) return live;
+  return {
+    id: candidates[0].externalId,
+    name: candidates[0].displayName,
+    status: candidates[0].status,
+    effectiveStatus: candidates[0].status,
+  };
+}
+
+async function resolveExistingAdFromLocalMirror(
+  opts: {
+    prisma: PrismaClient;
+    workspaceId: string;
+    input: CreativeSubmissionContextResolverInput;
+  },
+  accountKey: string | undefined,
+  adsetId: string,
+  env: NodeJS.ProcessEnv
+): Promise<MetaObjectSummary | null> {
+  const account = await findAdAccount(opts.prisma, opts.workspaceId, accountKey);
+  if (!account) return null;
+  const adset = await opts.prisma.adsHierarchyNode.findFirst({
+    where: {
+      accountId: account.id,
+      nodeType: "adset",
+      externalId: adsetId,
+    },
+    select: { id: true },
+  });
+  if (!adset) return null;
+  const candidates = await opts.prisma.adsHierarchyNode.findMany({
+    where: {
+      accountId: account.id,
+      parentId: adset.id,
+      nodeType: "ad",
+      status: "active",
+      externalId: { not: null },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      externalId: true,
+      displayName: true,
+      status: true,
+    },
+  });
+  const candidate = candidates[0];
+  if (!candidate?.externalId) return null;
+  const rows = await readMetaRows(opts, accountKey, env, {
+    resource: "ad",
+    action: "get",
+    adId: candidate.externalId,
+  }).catch(() => []);
+  const live = summarizeMetaObject(rows[0]);
+  if (live && isActiveMetaObject(live)) return live;
+  return {
+    id: candidate.externalId,
+    name: candidate.displayName,
+    status: candidate.status,
+    effectiveStatus: candidate.status,
+  };
 }
 
 async function resolveExistingCreative(
@@ -315,6 +428,33 @@ async function readMetaRows(
     env,
   });
   return result.rows;
+}
+
+async function findAdAccount(
+  prisma: PrismaClient,
+  workspaceId: string,
+  accountKey: string | undefined
+): Promise<{ id: string } | null> {
+  if (accountKey) {
+    return await prisma.adAccount.findFirst({
+      where: {
+        workspaceId,
+        OR: [{ key: accountKey }, { metaAccountId: accountKey }],
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+  }
+  return await prisma.adAccount.findFirst({
+    where: { workspaceId, active: true },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+}
+
+function isRateLimitLikeError(value: unknown): boolean {
+  const message = value instanceof Error ? value.message : String(value);
+  return /API error \(17\)|User request limit reached|Application request limit reached/i.test(message);
 }
 
 function summarizeMetaObject(value: unknown): MetaObjectSummary | null {
