@@ -82,29 +82,31 @@ export async function createCreativePromotionProposal(opts: {
     mediaType: sourceCreative.mediaType,
     env,
   });
+  const sourceContextDefaults = promotionDefaultsFromSourceCreative(sourceCreative.parameters);
+  const promotionInput = mergePromotionDefaults(opts.input, sourceContextDefaults);
   const promotionAttemptId = makePromotionAttemptId();
   const promotedCreativeName = withPromotionAttemptSuffix(
-    opts.input.creativeName ?? sourceCreative.displayName ?? sourceCreative.key,
+    promotionInput.creativeName ?? sourceCreative.displayName ?? sourceCreative.key,
     promotionAttemptId
   );
   const promotedAdName = withPromotionAttemptSuffix(
-    opts.input.adName ?? `${sourceCreative.displayName ?? sourceCreative.key} ad`,
+    promotionInput.adName ?? `${sourceCreative.displayName ?? sourceCreative.key} ad`,
     promotionAttemptId
   );
   const submissionInput: CreativeSubmissionInput = {
-    ...opts.input,
-    accountKey: opts.input.accountKey ?? sourceCreative.account.key,
+    ...promotionInput,
+    accountKey: promotionInput.accountKey ?? sourceCreative.account.key,
     creativeName: promotedCreativeName,
     adName: promotedAdName,
     prompt: sourceCreative.prompt ?? undefined,
-    headline: opts.input.headline ?? adText?.headline ?? undefined,
-    primaryText: opts.input.primaryText ?? adText?.primaryText ?? undefined,
-    description: opts.input.description ?? adText?.description ?? undefined,
-    callToAction: opts.input.callToAction ?? adText?.callToAction ?? undefined,
+    headline: promotionInput.headline ?? adText?.headline ?? undefined,
+    primaryText: promotionInput.primaryText ?? adText?.primaryText ?? undefined,
+    description: promotionInput.description ?? adText?.description ?? undefined,
+    callToAction: promotionInput.callToAction ?? adText?.callToAction ?? undefined,
     mediaType: uploadedMedia.length > 0 ? mediaTypeFromStoredCreative(sourceCreative.mediaType) : "text",
     uploadedMedia: uploadedMedia.length > 0 ? uploadedMedia : undefined,
     rationale:
-      opts.input.rationale ??
+      promotionInput.rationale ??
       `Generated creative ${sourceCreative.id} (${sourceCreative.displayName}) promoted to a GitOps submission PR.`,
   };
 
@@ -319,6 +321,30 @@ function makePromotionAttemptId(): string {
 function withPromotionAttemptSuffix(value: string, attemptId: string): string {
   const base = value.trim() || "creative";
   return `${base} submission ${attemptId}`;
+}
+
+function promotionDefaultsFromSourceCreative(parameters: unknown): Partial<CreativeSubmissionInput> {
+  const root = jsonObject(parameters);
+  const creativeContext = jsonObject(root.creativeContext);
+  const target = jsonObject(creativeContext.target);
+  const creative = jsonObject(target.creative);
+  return {
+    pageId: readString(creative.pageId) ?? undefined,
+    linkUrl: readString(creative.linkUrl) ?? undefined,
+    instagramUserId: readString(creative.instagramUserId) ?? undefined,
+  };
+}
+
+function mergePromotionDefaults(
+  input: CreativePromotionInput,
+  defaults: Partial<CreativeSubmissionInput>
+): CreativePromotionInput {
+  return {
+    ...input,
+    pageId: input.pageId?.trim() || defaults.pageId,
+    linkUrl: input.linkUrl?.trim() || defaults.linkUrl,
+    instagramUserId: input.instagramUserId?.trim() || defaults.instagramUserId,
+  };
 }
 
 async function loadSourceCreativeMedia(input: {

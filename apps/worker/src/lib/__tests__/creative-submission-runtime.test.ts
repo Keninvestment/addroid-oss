@@ -350,6 +350,15 @@ test("createCreativePromotionProposal allows reusing a creative already attached
       status: "attached_to_pr",
       prompt: "promote this existing creative",
       parameters: {
+        creativeContext: {
+          target: {
+            creative: {
+              pageId: "281900655012835",
+              linkUrl: "https://example.com/reuse",
+              instagramUserId: "17841465387326763",
+            },
+          },
+        },
         promotedToSubmissionPr: {
           prNumber: 10,
           pullRequestId: "previous_pr",
@@ -388,7 +397,6 @@ test("createCreativePromotionProposal allows reusing a creative already attached
         creativeId: "source_cr_1",
         campaignId: "cmp_existing",
         adsetId: "as_existing",
-        linkUrl: "https://example.com/reuse",
       },
     });
 
@@ -396,6 +404,8 @@ test("createCreativePromotionProposal allows reusing a creative already attached
     assert.notEqual(result.creativeId, "reusable-creative");
     assert.match(result.creativeId, /^reusable-creative-submission-[a-f0-9]{8}$/);
     assert.equal(github.created.length, 1);
+    assert.match(github.created[0]!.files[0]!.diff, /281900655012835/);
+    assert.match(github.created[0]!.files[0]!.diff, /https:\/\/example\.com\/reuse/);
     const parameters = updatedParameters as {
       promotedToSubmissionPr?: { prNumber?: number; submissionCreativeId?: string };
       promotedToSubmissionPrHistory?: Array<{ prNumber?: number; submissionCreativeId?: string }>;
