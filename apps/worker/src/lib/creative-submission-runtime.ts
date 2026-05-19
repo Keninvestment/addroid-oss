@@ -5,6 +5,7 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import type { GithubAdapter } from "@addroid/github-adapter";
 import {
   fetchMetaAssetReadiness,
+  META_GRAPH_API_VERSION,
   type MetaAssetIdentityCandidate,
 } from "@addroid/meta-adapter";
 import {
@@ -64,6 +65,7 @@ export interface CreativeSubmissionInput {
   linkUrl?: string;
   description?: string;
   instagramUserId?: string;
+  instagramActorId?: string;
   images?: string[];
   videos?: string[];
   titles?: string[];
@@ -641,6 +643,11 @@ export async function createCreativeSubmissionProposal(opts: {
     state: draftState,
     input: normalized,
   });
+  await inferInstagramActorIdForCli({
+    prisma: opts.prisma,
+    adAccountId: account.metaAccountId ?? account.key,
+    input: normalized,
+  });
   validateCreativeSubmissionInput(normalized);
   validateCreativeSubmissionCliCompatibility(normalized);
   const draftId = makeStableId(normalized.creativeName || normalized.adName || normalized.headline || "creative");
@@ -714,6 +721,7 @@ export async function createCreativeSubmissionProposal(opts: {
     linkUrl: normalized.linkUrl,
     description: normalized.description,
     instagramUserId: normalized.instagramUserId,
+    instagramActorId: normalized.instagramActorId,
     images: normalized.images,
     videos: normalized.videos,
     titles: normalized.titles,
@@ -841,6 +849,7 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     linkUrl: readString(args.linkUrl ?? args.destinationUrl) ?? undefined,
     description: readString(args.description) ?? undefined,
     instagramUserId: readString(args.instagramUserId) ?? undefined,
+    instagramActorId: readString(args.instagramActorId) ?? undefined,
     images: readStringArray(args.images),
     videos: readStringArray(args.videos),
     titles: readStringArray(args.titles),
@@ -1747,7 +1756,7 @@ function buildCreativeSubmissionOperations(input: {
     ...flagIfString("--link-url", input.input.linkUrl),
     ...flagIfString("--description", input.input.description),
     ...flagIfString("--call-to-action", input.input.callToAction ? cliValue(input.input.callToAction) : undefined),
-    ...flagIfString("--instagram-actor-id", input.input.instagramUserId),
+    ...flagIfString("--instagram-actor-id", input.input.instagramActorId),
     ...repeatFlags("--titles", input.input.titles),
     ...repeatFlags("--bodies", input.input.bodies),
     ...repeatFlags("--descriptions", input.input.descriptions),
@@ -1969,6 +1978,48 @@ async function inferCreativeIdentity(input: {
   if (!input.input.instagramUserId && chosen?.instagramUserId) {
     input.input.instagramUserId = chosen.instagramUserId;
   }
+}
+
+async function inferInstagramActorIdForCli(input: {
+  prisma: PrismaClient;
+  adAccountId: string;
+  input: CreativeSubmissionInput;
+}): Promise<void> {
+  if (input.input.instagramActorId || !input.input.instagramUserId) return;
+  const actorId = await resolveInstagramActorIdForCli({
+    prisma: input.prisma,
+    adAccountId: input.adAccountId,
+    instagramUserId: input.input.instagramUserId,
+  });
+  if (actorId) input.input.instagramActorId = actorId;
+}
+
+async function resolveInstagramActorIdForCli(input: {
+  prisma: PrismaClient;
+  adAccountId: string;
+  instagramUserId: string;
+}): Promise<string | null> {
+  const selection = await buildPrismaMetaAdapterSelection({ prisma: input.prisma }).catch(() => null);
+  if (!selection || selection.choice === "stub") return null;
+  const lease = await selection.adapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease) return null;
+  const accountId = input.adAccountId.startsWith("act_")
+    ? input.adAccountId
+    : `act_${input.adAccountId}`;
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${accountId}/instagram_accounts`);
+  url.searchParams.set("fields", "id,ig_id");
+  url.searchParams.set("limit", "100");
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${lease.accessToken}`,
+    },
+  }).catch(() => null);
+  if (!response?.ok) return null;
+  const json = (await response.json().catch(() => null)) as unknown;
+  const rows = isRecord(json) && Array.isArray(json.data) ? json.data.filter(isRecord) : [];
+  const matched = rows.find((row) => readString(row.id) === input.instagramUserId);
+  return readString(matched?.ig_id);
 }
 
 function identityCandidatesFromState(state: Record<string, unknown>): MetaAssetIdentityCandidate[] {

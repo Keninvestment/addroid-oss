@@ -227,6 +227,7 @@ test("createCreativeSubmissionProposal adopts an existing Meta campaign and crea
         primaryText: "既存キャンペーンに新規セットで入稿",
         pageId: "281900655012835",
         instagramUserId: "17841465387326763",
+        instagramActorId: "65414107577",
         linkUrl: "http://instagram.com/shishasin2022kumamoto",
         callToAction: "OPEN_LINK",
         campaignId: "120228334025190756",
@@ -280,6 +281,7 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
         primaryText: "プロフィールをチェック",
         pageId: "281900655012835",
         instagramUserId: "17841465387326763",
+        instagramActorId: "65414107577",
         linkUrl: "http://instagram.com/shishasin2022kumamoto",
         callToAction: "OPEN_LINK",
         campaignId: "120228334025190756",
@@ -297,6 +299,7 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
     assert.match(pr.files[0]!.diff, /120228334025180756/);
     assert.match(pr.files[0]!.diff, /\{\{creative:profile-link\}\}/);
     assert.match(pr.files[0]!.diff, /"--instagram-actor-id"/);
+    assert.match(pr.files[0]!.diff, /"65414107577"/);
     assert.doesNotMatch(pr.files[0]!.diff, /--instagram-user-id/);
     assert.doesNotMatch(pr.files[0]!.diff, /custom-event-type/);
     assert.doesNotMatch(pr.files[0]!.diff, /optimization-goal/);

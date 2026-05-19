@@ -46,6 +46,7 @@ export interface CreativeSubmissionContextResolverResult {
     name: string | null;
     pageId: string | null;
     instagramUserId: string | null;
+    instagramActorId: string | null;
     linkUrl: string | null;
     callToAction: string | null;
   } | null;
@@ -115,6 +116,7 @@ export async function resolveCreativeSubmissionContext(opts: {
 
   const pageId = existingCreative?.pageId ?? null;
   const instagramUserId = existingCreative?.instagramUserId ?? null;
+  const instagramActorId = existingCreative?.instagramActorId ?? null;
   const linkUrl = existingCreative?.linkUrl ?? null;
   const cta = normalizeSupportedCta(existingCreative?.callToAction, warnings);
   if (!campaign) missing.push("campaignId");
@@ -130,6 +132,7 @@ export async function resolveCreativeSubmissionContext(opts: {
     ...(adset ? { adsetId: adset.id } : {}),
     ...(pageId ? { pageId } : {}),
     ...(instagramUserId ? { instagramUserId } : {}),
+    ...(instagramActorId ? { instagramActorId } : {}),
     ...(linkUrl ? { linkUrl } : {}),
     ...(cta ? { callToAction: cta } : {}),
   };
@@ -283,7 +286,7 @@ async function resolveExistingCreative(
     action: "get",
     adId: ad.id,
   }).catch(() => []);
-  const creativeId = extractCreativeId(adRows[0]) ?? extractCreativeId(ad);
+  const creativeId = extractCreativeIdFromMetaAd(adRows[0]) ?? extractCreativeIdFromMetaAd(ad);
   if (!creativeId) {
     warnings.push("既存広告からクリエイティブIDを確認できませんでした。");
     return null;
@@ -293,7 +296,7 @@ async function resolveExistingCreative(
     action: "get",
     creativeId,
   });
-  return summarizeCreative(rows[0], creativeId);
+  return summarizeCreativeForSubmission(rows[0], creativeId);
 }
 
 async function readMetaRows(
@@ -331,36 +334,44 @@ function isActiveMetaObject(value: MetaObjectSummary): boolean {
   return status === "ACTIVE";
 }
 
-function summarizeCreative(
+export function summarizeCreativeForSubmission(
   value: unknown,
   fallbackId: string
 ): CreativeSubmissionContextResolverResult["existingCreative"] {
-  if (!isRecord(value)) {
+  const root = parseMetaCliObjectRecord(value);
+  if (!root) {
     return {
       id: fallbackId,
       name: null,
       pageId: null,
       instagramUserId: null,
+      instagramActorId: null,
       linkUrl: null,
       callToAction: null,
     };
   }
-  const storySpec = recordAt(value, "object_story_spec");
+  const storySpec = recordAt(root, "object_story_spec");
   const linkData = recordAt(storySpec, "link_data");
   const videoData = recordAt(storySpec, "video_data");
   const templateData = recordAt(storySpec, "template_data");
   return {
-    id: readString(value.id) ?? fallbackId,
-    name: readString(value.name),
-    pageId: readString(storySpec?.page_id ?? value.page_id),
+    id: readString(root.id) ?? fallbackId,
+    name: readString(root.name),
+    pageId: readString(storySpec?.page_id ?? root.page_id),
     instagramUserId: readString(
       storySpec?.instagram_user_id ??
-        value.instagram_user_id ??
-        recordAt(value, "asset_feed_spec")?.instagram_user_ids
+        root.instagram_user_id ??
+        recordAt(root, "asset_feed_spec")?.instagram_user_ids
     ),
+    instagramActorId:
+      readInstagramActorIdFromAppLink(
+        readNestedString(linkData, ["call_to_action", "value", "app_link"]) ??
+          readNestedString(videoData, ["call_to_action", "value", "app_link"]) ??
+          readNestedString(templateData, ["call_to_action", "value", "app_link"])
+      ) ?? readString(root.instagram_actor_id),
     linkUrl:
-      readString(value.object_url) ??
-      readString(value.template_url) ??
+      readString(root.object_url) ??
+      readString(root.template_url) ??
       readNestedString(linkData, ["call_to_action", "value", "link"]) ??
       readNestedString(videoData, ["call_to_action", "value", "link"]) ??
       readNestedString(templateData, ["call_to_action", "value", "link"]) ??
@@ -370,7 +381,7 @@ function summarizeCreative(
       readNestedString(linkData, ["call_to_action", "type"]) ??
       readNestedString(videoData, ["call_to_action", "type"]) ??
       readNestedString(templateData, ["call_to_action", "type"]) ??
-      readString(value.call_to_action_type),
+      readString(root.call_to_action_type),
   };
 }
 
@@ -384,12 +395,13 @@ function normalizeSupportedCta(value: string | null | undefined, warnings: strin
   return "LEARN_MORE";
 }
 
-function extractCreativeId(value: unknown): string | null {
-  if (!isRecord(value)) return null;
+export function extractCreativeIdFromMetaAd(value: unknown): string | null {
+  const record = parseMetaCliObjectRecord(value);
+  if (!record) return null;
   return (
-    readString(value.creative_id ?? value.creativeId) ??
-    readString(recordAt(value, "creative")?.id) ??
-    readString(recordAt(value, "creative")?.creative_id)
+    readString(record.creative_id ?? record.creativeId) ??
+    readString(recordAt(record, "creative")?.id) ??
+    readString(recordAt(record, "creative")?.creative_id)
   );
 }
 
@@ -415,6 +427,7 @@ function formatResolverMessage(input: {
     lines.push(
       `既存広告と同様のページ: ${input.existingCreative.pageId ?? "未確認"}`,
       `Instagramユーザー: ${input.existingCreative.instagramUserId ?? "未確認"}`,
+      `Instagram actor: ${input.existingCreative.instagramActorId ?? "未確認"}`,
       `遷移先: ${input.existingCreative.linkUrl ?? "未確認"}`,
       `CTA候補: ${String(input.suggestedPromotionArgs.callToAction ?? "未確認")}`
     );
@@ -434,16 +447,38 @@ function formatResolverMessage(input: {
 function readNestedString(value: unknown, path: string[]): string | null {
   let current = value;
   for (const key of path) {
-    if (!isRecord(current)) return null;
-    current = current[key];
+    const record = parseMetaCliObjectRecord(current);
+    if (!record) return null;
+    current = record[key];
   }
   return readString(current);
 }
 
+function readInstagramActorIdFromAppLink(value: string | null): string | null {
+  if (!value) return null;
+  const match = /[?&]userid=(\d+)/.exec(value);
+  return match?.[1] ?? null;
+}
+
+export function parseMetaCliObjectRecord(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string") return null;
+  const start = value.indexOf("{");
+  const end = value.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(value.slice(start, end + 1));
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function recordAt(value: unknown, key: string): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  const child = value[key];
-  return isRecord(child) ? child : null;
+  const record = parseMetaCliObjectRecord(value);
+  if (!record) return null;
+  const child = record[key];
+  return parseMetaCliObjectRecord(child);
 }
 
 function readString(value: unknown): string | null {
