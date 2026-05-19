@@ -315,12 +315,14 @@ test("normalizeCreativePromotionBatchInput drops null optional values", () => {
     creativeId: "4356ead2-8f2e-4cb9-a0f2-cfb0055c8666",
     campaignId: "120228334025190756",
     adsetId: "120228334025180756",
+    instagramActorId: "65414107577",
     customEventType: null,
     callToAction: null,
     objective: null,
     urgency: null,
   });
 
+  assert.equal(input.instagramActorId, "65414107577");
   assert.equal(input.customEventType, undefined);
   assert.equal(input.callToAction, undefined);
   assert.equal(input.objective, undefined);

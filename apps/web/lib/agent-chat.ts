@@ -194,11 +194,7 @@ export async function runWebAgentChat(
       channel: "web",
       input: userText,
       message,
-      executions: publicExecutions.map((e) => ({
-        display: e.display,
-        status: e.status,
-        message: e.message,
-      })),
+      executions: publicExecutions.map(serializeExecutionForAudit),
     }, options.auditActor ?? "agent:web-ui");
     return {
       ok: execution.status === "ok",
@@ -249,14 +245,10 @@ export async function runWebAgentChat(
     channel: "web",
     input: userText || text,
     message,
-    executions: publicExecutions.map((e) => ({
-      display: e.display,
-      status: e.status,
-      message: e.message,
-    })),
+    executions: publicExecutions.map(serializeExecutionForAudit),
   }, options.auditActor ?? "agent:web-ui");
   return {
-    ok: executions.every((e) => e.status !== "error" && e.status !== "denied" && e.status !== "unsupported"),
+    ok: publicExecutions.every((e) => e.status !== "error" && e.status !== "denied" && e.status !== "unsupported"),
     message,
     executions: publicExecutions,
     sessionId,
@@ -264,7 +256,88 @@ export async function runWebAgentChat(
 }
 
 function visibleAgentExecutions(executions: readonly WebAgentExecution[]): WebAgentExecution[] {
-  return executions.filter((execution) => execution.visible !== false);
+  return executions.filter((execution, index) => {
+    if (execution.visible === false) return false;
+    if (execution.status !== "error") return true;
+    return !executions
+      .slice(index + 1)
+      .some((later) => later.visible !== false && later.display === execution.display && later.status === "ok");
+  });
+}
+
+function serializeExecutionForAudit(execution: WebAgentExecution): Record<string, unknown> {
+  const serialized: Record<string, unknown> = {
+    display: execution.display,
+    status: execution.status,
+    message: execution.message,
+  };
+  const suggestedPromotionArgs = extractSuggestedPromotionArgs(execution.data);
+  if (suggestedPromotionArgs) {
+    serialized.data = { suggestedPromotionArgs };
+  }
+  return serialized;
+}
+
+function extractSuggestedPromotionArgs(data: unknown): Record<string, unknown> | null {
+  if (!isRecord(data) || !isRecord(data.suggestedPromotionArgs)) return null;
+  const suggestedPromotionArgs = data.suggestedPromotionArgs;
+  const allowedKeys = [
+    "creativeId",
+    "accountKey",
+    "creativeName",
+    "adName",
+    "pageId",
+    "title",
+    "body",
+    "linkUrl",
+    "destinationUrl",
+    "description",
+    "instagramUserId",
+    "instagramActorId",
+    "callToAction",
+    "campaignId",
+    "adsetId",
+    "campaignName",
+    "adsetName",
+    "objective",
+    "dailyBudget",
+    "lifetimeBudget",
+    "optimizationGoal",
+    "billingEvent",
+    "bidAmount",
+    "startTime",
+    "endTime",
+    "pixelId",
+    "customEventType",
+    "adPixelId",
+    "countries",
+    "rationale",
+    "urgency",
+  ] as const;
+  const compact: Record<string, unknown> = {};
+  for (const key of allowedKeys) {
+    const value = suggestedPromotionArgs[key];
+    if (typeof value === "string" && value.trim()) {
+      compact[key] = value.trim();
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      compact[key] = value;
+    } else if (typeof value === "boolean") {
+      compact[key] = value;
+    } else if (Array.isArray(value)) {
+      const values = value
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim());
+      if (values.length > 0) compact[key] = values;
+    }
+  }
+  const creativeIds = suggestedPromotionArgs.creativeIds;
+  if (Array.isArray(creativeIds)) {
+    const values = creativeIds
+      .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      .map((item) => item.trim());
+    if (values.length > 0) compact.creativeIds = values;
+  }
+  return Object.keys(compact).length > 0 ? compact : null;
 }
 
 interface WebChatMemoryTurn {
@@ -298,7 +371,17 @@ async function loadWebChatMemory(
       const display = readOptionalString(item.display);
       const status = readOptionalString(item.status);
       const message = readOptionalString(item.message);
-      return [display, status, message].filter(Boolean).join(": ");
+      const data = isRecord(item.data) ? item.data : null;
+      const suggestedPromotionArgs =
+        data && isRecord(data.suggestedPromotionArgs)
+          ? JSON.stringify(data.suggestedPromotionArgs)
+          : null;
+      return [
+        display,
+        status,
+        message,
+        suggestedPromotionArgs ? `suggestedPromotionArgs=${suggestedPromotionArgs}` : null,
+      ].filter(Boolean).join(": ");
     });
     return [{ createdAt: row.createdAt, user, assistant, tools }];
   });
