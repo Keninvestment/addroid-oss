@@ -35,7 +35,7 @@ test("summarizeCreativeForSubmission reads page, Instagram user, link, and CTA f
     name: "existing creative",
     pageId: "281900655012835",
     instagramUserId: "17841465387326763",
-    instagramActorId: "65414107577",
+    instagramActorId: null,
     linkUrl: "http://instagram.com/shishasin2022kumamoto",
     callToAction: "VIEW_INSTAGRAM_PROFILE",
   });

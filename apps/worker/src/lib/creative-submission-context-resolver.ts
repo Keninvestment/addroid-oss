@@ -1,5 +1,7 @@
 import type { PrismaClient } from "@addroid/db";
+import { META_GRAPH_API_VERSION } from "@addroid/meta-adapter";
 import { runMetaAdsReadOnlyQuery } from "./meta-ads-readonly-runtime.js";
+import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 
 const SUPPORTED_CTA = new Set([
   "APPLY_NOW",
@@ -124,6 +126,7 @@ export async function resolveCreativeSubmissionContext(opts: {
   if (!pageId) missing.push("pageId");
   if (!instagramUserId) missing.push("instagramUserId");
   if (!linkUrl) missing.push("linkUrl");
+  if (isInstagramLinkUrl(linkUrl) && !instagramActorId) missing.push("instagramActorId");
 
   const suggestedPromotionArgs: Record<string, unknown> = {
     creativeId: opts.input.creativeId,
@@ -145,7 +148,8 @@ export async function resolveCreativeSubmissionContext(opts: {
       adset &&
       pageId &&
       instagramUserId &&
-      linkUrl
+      linkUrl &&
+      (!isInstagramLinkUrl(linkUrl) || instagramActorId)
   );
 
   return {
@@ -409,7 +413,18 @@ async function resolveExistingCreative(
     action: "get",
     creativeId,
   });
-  return summarizeCreativeForSubmission(rows[0], creativeId);
+  const summarized = summarizeCreativeForSubmission(rows[0], creativeId);
+  if (!summarized?.instagramUserId) return summarized;
+  const graphActorId = await resolveInstagramActorIdForCli({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    accountKey,
+    instagramUserId: summarized.instagramUserId,
+  });
+  return {
+    ...summarized,
+    instagramActorId: graphActorId ?? summarized.instagramActorId,
+  };
 }
 
 async function readMetaRows(
@@ -434,7 +449,7 @@ async function findAdAccount(
   prisma: PrismaClient,
   workspaceId: string,
   accountKey: string | undefined
-): Promise<{ id: string } | null> {
+): Promise<{ id: string; key: string; metaAccountId: string | null } | null> {
   if (accountKey) {
     return await prisma.adAccount.findFirst({
       where: {
@@ -442,14 +457,46 @@ async function findAdAccount(
         OR: [{ key: accountKey }, { metaAccountId: accountKey }],
       },
       orderBy: { updatedAt: "desc" },
-      select: { id: true },
+      select: { id: true, key: true, metaAccountId: true },
     });
   }
   return await prisma.adAccount.findFirst({
     where: { workspaceId, active: true },
     orderBy: { updatedAt: "desc" },
-    select: { id: true },
+    select: { id: true, key: true, metaAccountId: true },
   });
+}
+
+async function resolveInstagramActorIdForCli(input: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  accountKey: string | undefined;
+  instagramUserId: string;
+}): Promise<string | null> {
+  const account = await findAdAccount(input.prisma, input.workspaceId, input.accountKey);
+  const rawAccountId = account?.metaAccountId ?? account?.key ?? input.accountKey;
+  if (!rawAccountId) return null;
+  const selection = await buildPrismaMetaAdapterSelection({ prisma: input.prisma }).catch(() => null);
+  if (!selection || selection.choice === "stub") return null;
+  const lease = await selection.adapter.loadAccessTokenPlaintext().catch(() => null);
+  if (!lease) return null;
+  const accountId = rawAccountId.startsWith("act_") ? rawAccountId : `act_${rawAccountId}`;
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${accountId}/instagram_accounts`);
+  url.searchParams.set("fields", "id,ig_id,username");
+  url.searchParams.set("limit", "100");
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${lease.accessToken}`,
+    },
+  }).catch(() => null);
+  if (!response?.ok) return null;
+  const json = (await response.json().catch(() => null)) as unknown;
+  const rows = isRecord(json) && Array.isArray(json.data) ? json.data.filter(isRecord) : [];
+  const matched = rows.find((row) =>
+    readString(row.id) === input.instagramUserId || readString(row.ig_id) === input.instagramUserId
+  );
+  return readString(matched?.id);
 }
 
 function isRateLimitLikeError(value: unknown): boolean {
@@ -503,12 +550,7 @@ export function summarizeCreativeForSubmission(
         root.instagram_user_id ??
         recordAt(root, "asset_feed_spec")?.instagram_user_ids
     ),
-    instagramActorId:
-      readInstagramActorIdFromAppLink(
-        readNestedString(linkData, ["call_to_action", "value", "app_link"]) ??
-          readNestedString(videoData, ["call_to_action", "value", "app_link"]) ??
-          readNestedString(templateData, ["call_to_action", "value", "app_link"])
-      ) ?? readString(root.instagram_actor_id),
+    instagramActorId: readString(root.instagram_actor_id),
     linkUrl:
       readString(root.object_url) ??
       readString(root.template_url) ??
@@ -594,12 +636,6 @@ function readNestedString(value: unknown, path: string[]): string | null {
   return readString(current);
 }
 
-function readInstagramActorIdFromAppLink(value: string | null): string | null {
-  if (!value) return null;
-  const match = /[?&]userid=(\d+)/.exec(value);
-  return match?.[1] ?? null;
-}
-
 export function parseMetaCliObjectRecord(value: unknown): Record<string, unknown> | null {
   if (isRecord(value)) return value;
   if (typeof value !== "string") return null;
@@ -640,6 +676,17 @@ function readBoolean(value: unknown): boolean | null {
   if (normalized === "true" || normalized === "yes" || normalized === "1") return true;
   if (normalized === "false" || normalized === "no" || normalized === "0") return false;
   return null;
+}
+
+function isInstagramLinkUrl(value: string | null): boolean {
+  if (!value) return false;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    return host === "instagram.com" || host.endsWith(".instagram.com");
+  } catch {
+    return /(^|\/\/)(www\.)?instagram\.com\//i.test(value);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

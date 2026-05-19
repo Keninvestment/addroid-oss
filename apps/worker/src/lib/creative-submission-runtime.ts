@@ -1985,7 +1985,7 @@ async function inferInstagramActorIdForCli(input: {
   adAccountId: string;
   input: CreativeSubmissionInput;
 }): Promise<void> {
-  if (input.input.instagramActorId || !input.input.instagramUserId) return;
+  if (!input.input.instagramUserId) return;
   const actorId = await resolveInstagramActorIdForCli({
     prisma: input.prisma,
     adAccountId: input.adAccountId,
@@ -2007,7 +2007,7 @@ async function resolveInstagramActorIdForCli(input: {
     ? input.adAccountId
     : `act_${input.adAccountId}`;
   const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${accountId}/instagram_accounts`);
-  url.searchParams.set("fields", "id,ig_id");
+  url.searchParams.set("fields", "id,ig_id,username");
   url.searchParams.set("limit", "100");
   const response = await fetch(url.toString(), {
     headers: {
@@ -2018,8 +2018,10 @@ async function resolveInstagramActorIdForCli(input: {
   if (!response?.ok) return null;
   const json = (await response.json().catch(() => null)) as unknown;
   const rows = isRecord(json) && Array.isArray(json.data) ? json.data.filter(isRecord) : [];
-  const matched = rows.find((row) => readString(row.id) === input.instagramUserId);
-  return readString(matched?.ig_id);
+  const matched = rows.find((row) =>
+    readString(row.id) === input.instagramUserId || readString(row.ig_id) === input.instagramUserId
+  );
+  return readString(matched?.id);
 }
 
 function identityCandidatesFromState(state: Record<string, unknown>): MetaAssetIdentityCandidate[] {
