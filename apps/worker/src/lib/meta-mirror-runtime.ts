@@ -216,7 +216,7 @@ async function fetchGraphRows(
     edge === "campaigns"
       ? "id,name,status,effective_status,configured_status,updated_time"
       : edge === "adsets"
-        ? "id,name,status,effective_status,configured_status,campaign_id,updated_time"
+        ? "id,name,status,effective_status,configured_status,campaign_id,updated_time,targeting,optimization_goal,billing_event,destination_type,promoted_object"
         : [
             "id",
             "name",

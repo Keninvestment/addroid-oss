@@ -3,6 +3,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import sharp from "sharp";
 import type { CreatePullRequestInput, GithubAdapter } from "@addroid/github-adapter";
 import { toDateStringInTimeZone } from "@addroid/queue";
 import {
@@ -308,6 +309,111 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
     assert.doesNotMatch(pr.files[0]!.diff, /custom-event-type/);
     assert.doesNotMatch(pr.files[0]!.diff, /optimization-goal/);
     assert.doesNotMatch(pr.files[0]!.diff, /billing-event/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal does not infer 9:16 from Instagram profile CTA alone", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-normalize-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const squarePng = await sharp({
+      create: {
+        width: 1080,
+        height: 1080,
+        channels: 3,
+        background: "#336699",
+      },
+    }).png().toBuffer();
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "profile-image",
+        adName: "Profile Image Ad",
+        headline: "Profile",
+        primaryText: "Instagramプロフィールへ誘導します。",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        instagramActorId: "17841465387326763",
+        instagramAppLink: "instagram://user?username=shishasin2022kumamoto&userid=65414107577",
+        linkUrl: "http://instagram.com/shishasin2022kumamoto",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
+        campaignId: "120228334025190756",
+        adsetId: "120228334025180756",
+        mediaType: "image",
+        uploadedMedia: [{ filename: "square.png", bytes: squarePng, mimeType: "image/png" }],
+      },
+    });
+
+    assert.equal(result.mediaType, "image");
+    assert.equal(result.storageKeys.length, 1);
+    assert.match(result.storageKeys[0]!, /square\.png$/);
+    const normalizedPath = path.join(homeDir, "storage", result.storageKeys[0]!);
+    const metadata = await sharp(normalizedPath).metadata();
+    assert.equal(metadata.width, 1080);
+    assert.equal(metadata.height, 1080);
+    assert.match(github.created[0]!.files[0]!.diff, /square\.png/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal requests 9:16 image generation from explicit placement", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-generate-profile-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const imageProvider = new CapturingImageProvider();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: new FakeGithubAdapter() as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      imageProvider,
+      input: {
+        accountKey: "primary",
+        creativeName: "profile-generated",
+        adName: "Profile Generated Ad",
+        prompt: "プロフィール訪問向けの店舗広告画像を生成",
+        linkUrl: "http://instagram.com/shishasin2022kumamoto",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        instagramActorId: "17841465387326763",
+        instagramAppLink: "instagram://user?username=shishasin2022kumamoto&userid=65414107577",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
+        campaignId: "120228334025190756",
+        adsetId: "120228334025180756",
+        mediaType: "image",
+        generateImage: true,
+        imagePlacement: "story_reels",
+      },
+    });
+
+    assert.equal(result.generatedImage, true);
+    const condition = imageProvider.requests[0]!.variationConditions[0]!;
+    assert.equal(condition.width, 1080);
+    assert.equal(condition.height, 1920);
+    assert.equal(condition.variantKey, "story_reels");
+    assert.match(condition.styleNotes ?? "", /safe margins/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -971,6 +1077,13 @@ test("createStandaloneCreativeGeneration stores Meta ad text variants with gener
     assert.equal(spec.metaTextRecommendations?.primaryText, 125);
     assert.match(imageProvider.requests[0]!.prompt, /headline=静かに相談できる予約/);
     assert.match(imageProvider.requests[0]!.prompt, /primaryText=落ち着いた空間/);
+    assert.deepEqual(
+      imageProvider.requests[0]!.variationConditions.map((c) => [c.width, c.height, c.variantKey]),
+      [
+        [1080, 1080, "feed_square_0"],
+        [1080, 1350, "feed_portrait_1"],
+      ]
+    );
     assert.match(result.message, /広告テキスト案/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });

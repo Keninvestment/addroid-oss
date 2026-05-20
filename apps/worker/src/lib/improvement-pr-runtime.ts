@@ -59,24 +59,26 @@ import {
   type CreatePullRequestFile,
   type GithubAdapter,
 } from "@addroid/github-adapter";
-import type {
-  DailyReportAdAccountSnapshot,
-  ImprovementPrAuditClassification,
-  ImprovementPrAuditDecision,
-  ImprovementPrAuditInput,
-  ImprovementPrAuditWriter,
-  ImprovementPrCreativeQaAssetCheck,
-  ImprovementPrCreativeQaIssue,
-  ImprovementPrCreativeQaOutput,
-  ImprovementPrFileChange,
-  ImprovementPrGithubPublisher,
-  ImprovementPrPerformanceMetrics,
-  ImprovementPrPipelineRunner,
-  ImprovementPrPlanValidationResult,
-  ImprovementPrPlanValidator,
-  ImprovementPrPullRequestRecord,
-  ImprovementPrPullRequestRequest,
-  ImprovementPrStore,
+import {
+  IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
+  type DailyReportAdAccountSnapshot,
+  type ImprovementPrAuditClassification,
+  type ImprovementPrAuditDecision,
+  type ImprovementPrAuditInput,
+  type ImprovementPrAuditWriter,
+  type ImprovementPrCreativeQaAssetCheck,
+  type ImprovementPrCreativeQaIssue,
+  type ImprovementPrCreativeQaOutput,
+  type ImprovementPrCreativeGenerationContext,
+  type ImprovementPrFileChange,
+  type ImprovementPrGithubPublisher,
+  type ImprovementPrPerformanceMetrics,
+  type ImprovementPrPipelineRunner,
+  type ImprovementPrPlanValidationResult,
+  type ImprovementPrPlanValidator,
+  type ImprovementPrPullRequestRecord,
+  type ImprovementPrPullRequestRequest,
+  type ImprovementPrStore,
 } from "@addroid/queue";
 import {
   addLandingPageBriefToCreativeContext,
@@ -493,6 +495,7 @@ export function createImprovementPrPipelineRunner(
             input.analysisWindow.current
           ),
         analystCommentary: input.analystCommentary,
+        placementSignals: placementSignalsFromCreativeContext(creativeContext),
       };
       const target = creativeContext?.target;
       const agentInput: ImagePromptAgentInput = {
@@ -544,11 +547,7 @@ export function createImprovementPrPipelineRunner(
             }
           : {}),
         variantCount: 3,
-        dimensionPresets: [
-          { key: "feed_square", width: 1080, height: 1080, format: "png" },
-          { key: "feed_portrait", width: 1080, height: 1350, format: "png" },
-          { key: "story_reels", width: 1080, height: 1920, format: "png" },
-        ],
+        dimensionPresets: IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
         policyConstraints: [
           ...(creativeContext?.brandProfile?.forbiddenTerms ?? []).map(
             (term) => `forbidden:${term}`
@@ -798,6 +797,69 @@ function sanitizeCreativeForPrompt<T extends { linkUrl?: string | null } | null>
     ...creative,
     linkUrl: landingPageUrlForPrompt(creative.linkUrl),
   };
+}
+
+function placementSignalsFromCreativeContext(
+  context: ImprovementPrCreativeGenerationContext | null
+): string[] {
+  if (!context) return [];
+  const out: string[] = [];
+  const covered = new Set<string>();
+  const add = (value: unknown, label: string) => {
+    const summary = placementSummaryFromValue(value);
+    if (summary) out.push(`${label}: ${summary}`);
+    for (const category of placementCategoriesFromValue(value)) covered.add(category);
+  };
+  add(context.target?.spec, "target");
+  context.references.slice(0, 3).forEach((ref, index) => {
+    add(ref.spec, `reference_${index + 1}`);
+  });
+  for (const note of context.notes ?? []) add(note, "note");
+  if (covered.size > 0) {
+    const missing = ["feed_square", "feed_portrait", "story_reels", "feed_landscape"]
+      .filter((category) => !covered.has(category));
+    if (missing.length > 0) {
+      out.push(`coverage_gap: no clear evidence for ${missing.join(", ")} in current creative context`);
+    }
+  }
+  return [...new Set(out)].slice(0, 8);
+}
+
+function placementSummaryFromValue(value: unknown): string | null {
+  const text = JSON.stringify(value ?? "").toLowerCase();
+  if (!text || text === "\"\"") return null;
+  const surfaces: string[] = [];
+  if (text.includes("story") || text.includes("stories")) surfaces.push("stories");
+  if (text.includes("reel")) surfaces.push("reels");
+  if (text.includes("feed") || text.includes("stream") || text.includes("home")) surfaces.push("feed");
+  if (text.includes("facebook")) surfaces.push("facebook");
+  if (text.includes("instagram")) surfaces.push("instagram");
+  if (text.includes("messenger")) surfaces.push("messenger");
+  if (text.includes("audience_network")) surfaces.push("audience_network");
+  if (text.includes("4:5") || text.includes("portrait")) surfaces.push("4:5");
+  if (text.includes("9:16")) surfaces.push("9:16");
+  if (text.includes("1:1") || text.includes("square")) surfaces.push("1:1");
+  if (text.includes("1.91:1") || text.includes("landscape")) surfaces.push("1.91:1");
+  return surfaces.length > 0 ? [...new Set(surfaces)].join(", ") : null;
+}
+
+function placementCategoriesFromValue(value: unknown): string[] {
+  const text = JSON.stringify(value ?? "").toLowerCase();
+  if (!text || text === "\"\"") return [];
+  const out = new Set<string>();
+  if (text.includes("story") || text.includes("reel") || text.includes("9:16")) out.add("story_reels");
+  if (text.includes("portrait") || text.includes("4:5")) out.add("feed_portrait");
+  if (text.includes("landscape") || text.includes("1.91:1")) out.add("feed_landscape");
+  if (
+    text.includes("feed") ||
+    text.includes("stream") ||
+    text.includes("home") ||
+    text.includes("square") ||
+    text.includes("1:1")
+  ) {
+    out.add("feed_square");
+  }
+  return [...out];
 }
 
 /**

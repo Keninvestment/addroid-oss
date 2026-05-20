@@ -374,6 +374,7 @@ export {
 
 // Improvement PR generation pipeline.
 export {
+  IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
   runImprovementPrOnce,
 	  type ImprovementPrAgentRunResult,
 	  type ImprovementPrAnalysisWindow,
@@ -406,6 +407,7 @@ export {
   type ImprovementPrGithubPublisher,
   type ImprovementPrImagePromptOutput,
   type ImprovementPrImagePromptVariant,
+  type ImprovementPrImageDimensionPreset,
 	  type ImprovementPrMediaBuyerOutput,
 	  type ImprovementPrPerformanceMetrics,
   type ImprovementPrPipelineInput,

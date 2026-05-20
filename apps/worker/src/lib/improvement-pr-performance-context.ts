@@ -124,6 +124,8 @@ export async function loadRecentPerformanceSnapshotContext(
       accountId: input.accountId,
       currentRows,
       priorRows,
+      periodStart,
+      periodEnd,
     }),
   };
 }
@@ -134,6 +136,8 @@ async function buildCreativeGenerationContext(
     accountId: string;
     currentRows: PerformanceSnapshotMetricRow[];
     priorRows: PerformanceSnapshotMetricRow[];
+    periodStart: string;
+    periodEnd: string;
   }
 ): Promise<ImprovementPrCreativeGenerationContext | null> {
   const currentNodes = aggregateNodeMetrics(input.currentRows);
@@ -176,9 +180,44 @@ async function buildCreativeGenerationContext(
     notes: [
       "Generated from recent performance snapshots.",
       "Prefer winning ads as positive creative seeds; use underperformers only as adaptation targets.",
+      ...(await placementInsightNotes(prisma, {
+        accountId: input.accountId,
+        periodStart: input.periodStart,
+        periodEnd: input.periodEnd,
+      })),
       ...creativeContextNotes(target, references),
     ],
   };
+}
+
+async function placementInsightNotes(
+  prisma: PrismaClient,
+  input: { accountId: string; periodStart: string; periodEnd: string }
+): Promise<string[]> {
+  const insightRowClient = (prisma as unknown as {
+    insightRow?: {
+      findMany?: (args: unknown) => Promise<Array<{
+        metrics: unknown;
+        dimensions: unknown;
+      }>>;
+    };
+  }).insightRow;
+  if (!insightRowClient?.findMany) return [];
+  try {
+    const rows = await insightRowClient.findMany({
+      where: {
+        accountId: input.accountId,
+        dateStart: { gte: dateOnlyUtc(input.periodStart) },
+        dateStop: { lte: dateOnlyUtc(input.periodEnd) },
+      },
+      select: { metrics: true, dimensions: true },
+      orderBy: [{ createdAt: "desc" }],
+      take: 500,
+    });
+    return summarizePlacementInsightRows(rows);
+  } catch {
+    return [];
+  }
 }
 
 async function attachHierarchyFallbacks(
@@ -320,6 +359,7 @@ function hierarchyContext(
       displayName: node.displayName,
       status: node.status,
       externalId: node.externalId,
+      placementSummary: placementSummaryFromSpec(node.spec),
       rawName: readRawString(node.spec, "name") ?? readNestedRawString(node.spec, ["raw", "name"]),
       effectiveStatus:
         readSpecString(node.spec, "effectiveStatus") ??
@@ -549,11 +589,13 @@ function creativeContextNotes(
       })
       .filter((value): value is string => value !== null);
     const creative = item.node.creative;
+    const placementSummary = placementSummaryFromSpec(item.node.spec);
     notes.push(
       [
         `Existing Meta account context (${item.label})`,
         `${item.node.hierarchy}=${item.node.displayName}`,
         hierarchyNames.length > 0 ? hierarchyNames.join(" / ") : null,
+        placementSummary ? `placements=${placementSummary}` : null,
         creative?.displayName ? `creative=${creative.displayName}` : null,
         creative?.headline ? `headline=${creative.headline}` : null,
         creative?.primaryText ? `copy=${creative.primaryText}` : null,
@@ -567,6 +609,102 @@ function creativeContextNotes(
     );
   }
   return notes;
+}
+
+function placementSummaryFromSpec(spec: unknown): string | null {
+  const text = JSON.stringify(spec ?? "").toLowerCase();
+  if (!text || text === "\"\"") return null;
+  const surfaces: string[] = [];
+  if (text.includes("instagram_stories") || text.includes("story")) surfaces.push("instagram_stories");
+  if (text.includes("instagram_reels") || text.includes("reel")) surfaces.push("instagram_reels");
+  if (text.includes("instagram_stream") || text.includes("instagram_feed")) surfaces.push("instagram_feed");
+  if (text.includes("facebook_feed") || text.includes("feed") || text.includes("home")) surfaces.push("facebook_feed");
+  if (text.includes("messenger")) surfaces.push("messenger");
+  if (text.includes("audience_network")) surfaces.push("audience_network");
+  if (text.includes("4:5") || text.includes("portrait")) surfaces.push("4:5");
+  if (text.includes("9:16")) surfaces.push("9:16");
+  if (text.includes("1:1") || text.includes("square")) surfaces.push("1:1");
+  if (text.includes("1.91:1") || text.includes("landscape")) surfaces.push("1.91:1");
+  return surfaces.length > 0 ? [...new Set(surfaces)].join(", ") : null;
+}
+
+function summarizePlacementInsightRows(
+  rows: Array<{ metrics: unknown; dimensions: unknown }>
+): string[] {
+  const byPlacement = new Map<
+    string,
+    { impressions: number; clicks: number; conversions: number; spend: number }
+  >();
+  for (const row of rows) {
+    const placement = placementProfileFromDimensions(row.dimensions);
+    if (!placement) continue;
+    const metrics = row.metrics;
+    const acc =
+      byPlacement.get(placement) ??
+      { impressions: 0, clicks: 0, conversions: 0, spend: 0 };
+    acc.impressions += readMetricNumber(metrics, "impressions");
+    acc.clicks += readMetricNumber(metrics, "clicks");
+    acc.conversions +=
+      readMetricNumber(metrics, "conversions") ||
+      readMetricNumber(metrics, "actions") ||
+      readMetricNumber(metrics, "results");
+    acc.spend += readMetricNumber(metrics, "spend");
+    byPlacement.set(placement, acc);
+  }
+  if (byPlacement.size === 0) return [];
+  const placements = [...byPlacement.entries()].sort((a, b) => {
+    const av = a[1].conversions - b[1].conversions;
+    if (av !== 0) return -av;
+    const actr = ctr(a[1]);
+    const bctr = ctr(b[1]);
+    return bctr - actr;
+  });
+  const top = placements[0];
+  const notes: string[] = [];
+  if (top) {
+    notes.push(
+      `Placement performance signal: top=${top[0]} impressions=${top[1].impressions} clicks=${top[1].clicks} conversions=${top[1].conversions} ctr=${ctr(top[1]).toFixed(2)}%.`
+    );
+  }
+  const missing = ["feed_square", "feed_portrait", "story_reels", "feed_landscape"]
+    .filter((placement) => !byPlacement.has(placement));
+  if (missing.length > 0) {
+    notes.push(`Placement coverage gap from stored insights: ${missing.join(", ")}.`);
+  }
+  return notes;
+}
+
+function placementProfileFromDimensions(dimensions: unknown): string | null {
+  const text = JSON.stringify(dimensions ?? "").toLowerCase();
+  if (!text || text === "\"\"") return null;
+  if (text.includes("story") || text.includes("reel") || text.includes("9:16")) return "story_reels";
+  if (text.includes("portrait") || text.includes("4:5")) return "feed_portrait";
+  if (text.includes("landscape") || text.includes("1.91:1")) return "feed_landscape";
+  if (
+    text.includes("feed") ||
+    text.includes("stream") ||
+    text.includes("home") ||
+    text.includes("square") ||
+    text.includes("1:1")
+  ) {
+    return "feed_square";
+  }
+  return null;
+}
+
+function ctr(metrics: { impressions: number; clicks: number }): number {
+  return metrics.impressions > 0 ? (metrics.clicks / metrics.impressions) * 100 : 0;
+}
+
+function readMetricNumber(metrics: unknown, key: string): number {
+  if (!isRecord(metrics)) return 0;
+  const raw = metrics[key];
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim()) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
 }
 
 function normalizeHierarchy(value: string): ImprovementPrCreativeNodeContext["hierarchy"] {

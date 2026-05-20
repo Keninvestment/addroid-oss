@@ -498,6 +498,8 @@ export interface ImagePromptAgentInput {
     analystCommentary?: string;
     /** 関連 performance_snapshots の id。監査ログで diff を辿るために使う。 */
     snapshotIds?: string[];
+    /** Placement / surface performance or coverage notes, if the caller has them. */
+    placementSignals?: string[];
   };
 
   /**
@@ -668,7 +670,7 @@ export const IMAGE_PROMPT_AGENT_SYSTEM_PROMPT = [
   "  brandStyle            string (required, legacy hint)",
   "  aspectRatio           string (required, e.g. '1:1' | '4:5' | '9:16' | '1.91:1')",
   "  policyConstraints     string[]",
-  "  performance           { periodLabel, recentKpis, analystCommentary, snapshotIds }",
+  "  performance           { periodLabel, recentKpis, analystCommentary, snapshotIds, placementSignals }",
   "  brandProfile          { brandName, tone, palette, typography, guidelines, forbiddenTerms }",
   "  improvementContext    { strategySummary, rationale, notes, mediaBuyerProposals }",
   "  targetContext         { hierarchy, nodeKey, displayName, status, current, prior, rationale, currentCreative }",
@@ -678,6 +680,8 @@ export const IMAGE_PROMPT_AGENT_SYSTEM_PROMPT = [
   "  dimensionPresets      { key, width, height, format? }[]",
   "",
   "Use performance.recentKpis and improvementContext to motivate the creative direction (e.g. low CTR ⇒ stronger first-frame contrast).",
+  "When performance.placementSignals or improvementContext.notes mention high-performing placements, weak placements, or missing surfaces, choose variantKey/dimensions to fit that placement need. For example feed_square=1:1, feed_portrait=4:5, story_reels=9:16, feed_landscape=1.91:1.",
+  "If current placements are unclear but dimensionPresets is supplied, create a practical coverage mix across common Meta surfaces instead of assuming campaign objective implies an aspect ratio.",
   "When improvementContext.notes contains reference image visual analysis, use it to decide composition, style, subject treatment, and what to vary before writing prompts.",
   "The generated subject matter MUST be grounded in targetContext, referenceCreatives, and improvementContext.notes. Do not replace a real account with a generic storefront, dashboard, SaaS UI, lifestyle scene, or unrelated business motif just because the copy is abstract.",
   "If targetContext and referenceCreatives are both missing or too sparse to identify the account's actual ad/campaign context, set decision='skip' instead of inventing imagery.",

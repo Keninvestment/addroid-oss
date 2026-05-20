@@ -545,6 +545,20 @@ export interface ImprovementPrImagePromptOutput {
   rationale: string;
 }
 
+export interface ImprovementPrImageDimensionPreset {
+  key: string;
+  width: number;
+  height: number;
+  format?: "png" | "jpeg";
+}
+
+export const IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS: ImprovementPrImageDimensionPreset[] = [
+  { key: "feed_square", width: 1080, height: 1080, format: "png" },
+  { key: "feed_portrait", width: 1080, height: 1350, format: "png" },
+  { key: "story_reels", width: 1080, height: 1920, format: "png" },
+  { key: "feed_landscape", width: 1200, height: 628, format: "png" },
+];
+
 export type ImprovementPrCreativeQaRecommendation =
   | "approve"
   | "request_changes"
@@ -1080,6 +1094,7 @@ async function runPipelineMode(
     creativeStorage: opts.creativeStorage ?? null,
     accountKey: account.key,
     variants: imagePrompt.output.variants,
+    dimensionPresets: IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
     rationale: imagePrompt.output.rationale,
     // regression fix: production が policy を明示しないケースでも、空 policy
     // で全 check が `skipped` に倒れて素通りすることを禁止する。
@@ -2448,6 +2463,7 @@ interface RunImageGenerationHopInput {
   creativeStorage: CreativeStorageAdapter | null;
   accountKey: string;
   variants: ImprovementPrImagePromptVariant[];
+  dimensionPresets?: ImprovementPrImageDimensionPreset[];
   rationale: string;
   qaPolicy: CreativeQaPolicy;
   imagePromptAiRunId: string;
@@ -2534,7 +2550,11 @@ async function runImageGenerationHop(
     }));
     variationConditions = imagePromptVariantsToVariationConditions(
       variantsForGeneration,
-      { aspectRatio: "1:1", defaultFormat: "png" }
+      {
+        aspectRatio: "1:1",
+        dimensionPresets: input.dimensionPresets,
+        defaultFormat: "png",
+      }
     );
   } catch {
     return {

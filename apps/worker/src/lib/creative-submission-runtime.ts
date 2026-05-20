@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import sharp from "sharp";
 import { LocalDiskStorage } from "@addroid/config";
 import { Prisma, type PrismaClient } from "@addroid/db";
 import type { GithubAdapter } from "@addroid/github-adapter";
@@ -59,6 +60,8 @@ export interface CreativeSubmissionInput {
   referenceImagePaths?: string[];
   uploadedReferenceMedia?: UploadedCreativeMedia[];
   generateImage?: boolean;
+  imagePlacement?: SubmissionImageProfileKey;
+  imageAspectRatio?: SubmissionImageAspectRatio;
   pageId?: string;
   title?: string;
   body?: string;
@@ -139,10 +142,69 @@ export interface CreativeSubmissionResult {
   planSummary: string;
 }
 
+interface SubmissionImageProfile {
+  variantKey: string;
+  width: number;
+  height: number;
+  aspectRatio: SubmissionImageAspectRatio;
+  reason: string;
+}
+
+export type SubmissionImageProfileKey =
+  | "feed_square"
+  | "feed_portrait"
+  | "story_reels"
+  | "feed_landscape";
+
+export type SubmissionImageAspectRatio = "1:1" | "4:5" | "9:16" | "1.91:1";
+
+interface SubmissionImageNormalizationReport {
+  originalKey: string;
+  normalizedKey: string;
+  originalWidth: number | null;
+  originalHeight: number | null;
+  targetWidth: number;
+  targetHeight: number;
+  action: "resized" | "letterboxed" | "converted" | "skipped";
+  reason: string;
+}
+
 const ID_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_MEDIA_BYTES = 100 * 1024 * 1024;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".webm"]);
+const IMAGE_ASPECT_TOLERANCE = 0.025;
+const IMAGE_PROFILES: Record<SubmissionImageProfileKey, SubmissionImageProfile> = {
+  feed_square: {
+    variantKey: "feed_square",
+    width: 1080,
+    height: 1080,
+    aspectRatio: "1:1",
+    reason: "Meta feed square creative",
+  },
+  feed_portrait: {
+    variantKey: "feed_portrait",
+    width: 1080,
+    height: 1350,
+    aspectRatio: "4:5",
+    reason: "Meta feed portrait creative",
+  },
+  story_reels: {
+    variantKey: "story_reels",
+    width: 1080,
+    height: 1920,
+    aspectRatio: "9:16",
+    reason: "Meta Stories/Reels creative",
+  },
+  feed_landscape: {
+    variantKey: "feed_landscape",
+    width: 1200,
+    height: 628,
+    aspectRatio: "1.91:1",
+    reason: "Meta feed landscape creative",
+  },
+};
+const DEFAULT_IMAGE_PROFILE = IMAGE_PROFILES.feed_square;
 const CLI_OPTIMIZATION_GOALS = new Set([
   "APP_INSTALLS",
   "CONVERSATIONS",
@@ -200,6 +262,8 @@ export interface CreativeGenerationInput {
   referenceImagePaths?: string[];
   uploadedReferenceMedia?: UploadedCreativeMedia[];
   variantCount?: number;
+  imagePlacement?: SubmissionImageProfileKey;
+  imageAspectRatio?: SubmissionImageAspectRatio;
 }
 
 export interface CreativeGenerationResult {
@@ -239,6 +303,8 @@ export function normalizeCreativeGenerationInput(args: Record<string, unknown>):
     destinationUrl: readString(args.destinationUrl) ?? undefined,
     referenceImagePaths: readStringArray(args.referenceImagePaths),
     variantCount: readPositiveInteger(args.variantCount) ?? undefined,
+    imagePlacement: readImagePlacement(args.imagePlacement ?? args.placementProfile ?? args.placement) ?? undefined,
+    imageAspectRatio: readImageAspectRatio(args.imageAspectRatio ?? args.aspectRatio) ?? undefined,
   };
 }
 
@@ -342,11 +408,17 @@ export async function createStandaloneCreativeGeneration(opts: {
       prisma: opts.prisma,
       preferCodex: llmConnection?.provider === "codex",
     })).provider;
-  const variationConditions = Array.from({ length: variantCount }, (_, i) => ({
-    width: 1080,
-    height: 1080,
+  const imageProfiles = selectStandaloneImageProfiles({
+    input: opts.input,
+    creativeContext: creativeContextWithLanding,
+    count: variantCount,
+  });
+  const variationConditions = imageProfiles.map((profile, i) => ({
+    width: profile.width,
+    height: profile.height,
     format: "png" as const,
-    variantKey: `variant-${i}`,
+    variantKey: `${profile.variantKey}_${i}`,
+    styleNotes: `Compose for ${profile.aspectRatio} ${profile.reason}. Keep important subjects away from edge safe areas.`,
   }));
   const now = new Date();
   const imageRun = await opts.prisma.aiRun.create({
@@ -782,9 +854,10 @@ export async function createCreativeSubmissionProposal(opts: {
         source: opts.source,
         proposalSource: "creative_submission",
         generatedImage: preparedMedia.generatedImage,
+        imageNormalization: preparedMedia.imageNormalization,
         creativeContext: creativeContextToMetadata(creativeContextWithLanding),
         localMediaCount: (normalized.localMediaPaths?.length ?? 0) + (normalized.uploadedMedia?.length ?? 0),
-      } as Prisma.InputJsonValue,
+      } as unknown as Prisma.InputJsonValue,
       storagePath: preparedMedia.storageKeys[0] ?? null,
       storageRef: preparedMedia.storageKeys[0] ? `storage://${preparedMedia.storageKeys[0]}` : null,
       spec: {
@@ -810,9 +883,10 @@ export async function createCreativeSubmissionProposal(opts: {
         mediaType,
         storageKeyCount: preparedMedia.storageKeys.length,
         generatedImage: preparedMedia.generatedImage,
+        imageNormalization: preparedMedia.imageNormalization,
         creativeContext: creativeContextToMetadata(creativeContextWithLanding),
         planSummary: proposal.planSummary,
-      } as Prisma.InputJsonValue,
+      } as unknown as Prisma.InputJsonValue,
     },
   }).catch(() => undefined);
 
@@ -879,6 +953,8 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     countries: readCountries(args.countries),
     ageMin: readInteger(args.ageMin) ?? undefined,
     ageMax: readInteger(args.ageMax) ?? undefined,
+    imagePlacement: readImagePlacement(args.imagePlacement ?? args.placementProfile ?? args.placement) ?? undefined,
+    imageAspectRatio: readImageAspectRatio(args.imageAspectRatio ?? args.aspectRatio) ?? undefined,
     requestedUnsupportedFields: detectRequestedUnsupportedFields(args),
     rationale: readString(args.rationale) ?? undefined,
     urgency: readUrgency(args.urgency) ?? undefined,
@@ -1329,26 +1405,45 @@ async function prepareMedia(input: {
   generatedImage: boolean;
   provider: string | null;
   model: string | null;
+  imageNormalization: SubmissionImageNormalizationReport[];
 }> {
+  const imageProfile = selectSubmissionImageProfile({
+    input: input.input,
+    creativeContext: input.creativeContext,
+  });
   const uploaded = input.input.uploadedMedia ?? [];
   if (uploaded.length > 0) {
     const stored = await storeUploadedMedia(input.storage, input.accountKey, input.creativeId, uploaded);
+    const normalized = await normalizeStoredSubmissionImages({
+      storage: input.storage,
+      storageKeys: stored.storageKeys,
+      mediaType: input.input.mediaType ?? stored.mediaType,
+      profile: imageProfile,
+    });
     return {
       mediaType: input.input.mediaType ?? stored.mediaType,
-      storageKeys: stored.storageKeys,
+      storageKeys: normalized.storageKeys,
       generatedImage: false,
       provider: null,
       model: null,
+      imageNormalization: normalized.reports,
     };
   }
   if (input.input.localMediaPaths && input.input.localMediaPaths.length > 0) {
     const stored = await storeLocalMedia(input.storage, input.accountKey, input.creativeId, input.input.localMediaPaths);
+    const normalized = await normalizeStoredSubmissionImages({
+      storage: input.storage,
+      storageKeys: stored.storageKeys,
+      mediaType: input.input.mediaType ?? stored.mediaType,
+      profile: imageProfile,
+    });
     return {
       mediaType: input.input.mediaType ?? stored.mediaType,
-      storageKeys: stored.storageKeys,
+      storageKeys: normalized.storageKeys,
       generatedImage: false,
       provider: null,
       model: null,
+      imageNormalization: normalized.reports,
     };
   }
   const wantsImage = input.input.generateImage || input.input.mediaType === "image";
@@ -1375,10 +1470,11 @@ async function prepareMedia(input: {
         referenceImages: input.referenceImages,
         variationConditions: [
           {
-            width: 1080,
-            height: 1080,
+            width: imageProfile.width,
+            height: imageProfile.height,
             format: "png",
-            variantKey: "feed_square",
+            variantKey: imageProfile.variantKey,
+            styleNotes: `Compose for ${imageProfile.aspectRatio} Meta placement. Keep important subjects away from the outer 14% safe margins.`,
           },
         ],
       },
@@ -1393,12 +1489,19 @@ async function prepareMedia(input: {
         qa: generated.qa,
         links: { pullRequestNumber: null },
       });
+      const normalized = await normalizeStoredSubmissionImages({
+        storage: input.storage,
+        storageKeys: persisted.assets.map((a) => a.storageKey),
+        mediaType: "image",
+        profile: imageProfile,
+      });
       return {
         mediaType: "image",
-        storageKeys: persisted.assets.map((a) => a.storageKey),
+        storageKeys: normalized.storageKeys,
         generatedImage: true,
         provider: generated.generation.meta.provider,
         model: generated.generation.meta.model,
+        imageNormalization: normalized.reports,
       };
     }
   }
@@ -1408,7 +1511,225 @@ async function prepareMedia(input: {
     generatedImage: false,
     provider: null,
     model: null,
+    imageNormalization: [],
   };
+}
+
+function selectSubmissionImageProfile(input: {
+  input: CreativeSubmissionInput;
+  creativeContext: ImprovementPrCreativeGenerationContext | null;
+}): SubmissionImageProfile {
+  const explicit = profileFromPlacementOrAspect(
+    input.input.imagePlacement,
+    input.input.imageAspectRatio
+  );
+  if (explicit) return explicit;
+  return profileFromCreativeContext(input.creativeContext) ?? DEFAULT_IMAGE_PROFILE;
+}
+
+function selectStandaloneImageProfiles(input: {
+  input: CreativeGenerationInput;
+  creativeContext: ImprovementPrCreativeGenerationContext | null;
+  count: number;
+}): SubmissionImageProfile[] {
+  const explicit = profileFromPlacementOrAspect(
+    input.input.imagePlacement,
+    input.input.imageAspectRatio
+  );
+  if (explicit) return Array.from({ length: input.count }, () => explicit);
+  const contextual = profileFromCreativeContext(input.creativeContext);
+  const preferred = contextual ?? DEFAULT_IMAGE_PROFILE;
+  const candidates = [
+    preferred,
+    IMAGE_PROFILES.feed_portrait,
+    IMAGE_PROFILES.story_reels,
+    IMAGE_PROFILES.feed_square,
+    IMAGE_PROFILES.feed_landscape,
+  ];
+  const unique = dedupeImageProfiles(candidates);
+  return Array.from({ length: input.count }, (_, i) => unique[i % unique.length] ?? DEFAULT_IMAGE_PROFILE);
+}
+
+function dedupeImageProfiles(profiles: SubmissionImageProfile[]): SubmissionImageProfile[] {
+  const seen = new Set<string>();
+  const out: SubmissionImageProfile[] = [];
+  for (const profile of profiles) {
+    if (seen.has(profile.variantKey)) continue;
+    seen.add(profile.variantKey);
+    out.push(profile);
+  }
+  return out;
+}
+
+function profileFromPlacementOrAspect(
+  placement: SubmissionImageProfileKey | undefined,
+  aspectRatio: SubmissionImageAspectRatio | undefined
+): SubmissionImageProfile | null {
+  if (placement) return IMAGE_PROFILES[placement];
+  if (!aspectRatio) return null;
+  if (aspectRatio === "9:16") return IMAGE_PROFILES.story_reels;
+  if (aspectRatio === "4:5") return IMAGE_PROFILES.feed_portrait;
+  if (aspectRatio === "1.91:1") return IMAGE_PROFILES.feed_landscape;
+  return IMAGE_PROFILES.feed_square;
+}
+
+function profileFromCreativeContext(
+  context: ImprovementPrCreativeGenerationContext | null
+): SubmissionImageProfile | null {
+  if (!context) return null;
+  const evidence = [
+    context.target?.spec,
+    ...context.references.map((ref) => ref.spec),
+    ...(context.notes ?? []),
+  ];
+  for (const value of evidence) {
+    const profile = profileFromPlacementEvidence(value);
+    if (profile) return profile;
+  }
+  return null;
+}
+
+function profileFromPlacementEvidence(value: unknown): SubmissionImageProfile | null {
+  const text = JSON.stringify(value ?? "").toLowerCase();
+  if (!text || text === "\"\"") return null;
+  if (
+    /\b(story|stories|reels?|instagram_stories|instagram_reels)\b/.test(text) ||
+    text.includes("9:16")
+  ) {
+    return IMAGE_PROFILES.story_reels;
+  }
+  if (/\b(instagram_stream|facebook_feed|feed|home|instagram_feed)\b/.test(text)) {
+    if (text.includes("4:5") || text.includes("portrait")) return IMAGE_PROFILES.feed_portrait;
+    if (text.includes("1.91:1") || text.includes("landscape")) return IMAGE_PROFILES.feed_landscape;
+    return IMAGE_PROFILES.feed_square;
+  }
+  if (text.includes("4:5") || text.includes("portrait")) return IMAGE_PROFILES.feed_portrait;
+  if (text.includes("1.91:1") || text.includes("landscape")) return IMAGE_PROFILES.feed_landscape;
+  return null;
+}
+
+async function normalizeStoredSubmissionImages(input: {
+  storage: LocalDiskStorage;
+  storageKeys: string[];
+  mediaType: "image" | "video" | "carousel" | "text";
+  profile: SubmissionImageProfile;
+}): Promise<{ storageKeys: string[]; reports: SubmissionImageNormalizationReport[] }> {
+  if (input.mediaType === "video" || input.mediaType === "text" || input.storageKeys.length === 0) {
+    return { storageKeys: input.storageKeys, reports: [] };
+  }
+  const out: string[] = [];
+  const reports: SubmissionImageNormalizationReport[] = [];
+  for (const key of input.storageKeys) {
+    if (!isImageStorageKey(key)) {
+      out.push(key);
+      continue;
+    }
+    const normalized = await normalizeSubmissionImage({
+      storage: input.storage,
+      storageKey: key,
+      profile: input.profile,
+    });
+    out.push(normalized.normalizedKey);
+    reports.push(normalized);
+  }
+  return { storageKeys: out, reports };
+}
+
+function isImageStorageKey(key: string): boolean {
+  return IMAGE_EXTENSIONS.has(path.extname(key).toLowerCase());
+}
+
+async function normalizeSubmissionImage(input: {
+  storage: LocalDiskStorage;
+  storageKey: string;
+  profile: SubmissionImageProfile;
+}): Promise<SubmissionImageNormalizationReport> {
+  const sourcePath = input.storage.resolve(input.storageKey);
+  const base = input.storageKey.replace(/\.[^.\\/]+$/, "");
+  const normalizedKey = `${base}-${input.profile.variantKey}.png`;
+  const targetRatio = input.profile.width / input.profile.height;
+
+  let metadata: sharp.Metadata;
+  try {
+    metadata = await sharp(sourcePath, { failOn: "none" }).rotate().metadata();
+  } catch {
+    throw new Error(`画像 ${path.basename(input.storageKey)} の形式を確認できませんでした。PNG/JPEG/WebP の有効な画像を指定してください。`);
+  }
+  const originalWidth = metadata.width ?? null;
+  const originalHeight = metadata.height ?? null;
+  if (!originalWidth || !originalHeight) {
+    throw new Error(`画像 ${path.basename(input.storageKey)} のサイズを確認できませんでした。別の画像を指定してください。`);
+  }
+
+  const actualRatio = originalWidth / originalHeight;
+  const ratioDelta = Math.abs(actualRatio - targetRatio) / targetRatio;
+  const needsCanvas = ratioDelta > IMAGE_ASPECT_TOLERANCE;
+  const needsConversion = path.extname(input.storageKey).toLowerCase() !== ".png";
+  const needsResize =
+    originalWidth !== input.profile.width ||
+    originalHeight !== input.profile.height;
+
+  if (!needsCanvas && !needsConversion && !needsResize) {
+    return {
+      originalKey: input.storageKey,
+      normalizedKey: input.storageKey,
+      originalWidth,
+      originalHeight,
+      targetWidth: input.profile.width,
+      targetHeight: input.profile.height,
+      action: "skipped",
+      reason: "already matches target Meta image profile",
+    };
+  }
+
+  const output = needsCanvas
+    ? await renderLetterboxedImage(sourcePath, input.profile)
+    : await sharp(sourcePath, { failOn: "none" })
+        .rotate()
+        .resize(input.profile.width, input.profile.height, {
+          fit: "cover",
+          position: "attention",
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+  await input.storage.write(normalizedKey, output);
+  return {
+    originalKey: input.storageKey,
+    normalizedKey,
+    originalWidth,
+    originalHeight,
+    targetWidth: input.profile.width,
+    targetHeight: input.profile.height,
+    action: needsCanvas ? "letterboxed" : needsConversion ? "converted" : "resized",
+    reason: input.profile.reason,
+  };
+}
+
+async function renderLetterboxedImage(
+  sourcePath: string,
+  profile: SubmissionImageProfile
+): Promise<Buffer> {
+  const background = await sharp(sourcePath, { failOn: "none" })
+    .rotate()
+    .resize(profile.width, profile.height, { fit: "cover", position: "attention" })
+    .blur(32)
+    .modulate({ brightness: 0.72, saturation: 0.82 })
+    .png()
+    .toBuffer();
+  const foreground = await sharp(sourcePath, { failOn: "none" })
+    .rotate()
+    .resize(profile.width, profile.height, {
+      fit: "inside",
+      withoutEnlargement: false,
+    })
+    .png()
+    .toBuffer({ resolveWithObject: true });
+  const left = Math.max(0, Math.floor((profile.width - foreground.info.width) / 2));
+  const top = Math.max(0, Math.floor((profile.height - foreground.info.height) / 2));
+  return sharp(background)
+    .composite([{ input: foreground.data, left, top }])
+    .png({ compressionLevel: 9 })
+    .toBuffer();
 }
 
 async function storeUploadedMedia(
@@ -2224,6 +2545,57 @@ function readCountries(value: unknown): string[] | undefined {
 function readMediaType(value: unknown): CreativeSubmissionInput["mediaType"] | null {
   const v = readString(value);
   if (v === "image" || v === "video" || v === "carousel" || v === "text") return v;
+  return null;
+}
+
+function readImagePlacement(value: unknown): SubmissionImageProfileKey | null {
+  const raw = readString(value)?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (!raw) return null;
+  if (
+    raw === "story_reels" ||
+    raw === "stories_reels" ||
+    raw === "story" ||
+    raw === "stories" ||
+    raw === "reel" ||
+    raw === "reels" ||
+    raw === "instagram_story" ||
+    raw === "instagram_stories" ||
+    raw === "instagram_reels" ||
+    raw === "9:16"
+  ) return "story_reels";
+  if (
+    raw === "feed_portrait" ||
+    raw === "portrait" ||
+    raw === "instagram_feed_portrait" ||
+    raw === "facebook_feed_portrait" ||
+    raw === "4:5"
+  ) return "feed_portrait";
+  if (
+    raw === "feed_landscape" ||
+    raw === "landscape" ||
+    raw === "facebook_feed_landscape" ||
+    raw === "instagram_feed_landscape" ||
+    raw === "1.91:1" ||
+    raw === "191:100"
+  ) return "feed_landscape";
+  if (
+    raw === "feed_square" ||
+    raw === "square" ||
+    raw === "feed" ||
+    raw === "instagram_feed" ||
+    raw === "facebook_feed" ||
+    raw === "1:1"
+  ) return "feed_square";
+  return null;
+}
+
+function readImageAspectRatio(value: unknown): SubmissionImageAspectRatio | null {
+  const raw = readString(value)?.toLowerCase().replace(/\s+/g, "");
+  if (!raw) return null;
+  if (raw === "1:1" || raw === "square") return "1:1";
+  if (raw === "4:5" || raw === "portrait") return "4:5";
+  if (raw === "9:16" || raw === "story" || raw === "reels") return "9:16";
+  if (raw === "1.91:1" || raw === "landscape" || raw === "1200x628") return "1.91:1";
   return null;
 }
 
