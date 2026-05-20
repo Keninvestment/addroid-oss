@@ -281,9 +281,10 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
         primaryText: "プロフィールをチェック",
         pageId: "281900655012835",
         instagramUserId: "17841465387326763",
-        instagramActorId: "65414107577",
+        instagramActorId: "17841465387326763",
+        instagramAppLink: "instagram://user?username=shishasin2022kumamoto&userid=65414107577",
         linkUrl: "http://instagram.com/shishasin2022kumamoto",
-        callToAction: "OPEN_LINK",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
         campaignId: "120228334025190756",
         adsetId: "120228334025180756",
         customEventType: "LEAD",
@@ -298,8 +299,11 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
     const pr = github.created[0]!;
     assert.match(pr.files[0]!.diff, /120228334025180756/);
     assert.match(pr.files[0]!.diff, /\{\{creative:profile-link\}\}/);
+    assert.match(pr.files[0]!.diff, /"view_instagram_profile"/);
     assert.match(pr.files[0]!.diff, /"--instagram-actor-id"/);
-    assert.match(pr.files[0]!.diff, /"65414107577"/);
+    assert.match(pr.files[0]!.diff, /"17841465387326763"/);
+    assert.match(pr.files[0]!.diff, /"--instagram-app-link"/);
+    assert.match(pr.files[0]!.diff, /"instagram:\/\/user\?username=shishasin2022kumamoto&userid=65414107577"/);
     assert.doesNotMatch(pr.files[0]!.diff, /--instagram-user-id/);
     assert.doesNotMatch(pr.files[0]!.diff, /custom-event-type/);
     assert.doesNotMatch(pr.files[0]!.diff, /optimization-goal/);

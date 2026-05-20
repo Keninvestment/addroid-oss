@@ -646,9 +646,11 @@ function buildImageCreativeObjectStorySpec(action: CreateCreativeApplyAction, im
   if (title) linkData.name = title;
   if (action.description) linkData.description = action.description;
   if (action.callToAction && action.callToAction !== "NO_BUTTON") {
+    const ctaValue: Record<string, unknown> = { link: action.linkUrl };
+    if (action.instagramAppLink) ctaValue.app_link = action.instagramAppLink;
     linkData.call_to_action = {
       type: action.callToAction,
-      value: { link: action.linkUrl },
+      value: ctaValue,
     };
   }
   return {

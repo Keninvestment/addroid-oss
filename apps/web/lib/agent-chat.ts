@@ -295,6 +295,7 @@ function extractSuggestedPromotionArgs(data: unknown): Record<string, unknown> |
     "description",
     "instagramUserId",
     "instagramActorId",
+    "instagramAppLink",
     "callToAction",
     "campaignId",
     "adsetId",

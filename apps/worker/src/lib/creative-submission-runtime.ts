@@ -66,6 +66,7 @@ export interface CreativeSubmissionInput {
   description?: string;
   instagramUserId?: string;
   instagramActorId?: string;
+  instagramAppLink?: string;
   images?: string[];
   videos?: string[];
   titles?: string[];
@@ -180,6 +181,7 @@ const CLI_CREATIVE_CALL_TO_ACTIONS = new Set([
   "SHOP_NOW",
   "SIGN_UP",
   "SUBSCRIBE",
+  "VIEW_INSTAGRAM_PROFILE",
   "WATCH_MORE",
 ]);
 const DEFAULT_GENERATED_CTA = "LEARN_MORE";
@@ -850,6 +852,7 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     description: readString(args.description) ?? undefined,
     instagramUserId: readString(args.instagramUserId) ?? undefined,
     instagramActorId: readString(args.instagramActorId) ?? undefined,
+    instagramAppLink: readString(args.instagramAppLink) ?? undefined,
     images: readStringArray(args.images),
     videos: readStringArray(args.videos),
     titles: readStringArray(args.titles),
@@ -1757,6 +1760,7 @@ function buildCreativeSubmissionOperations(input: {
     ...flagIfString("--description", input.input.description),
     ...flagIfString("--call-to-action", input.input.callToAction ? cliValue(input.input.callToAction) : undefined),
     ...flagIfString("--instagram-actor-id", input.input.instagramActorId),
+    ...flagIfString("--instagram-app-link", input.input.instagramAppLink),
     ...repeatFlags("--titles", input.input.titles),
     ...repeatFlags("--bodies", input.input.bodies),
     ...repeatFlags("--descriptions", input.input.descriptions),

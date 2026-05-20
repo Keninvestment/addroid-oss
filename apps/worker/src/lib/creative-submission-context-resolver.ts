@@ -17,6 +17,7 @@ const SUPPORTED_CTA = new Set([
   "SHOP_NOW",
   "SIGN_UP",
   "SUBSCRIBE",
+  "VIEW_INSTAGRAM_PROFILE",
   "WATCH_MORE",
 ]);
 
@@ -49,6 +50,7 @@ export interface CreativeSubmissionContextResolverResult {
     pageId: string | null;
     instagramUserId: string | null;
     instagramActorId: string | null;
+    instagramAppLink: string | null;
     linkUrl: string | null;
     callToAction: string | null;
   } | null;
@@ -119,6 +121,7 @@ export async function resolveCreativeSubmissionContext(opts: {
   const pageId = existingCreative?.pageId ?? null;
   const instagramUserId = existingCreative?.instagramUserId ?? null;
   const instagramActorId = existingCreative?.instagramActorId ?? null;
+  const instagramAppLink = existingCreative?.instagramAppLink ?? null;
   const linkUrl = existingCreative?.linkUrl ?? null;
   const cta = normalizeSupportedCta(existingCreative?.callToAction, warnings);
   if (!campaign) missing.push("campaignId");
@@ -136,6 +139,7 @@ export async function resolveCreativeSubmissionContext(opts: {
     ...(pageId ? { pageId } : {}),
     ...(instagramUserId ? { instagramUserId } : {}),
     ...(instagramActorId ? { instagramActorId } : {}),
+    ...(instagramAppLink ? { instagramAppLink } : {}),
     ...(linkUrl ? { linkUrl } : {}),
     ...(cta ? { callToAction: cta } : {}),
   };
@@ -533,6 +537,7 @@ export function summarizeCreativeForSubmission(
       pageId: null,
       instagramUserId: null,
       instagramActorId: null,
+      instagramAppLink: null,
       linkUrl: null,
       callToAction: null,
     };
@@ -541,6 +546,9 @@ export function summarizeCreativeForSubmission(
   const linkData = recordAt(storySpec, "link_data");
   const videoData = recordAt(storySpec, "video_data");
   const templateData = recordAt(storySpec, "template_data");
+  const linkCta = recordAt(linkData, "call_to_action");
+  const videoCta = recordAt(videoData, "call_to_action");
+  const templateCta = recordAt(templateData, "call_to_action");
   return {
     id: readString(root.id) ?? fallbackId,
     name: readString(root.name),
@@ -551,18 +559,22 @@ export function summarizeCreativeForSubmission(
         recordAt(root, "asset_feed_spec")?.instagram_user_ids
     ),
     instagramActorId: readString(root.instagram_actor_id),
+    instagramAppLink:
+      readNestedString(linkCta, ["value", "app_link"]) ??
+      readNestedString(videoCta, ["value", "app_link"]) ??
+      readNestedString(templateCta, ["value", "app_link"]),
     linkUrl:
       readString(root.object_url) ??
       readString(root.template_url) ??
-      readNestedString(linkData, ["call_to_action", "value", "link"]) ??
-      readNestedString(videoData, ["call_to_action", "value", "link"]) ??
-      readNestedString(templateData, ["call_to_action", "value", "link"]) ??
+      readNestedString(linkCta, ["value", "link"]) ??
+      readNestedString(videoCta, ["value", "link"]) ??
+      readNestedString(templateCta, ["value", "link"]) ??
       readString(linkData?.link) ??
       readString(templateData?.link),
     callToAction:
-      readNestedString(linkData, ["call_to_action", "type"]) ??
-      readNestedString(videoData, ["call_to_action", "type"]) ??
-      readNestedString(templateData, ["call_to_action", "type"]) ??
+      readString(linkCta?.type) ??
+      readString(videoCta?.type) ??
+      readString(templateCta?.type) ??
       readString(root.call_to_action_type),
   };
 }

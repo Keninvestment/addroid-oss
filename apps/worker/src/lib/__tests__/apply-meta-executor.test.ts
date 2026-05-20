@@ -538,8 +538,13 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
       if (url.includes("/adcreatives")) {
         const params = new URLSearchParams(String(init?.body ?? ""));
         const spec = JSON.parse(params.get("object_story_spec") ?? "{}") as Record<string, unknown>;
+        const linkData = spec.link_data as Record<string, unknown>;
+        const cta = linkData.call_to_action as Record<string, unknown>;
+        const ctaValue = cta.value as Record<string, unknown>;
         assert.equal(spec.instagram_user_id, "17841465387326763");
         assert.equal(Object.prototype.hasOwnProperty.call(spec, "instagram_actor_id"), false);
+        assert.equal(cta.type, "VIEW_INSTAGRAM_PROFILE");
+        assert.equal(ctaValue.app_link, "instagram://user?username=sin&userid=65414107577");
         return Response.json({ id: "999000111222333" });
       }
       return Response.json({ error: { code: 100, message: "unexpected" } }, { status: 400 });
@@ -563,8 +568,9 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
         linkUrl: "https://example.com",
         primaryText: "body",
         headline: "headline",
-        callToAction: "LEARN_MORE",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
         instagramUserId: "17841465387326763",
+        instagramAppLink: "instagram://user?username=sin&userid=65414107577",
         storageKey: imagePath,
       },
       context: ctx(),

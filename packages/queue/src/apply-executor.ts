@@ -102,6 +102,7 @@ export interface LegacyApplyAction {
   linkUrl?: any;
   description?: any;
   callToAction?: any;
+  instagramAppLink?: any;
   instagramUserId?: any;
   images?: any;
   videos?: any;

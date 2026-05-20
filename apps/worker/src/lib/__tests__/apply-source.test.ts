@@ -92,9 +92,11 @@ const CREATIVE_SUBMISSION_OPERATION = `${JSON.stringify(
           "--description",
           "description",
           "--call-to-action",
-          "learn_more",
+          "view_instagram_profile",
           "--instagram-actor-id",
           "17841465387326763",
+          "--instagram-app-link",
+          "instagram://user?username=shishasin2022kumamoto&userid=65414107577",
         ],
         entity: {
           nodeType: "creative",
@@ -304,8 +306,9 @@ test("loadForApply adapts creative submission operation manifests to Graph apply
     assert.equal(creative.creativeId, "image-variant-2-submission-9e73c01f");
     assert.equal(creative.storageKey, "/tmp/asset.png");
     assert.equal(creative.linkUrl, "http://instagram.com/shishasin2022kumamoto");
-    assert.equal(creative.callToAction, "LEARN_MORE");
+    assert.equal(creative.callToAction, "VIEW_INSTAGRAM_PROFILE");
     assert.equal(creative.instagramUserId, "17841465387326763");
+    assert.equal(creative.instagramAppLink, "instagram://user?username=shishasin2022kumamoto&userid=65414107577");
     const ad = actions[1] as unknown as Record<string, unknown>;
     assert.equal(ad.adsetId, "120228334025180756");
     assert.equal(ad.creativeRef, "image-variant-2-submission-9e73c01f");

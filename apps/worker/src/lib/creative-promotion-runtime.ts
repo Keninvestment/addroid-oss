@@ -229,6 +229,7 @@ export function normalizeCreativePromotionInput(args: Record<string, unknown>): 
     description: readString(args.description) ?? undefined,
     instagramUserId: readString(args.instagramUserId) ?? undefined,
     instagramActorId: readString(args.instagramActorId) ?? undefined,
+    instagramAppLink: readString(args.instagramAppLink) ?? undefined,
     campaignId: readString(args.campaignId) ?? undefined,
     adsetId: readString(args.adsetId) ?? undefined,
     campaignName: readString(args.campaignName) ?? undefined,

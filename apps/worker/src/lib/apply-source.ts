@@ -414,6 +414,7 @@ function creativeSubmissionActionFromArgs(
     description: flagValue(args, "--description") ?? undefined,
     callToAction: cliEnum(flagValue(args, "--call-to-action")),
     instagramUserId: flagValue(args, "--instagram-actor-id") ?? undefined,
+    instagramAppLink: flagValue(args, "--instagram-app-link") ?? undefined,
   };
 }
 
