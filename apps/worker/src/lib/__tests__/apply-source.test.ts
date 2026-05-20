@@ -60,6 +60,74 @@ const VALID_OPERATION = `${JSON.stringify(
   null,
   2
 )}\n`;
+const CREATIVE_SUBMISSION_OPERATION = `${JSON.stringify(
+  {
+    version: 1,
+    accountKey: "primary",
+    intent: "other",
+    source: "test",
+    actor: "test",
+    rationale: "submit generated creative",
+    createdAt: "2026-05-20T00:00:00.000Z",
+    actions: [
+      {
+        resource: "creatives",
+        verb: "create",
+        args: [
+          "ads",
+          "creative",
+          "create",
+          "--name",
+          "Image variant 2 submission 9e73c01f",
+          "--page-id",
+          "281900655012835",
+          "--image",
+          "/tmp/asset.png",
+          "--body",
+          "body",
+          "--title",
+          "title",
+          "--link-url",
+          "http://instagram.com/shishasin2022kumamoto",
+          "--description",
+          "description",
+          "--call-to-action",
+          "learn_more",
+          "--instagram-actor-id",
+          "17841465387326763",
+        ],
+        entity: {
+          nodeType: "creative",
+          nodeKey: "image-variant-2-submission-9e73c01f",
+        },
+        externalIdRequired: true,
+      },
+      {
+        resource: "ads",
+        verb: "create",
+        args: [
+          "ads",
+          "ad",
+          "create",
+          "120228334025180756",
+          "--name",
+          "Image variant 2 ad submission 9e73c01f",
+          "--creative-id",
+          "{{creative:image-variant-2-submission-9e73c01f}}",
+          "--status",
+          "paused",
+        ],
+        entity: {
+          nodeType: "ad",
+          nodeKey: "image-variant-2-ad-submission-9e73c01f",
+        },
+        externalIdRequired: true,
+      },
+    ],
+  },
+  null,
+  2
+)}\n`;
 
 const HEAD_SHA = "deadbeefcafebabedeadbeefcafebabedeadbeef";
 const MERGE_SHA = "2222222222222222222222222222222222222222";
@@ -204,6 +272,46 @@ test("loadForApply reads operations from the approved merge", async () => {
     current.cleanup();
     merged.cleanup();
     parent.cleanup();
+  }
+});
+
+test("loadForApply adapts creative submission operation manifests to Graph apply actions", async () => {
+  const current = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/creative.json": CREATIVE_SUBMISSION_OPERATION,
+  });
+  try {
+    const loader = new LocalDirAdsLoader({
+      localDir: current.dir,
+      expectedRepoId: REPO_ID,
+      readHeadSha: async () => MERGE_SHA,
+      commitExists: async (_dir, sha) => sha === MERGE_SHA || sha === PARENT_SHA,
+      readParentSha: async (_dir, sha) => (sha === MERGE_SHA ? PARENT_SHA : null),
+      readChangedFiles: async () => ["operations/primary/creative.json"],
+      materializeCommit: async () => ({
+        dir: current.dir,
+        cleanup: async () => undefined,
+      }),
+    });
+    const out = await loader.loadForApply({ context: ctx() });
+    const actions = out.directActions?.[0]?.actions ?? [];
+    assert.equal(out.source, "local_dir");
+    assert.equal(actions.length, 2);
+    assert.equal(actions[0]?.kind, "create_creative");
+    assert.equal(actions[1]?.kind, "create_ad");
+    const creative = actions[0] as unknown as Record<string, unknown>;
+    assert.equal(creative.creativeId, "image-variant-2-submission-9e73c01f");
+    assert.equal(creative.storageKey, "/tmp/asset.png");
+    assert.equal(creative.linkUrl, "http://instagram.com/shishasin2022kumamoto");
+    assert.equal(creative.callToAction, "LEARN_MORE");
+    assert.equal(creative.instagramUserId, "17841465387326763");
+    const ad = actions[1] as unknown as Record<string, unknown>;
+    assert.equal(ad.adsetId, "120228334025180756");
+    assert.equal(ad.creativeRef, "image-variant-2-submission-9e73c01f");
+    assert.equal(ad.initialState, "PAUSED");
+  } finally {
+    current.cleanup();
   }
 });
 

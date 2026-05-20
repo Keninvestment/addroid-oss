@@ -333,30 +333,130 @@ async function loadOperationActions(
   return [...grouped.entries()].map(([accountKey, actions]) => ({ accountKey, actions }));
 }
 
-function normalizeOperationManifest(value: unknown): MetaCliOperationAction[] {
+function normalizeOperationManifest(value: unknown): ApplyAction[] {
   if (!isRecord(value)) throw new Error("operation manifest must be an object");
   const accountKey = readString(value.accountKey);
   if (!accountKey) throw new Error("operation manifest accountKey is required");
   const rawActions = Array.isArray(value.actions) ? value.actions : [];
   if (rawActions.length === 0) throw new Error("operation manifest actions[] is required");
-  return rawActions.map((raw): MetaCliOperationAction => {
-    if (!isRecord(raw)) throw new Error("operation action must be an object");
-    const resource = readString(raw.resource);
-    const verb = readString(raw.verb);
-    const args = Array.isArray(raw.args) ? raw.args.filter((v): v is string => typeof v === "string") : [];
-    if (!resource || !verb || args.length === 0) {
-      throw new Error("operation action requires resource, verb and args[]");
-    }
-    return {
-      kind: "meta_cli_operation",
-      account: accountKey,
-      resource,
-      verb,
-      args,
-      ...(isRecord(raw.entity) ? { entity: raw.entity as MetaCliOperationAction["entity"] } : {}),
-      ...(raw.externalIdRequired === true ? { externalIdRequired: true } : {}),
-    };
+  return rawActions.map((raw) => normalizeOperationAction(accountKey, raw));
+}
+
+function normalizeOperationAction(accountKey: string, raw: unknown): ApplyAction {
+  if (!isRecord(raw)) throw new Error("operation action must be an object");
+  const resource = readString(raw.resource);
+  const verb = readString(raw.verb);
+  const args = Array.isArray(raw.args) ? raw.args.filter((v): v is string => typeof v === "string") : [];
+  if (!resource || !verb || args.length === 0) {
+    throw new Error("operation action requires resource, verb and args[]");
+  }
+  const entity = isRecord(raw.entity) ? (raw.entity as MetaCliOperationAction["entity"]) : undefined;
+  const typed = legacySubmissionActionFromOperation({
+    accountKey,
+    resource,
+    verb,
+    args,
+    entity,
   });
+  if (typed) return typed;
+  return {
+    kind: "meta_cli_operation",
+    account: accountKey,
+    resource,
+    verb,
+    args,
+    ...(entity ? { entity } : {}),
+    ...(raw.externalIdRequired === true ? { externalIdRequired: true } : {}),
+  };
+}
+
+function legacySubmissionActionFromOperation(input: {
+  accountKey: string;
+  resource: string;
+  verb: string;
+  args: string[];
+  entity?: MetaCliOperationAction["entity"];
+}): ApplyAction | null {
+  const resource = input.resource.trim().toLowerCase();
+  const verb = input.verb.trim().toLowerCase();
+  if (resource === "creatives" && verb === "create") {
+    return creativeSubmissionActionFromArgs(input.accountKey, input.args, input.entity);
+  }
+  if (resource === "ads" && verb === "create") {
+    return adSubmissionActionFromArgs(input.accountKey, input.args, input.entity);
+  }
+  return null;
+}
+
+function creativeSubmissionActionFromArgs(
+  accountKey: string,
+  args: readonly string[],
+  entity?: MetaCliOperationAction["entity"]
+): ApplyAction | null {
+  if (!matchesPrefix(args, ["ads", "creative", "create"])) return null;
+  const storageKey = flagValue(args, "--image");
+  if (!storageKey) return null;
+  const creativeId = readString(entity?.nodeKey) ?? flagValue(args, "--name");
+  const pageId = flagValue(args, "--page-id");
+  const linkUrl = flagValue(args, "--link-url");
+  if (!creativeId || !pageId || !linkUrl) return null;
+  return {
+    kind: "create_creative",
+    account: accountKey,
+    creativeId,
+    name: flagValue(args, "--name") ?? creativeId,
+    mediaType: "image",
+    pageId,
+    storageKey,
+    body: flagValue(args, "--body") ?? undefined,
+    title: flagValue(args, "--title") ?? undefined,
+    linkUrl,
+    description: flagValue(args, "--description") ?? undefined,
+    callToAction: cliEnum(flagValue(args, "--call-to-action")),
+    instagramUserId: flagValue(args, "--instagram-actor-id") ?? undefined,
+  };
+}
+
+function adSubmissionActionFromArgs(
+  accountKey: string,
+  args: readonly string[],
+  entity?: MetaCliOperationAction["entity"]
+): ApplyAction | null {
+  if (!matchesPrefix(args, ["ads", "ad", "create"])) return null;
+  const adsetId = readString(args[3]);
+  if (!adsetId) return null;
+  const adId = readString(entity?.nodeKey) ?? flagValue(args, "--name");
+  const creativeRef = creativeRefValue(flagValue(args, "--creative-id"));
+  if (!adId || !creativeRef) return null;
+  return {
+    kind: "create_ad",
+    account: accountKey,
+    adsetId,
+    adId,
+    name: flagValue(args, "--name") ?? adId,
+    creativeRef,
+    initialState: cliEnum(flagValue(args, "--status")),
+  };
+}
+
+function matchesPrefix(args: readonly string[], prefix: readonly string[]): boolean {
+  return prefix.every((part, index) => args[index] === part);
+}
+
+function flagValue(args: readonly string[], flag: string): string | null {
+  const index = args.indexOf(flag);
+  if (index < 0) return null;
+  return readString(args[index + 1]);
+}
+
+function cliEnum(value: string | null): string | undefined {
+  return value ? value.trim().toUpperCase().replace(/-/g, "_") : undefined;
+}
+
+function creativeRefValue(value: string | null): string | null {
+  if (!value) return null;
+  const match = /^\{\{creative:([^}]+)\}\}$/.exec(value);
+  return readString(match?.[1]) ?? value;
 }
 
 function readString(value: unknown): string | null {
