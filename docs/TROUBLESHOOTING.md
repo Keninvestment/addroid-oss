@@ -48,8 +48,7 @@ nvm install 22
 # PostgreSQL 16
 sudo apt update && sudo apt install -y postgresql-16 postgresql-client-16
 
-# Python 3.12+ + uv
-sudo apt install -y python3.12 python3.12-venv
+# uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # AdDroid を WSL2 のホーム配下に clone
@@ -209,52 +208,20 @@ chmod 600 ~/.addroid/secrets.local.yaml
 
 ---
 
-## 5. uv / Python 3.12+ / Meta Ads CLI
+## 5. uv / Meta Graph API
 
 ### 5.1 `uv: error`
 [uv 公式インストール手順](https://docs.astral.sh/uv/getting-started/installation/)
-の通りに `uv` を導入してください。AdDroid は Python 依存を直接管理せず、
-`uv` 経由で Meta Ads CLI を呼び出します。
+の通りに `uv` を導入してください。`uv` は周辺ツール用の推奨依存ですが、
+Meta 入稿・レポート・クリエイティブ文脈取得は Graph API を正規経路にするため、
+Python 3.12+ / Meta Ads CLI は標準必須依存ではありません。
 
-### 5.2 `python3.12: error`
-Meta Ads CLI は Python 3.12+ を要求します。3.11 以下は非対応です。
-`python3` が古い場合でも、`uv python find '>=3.12'` で互換 Python が見つかれば
-AdDroid は ok として扱います。`addroid init` の自動導入は、現時点の Meta CLI wheel が
-対応している安定版として Python 3.13 を使います。
-
-```bash
-# uv の例
-uv python install 3.13
-
-# pyenv の例
-pyenv install 3.13.13
-pyenv local 3.13.13
-
-# Homebrew の例
-brew install python@3.13
-```
-
-### 5.3 `meta-ads-cli: error`
-本番では Meta Ads CLI を導入してください。通常は次で初回セットアップの流れに戻せます。
+### 5.2 Meta Graph API の認証エラー
+`oauth.meta.reauth_required` や Graph API の token error が出る場合は、次の安全経路で
+再接続してください。
 
 ```bash
-npm run addroid -- init --install-deps
-```
-
-`addroid init` は `uv` があれば次のコマンドを自動実行し、entry point の `meta` を `.env` の
-`ADDROID_META_CLI_BIN` に保存します。
-
-```bash
-uv tool install meta-ads --python 3.13
-```
-
-手動確認する場合は `meta ads --help` を実行してください。
-
-CI / 開発でローカルに導入できない場合は、環境変数で mock 経由扱いに切り替え
-られます (現在の実装での暫定挙動。Meta 実行経路の検証時に外します)。
-
-```bash
-ADDROID_META_ADS_CLI_MOCK=1 addroid doctor
+npm run addroid -- connect meta
 ```
 
 ---

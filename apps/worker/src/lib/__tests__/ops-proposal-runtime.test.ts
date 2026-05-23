@@ -30,10 +30,11 @@ test("createOpsChangeProposal creates an operation manifest for adset budget_cha
     assert.equal(result.planOk, true);
     assert.equal(github.created.length, 1);
     const pr = github.created[0]!;
-    assert.match(pr.body, /adsets:update ads adset update as_existing --daily-budget 500/);
+    assert.match(pr.body, /adset\.update/);
     assert.match(pr.body, /Campaign budgets and adset budgets are separate|キャンペーン予算と広告セット予算は別物/);
     assert.equal(pr.files[0]!.path.startsWith("operations/primary/"), true);
-    assert.match(pr.files[0]!.diff, /"resource": "adsets"[\s\S]*"verb": "update"[\s\S]*"--daily-budget"/);
+    assert.match(pr.files[0]!.diff, /"version": 2/);
+    assert.match(pr.files[0]!.diff, /"kind": "adset\.update"[\s\S]*"dailyBudget": 500/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }
@@ -66,7 +67,7 @@ test("createOpsChangeProposal rejects unresolved budget_change targetIds", async
   }
 });
 
-test("createOpsChangeProposal accepts raw Meta CLI operations", async () => {
+test("createOpsChangeProposal accepts raw Graph operations", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-ops-raw-"));
   try {
     writeOpsFixture(rootDir);
@@ -83,9 +84,8 @@ test("createOpsChangeProposal accepts raw Meta CLI operations", async () => {
         accountKey: "primary",
         operations: [
           {
-            resource: "creative",
-            verb: "delete",
-            args: ["ads", "creative", "delete", "cr_123"],
+            kind: "creative.delete",
+            payload: { creativeId: "cr_123" },
             entity: { nodeType: "creative", nodeKey: "cr_123", status: "archived" },
           },
         ],
@@ -95,9 +95,9 @@ test("createOpsChangeProposal accepts raw Meta CLI operations", async () => {
 
     assert.equal(result.planOk, true);
     const pr = github.created[0]!;
-    assert.match(pr.body, /creatives:delete ads creative delete cr_123/);
+    assert.match(pr.body, /creative\.delete/);
     assert.equal(pr.files[0]!.path.startsWith("operations/primary/"), true);
-    assert.match(pr.files[0]!.diff, /"resource": "creatives"[\s\S]*"verb": "delete"[\s\S]*"cr_123"/);
+    assert.match(pr.files[0]!.diff, /"kind": "creative\.delete"[\s\S]*"creativeId": "cr_123"/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }

@@ -32,6 +32,7 @@ import {
   createOpsChangeProposal,
   type OperationProposalAction,
 } from "./ops-proposal-runtime.js";
+import { runMetaAdsReadOnlyQuery } from "./meta-ads-readonly-runtime.js";
 
 export type CreativeSubmissionSource =
   | "web"
@@ -39,6 +40,11 @@ export type CreativeSubmissionSource =
   | "cli-chat"
   | "slack-chat"
   | "agent-task";
+
+export type CreativeSubmissionPlacementMode =
+  | "existing_adset"
+  | "new_adset"
+  | "new_campaign";
 
 export interface UploadedCreativeMedia {
   filename: string;
@@ -48,8 +54,13 @@ export interface UploadedCreativeMedia {
 
 export interface CreativeSubmissionInput {
   accountKey?: string;
+  placementMode?: CreativeSubmissionPlacementMode;
+  inheritFromCampaignId?: string;
+  inheritFromAdsetId?: string;
+  inheritFromAdId?: string;
   creativeName?: string;
   adName?: string;
+  adNameExplicit?: boolean;
   prompt?: string;
   headline?: string;
   primaryText?: string;
@@ -70,6 +81,21 @@ export interface CreativeSubmissionInput {
   instagramUserId?: string;
   instagramActorId?: string;
   instagramAppLink?: string;
+  objectStorySpec?: Record<string, unknown>;
+  assetFeedSpec?: Record<string, unknown>;
+  degreesOfFreedomSpec?: Record<string, unknown>;
+  urlTags?: string;
+  imageCrops?: Record<string, unknown>;
+  platformCustomizations?: Record<string, unknown>;
+  videoId?: string;
+  thumbnailId?: string;
+  templateUrlSpec?: Record<string, unknown>;
+  productSetId?: string;
+  destinationSetId?: string;
+  authorizationCategory?: string;
+  adDisclaimerSpec?: Record<string, unknown>;
+  brandedContentSponsorPageId?: string;
+  creativeGraphPayload?: Record<string, unknown>;
   images?: string[];
   videos?: string[];
   titles?: string[];
@@ -79,24 +105,54 @@ export interface CreativeSubmissionInput {
   campaignId?: string;
   adsetId?: string;
   campaignName?: string;
+  campaignNameExplicit?: boolean;
   adsetName?: string;
-  objective?:
-    | "OUTCOME_AWARENESS"
-    | "OUTCOME_TRAFFIC"
-    | "OUTCOME_ENGAGEMENT"
-    | "OUTCOME_LEADS"
-    | "OUTCOME_APP_PROMOTION"
-    | "OUTCOME_SALES";
+  adsetNameExplicit?: boolean;
+  objective?: string;
   /** Account-currency major units. */
   dailyBudget?: number;
   lifetimeBudget?: number;
+  /** Account-currency major units. Defaults to dailyBudget for new campaigns. */
+  campaignDailyBudget?: number;
+  campaignLifetimeBudget?: number;
+  /** Account-currency major units. Defaults to dailyBudget only when creating an adset under an existing campaign. */
+  adsetDailyBudget?: number;
+  adsetLifetimeBudget?: number;
   adsetBudgetSharing?: boolean;
+  campaignBidStrategy?: string;
+  campaignSpendCap?: number;
+  campaignStartTime?: string;
+  campaignStopTime?: string;
+  specialAdCategoryCountry?: string[];
+  isAdsetBudgetSharingEnabled?: boolean;
+  campaignPacingType?: string[];
+  smartPromotionType?: string;
+  campaignPromotedObject?: Record<string, unknown>;
+  campaignGraphPayload?: Record<string, unknown>;
   optimizationGoal?: string;
+  optimizationSubEvent?: string;
   billingEvent?: string;
+  adsetBidStrategy?: string;
   /** Account-currency major units. */
   bidAmount?: number;
+  bidConstraints?: Record<string, unknown>;
   startTime?: string;
   endTime?: string;
+  attributionSpec?: Array<Record<string, unknown>>;
+  destinationType?: string;
+  frequencyControlSpecs?: Array<Record<string, unknown>>;
+  adsetSchedule?: Array<Record<string, unknown>>;
+  adsetPacingType?: string[];
+  dailySpendCap?: number;
+  lifetimeSpendCap?: number;
+  dailyMinSpendTarget?: number;
+  lifetimeMinSpendTarget?: number;
+  isDynamicCreative?: boolean;
+  assetFeedId?: string;
+  dsaBeneficiary?: string;
+  dsaPayor?: string;
+  regionalRegulatedCategories?: string[];
+  adsetGraphPayload?: Record<string, unknown>;
   pixelId?: string;
   customEventType?:
     | "ADD_PAYMENT_INFO"
@@ -118,11 +174,39 @@ export interface CreativeSubmissionInput {
     | "SUBMIT_APPLICATION"
     | "SUBSCRIBE";
   adPixelId?: string;
-  trackingSpecs?: Record<string, unknown>;
+  conversionSpecs?: Record<string, unknown> | Array<Record<string, unknown>>;
+  conversionDomain?: string;
+  creativeAssetGroupsSpec?: Record<string, unknown>;
+  engagementAudience?: boolean;
+  priority?: number;
+  displaySequence?: number;
+  adScheduleStartTime?: string;
+  adScheduleEndTime?: string;
+  adGraphPayload?: Record<string, unknown>;
+  trackingSpecs?: Record<string, unknown> | Array<Record<string, unknown>>;
+  targeting?: Record<string, unknown>;
+  geoLocations?: Record<string, unknown>;
+  excludedGeoLocations?: Record<string, unknown>;
+  publisherPlatforms?: string[];
+  facebookPositions?: string[];
+  instagramPositions?: string[];
+  messengerPositions?: string[];
+  audienceNetworkPositions?: string[];
+  devicePlatforms?: string[];
+  userDevice?: string[];
+  userOs?: string[];
+  genders?: number[];
+  locales?: number[];
+  customAudiences?: Array<Record<string, unknown>>;
+  excludedCustomAudiences?: Array<Record<string, unknown>>;
+  flexibleSpec?: Array<Record<string, unknown>>;
+  exclusions?: Record<string, unknown>;
+  behaviors?: Array<Record<string, unknown>>;
+  lifeEvents?: Array<Record<string, unknown>>;
+  targetingAutomation?: Record<string, unknown>;
   countries?: string[];
   ageMin?: number;
   ageMax?: number;
-  requestedUnsupportedFields?: string[];
   rationale?: string;
   urgency?: "low" | "normal" | "high";
 }
@@ -205,31 +289,7 @@ const IMAGE_PROFILES: Record<SubmissionImageProfileKey, SubmissionImageProfile> 
   },
 };
 const DEFAULT_IMAGE_PROFILE = IMAGE_PROFILES.feed_square;
-const CLI_OPTIMIZATION_GOALS = new Set([
-  "APP_INSTALLS",
-  "CONVERSATIONS",
-  "EVENT_RESPONSES",
-  "IMPRESSIONS",
-  "LANDING_PAGE_VIEWS",
-  "LEAD_GENERATION",
-  "LINK_CLICKS",
-  "OFFSITE_CONVERSIONS",
-  "PAGE_LIKES",
-  "POST_ENGAGEMENT",
-  "REACH",
-  "THRUPLAY",
-  "VALUE",
-]);
-const CLI_BILLING_EVENTS = new Set([
-  "APP_INSTALLS",
-  "CLICKS",
-  "IMPRESSIONS",
-  "LINK_CLICKS",
-  "PAGE_LIKES",
-  "POST_ENGAGEMENT",
-  "THRUPLAY",
-]);
-const CLI_CREATIVE_CALL_TO_ACTIONS = new Set([
+const COMMON_CREATIVE_CALL_TO_ACTIONS = new Set([
   "APPLY_NOW",
   "BOOK_TRAVEL",
   "BUY_NOW",
@@ -710,6 +770,21 @@ export async function createCreativeSubmissionProposal(opts: {
   const draftState: Record<string, unknown> = { creatives: [], campaigns: [] };
 
   const normalized = { ...opts.input };
+  normalizeSubmissionPlacementIntent(normalized);
+  applyAddroidSubmissionNamePolicy(normalized, {
+    source: opts.source,
+    timeZone: account.timezoneName ?? workspace.defaultAdAccount?.timezoneName ?? "UTC",
+    now: new Date(),
+  });
+  validateCreativeSubmissionInput(normalized);
+  await applyInheritedPlacementSettings({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    accountId: account.id,
+    accountKey,
+    env,
+    input: normalized,
+  });
   await inferCreativeIdentity({
     prisma: opts.prisma,
     accountKey,
@@ -722,8 +797,8 @@ export async function createCreativeSubmissionProposal(opts: {
     adAccountId: account.metaAccountId ?? account.key,
     input: normalized,
   });
+  normalizeCallToActionForDestination(normalized);
   validateCreativeSubmissionInput(normalized);
-  validateCreativeSubmissionCliCompatibility(normalized);
   const draftId = makeStableId(normalized.creativeName || normalized.adName || normalized.headline || "creative");
   const creativeId = uniqueId(ensureArray(draftState, "creatives"), draftId);
   const adId = uniqueNestedAdId(draftState, makeStableId(normalized.adName || normalized.creativeName || "ad"));
@@ -759,6 +834,7 @@ export async function createCreativeSubmissionProposal(opts: {
       : null;
   if (generatedSubmissionText) {
     applyGeneratedTextToSubmissionInput(normalized, generatedSubmissionText.variants[0]);
+    normalizeCallToActionForDestination(normalized);
   }
   const llmConnection = opts.llmProvider
     ? await opts.llmProvider.getConnection().catch(() => null)
@@ -822,6 +898,7 @@ export async function createCreativeSubmissionProposal(opts: {
     preparedStorageKeys: preparedMedia.storageKeys,
     storage,
   });
+  validateSubmissionActionGraph(normalized, operations);
   const proposal = await createOpsChangeProposal({
     prisma: opts.prisma,
     githubAdapter: opts.githubAdapter,
@@ -909,8 +986,19 @@ export async function createCreativeSubmissionProposal(opts: {
 export function normalizeCreativeSubmissionInput(args: Record<string, unknown>): CreativeSubmissionInput {
   const input: CreativeSubmissionInput = {
     accountKey: readString(args.accountKey) ?? undefined,
+    placementMode: readPlacementMode(args.placementMode ?? args.placement_mode ?? args.submissionPlacementMode) ?? undefined,
+    inheritFromCampaignId: readString(
+      args.inheritFromCampaignId ?? args.inherit_from_campaign_id ?? args.sourceCampaignId ?? args.source_campaign_id
+    ) ?? undefined,
+    inheritFromAdsetId: readString(
+      args.inheritFromAdsetId ?? args.inherit_from_adset_id ?? args.sourceAdsetId ?? args.source_adset_id
+    ) ?? undefined,
+    inheritFromAdId: readString(
+      args.inheritFromAdId ?? args.inherit_from_ad_id ?? args.sourceAdId ?? args.source_ad_id ?? args.existingAdId ?? args.existing_ad_id
+    ) ?? undefined,
     creativeName: readString(args.creativeName) ?? undefined,
     adName: readString(args.adName) ?? undefined,
+    adNameExplicit: readBoolean(args.adNameExplicit ?? args.ad_name_explicit ?? args.preserveAdName ?? args.preserve_ad_name) ?? undefined,
     prompt: readString(args.prompt) ?? undefined,
     headline: readString(args.headline) ?? undefined,
     primaryText: readString(args.primaryText) ?? undefined,
@@ -927,6 +1015,21 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     instagramUserId: readString(args.instagramUserId) ?? undefined,
     instagramActorId: readString(args.instagramActorId) ?? undefined,
     instagramAppLink: readString(args.instagramAppLink) ?? undefined,
+    objectStorySpec: readRecord(args.objectStorySpec ?? args.object_story_spec) ?? undefined,
+    assetFeedSpec: readRecord(args.assetFeedSpec ?? args.asset_feed_spec) ?? undefined,
+    degreesOfFreedomSpec: readRecord(args.degreesOfFreedomSpec ?? args.degrees_of_freedom_spec) ?? undefined,
+    urlTags: readString(args.urlTags ?? args.url_tags) ?? undefined,
+    imageCrops: readRecord(args.imageCrops ?? args.image_crops) ?? undefined,
+    platformCustomizations: readRecord(args.platformCustomizations ?? args.platform_customizations) ?? undefined,
+    videoId: readString(args.videoId ?? args.video_id) ?? undefined,
+    thumbnailId: readString(args.thumbnailId ?? args.thumbnail_id) ?? undefined,
+    templateUrlSpec: readRecord(args.templateUrlSpec ?? args.template_url_spec) ?? undefined,
+    productSetId: readString(args.productSetId ?? args.product_set_id) ?? undefined,
+    destinationSetId: readString(args.destinationSetId ?? args.destination_set_id) ?? undefined,
+    authorizationCategory: readString(args.authorizationCategory ?? args.authorization_category) ?? undefined,
+    adDisclaimerSpec: readRecord(args.adDisclaimerSpec ?? args.ad_disclaimer_spec) ?? undefined,
+    brandedContentSponsorPageId: readString(args.brandedContentSponsorPageId ?? args.branded_content_sponsor_page_id) ?? undefined,
+    creativeGraphPayload: readRecord(args.creativeGraphPayload ?? args.creative_graph_payload ?? args.graphPayload ?? args.graph_payload) ?? undefined,
     images: readStringArray(args.images),
     videos: readStringArray(args.videos),
     titles: readStringArray(args.titles),
@@ -936,83 +1039,94 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     campaignId: readString(args.campaignId) ?? undefined,
     adsetId: readString(args.adsetId) ?? undefined,
     campaignName: readString(args.campaignName) ?? undefined,
+    campaignNameExplicit: readBoolean(args.campaignNameExplicit ?? args.campaign_name_explicit ?? args.preserveCampaignName ?? args.preserve_campaign_name) ?? undefined,
     adsetName: readString(args.adsetName) ?? undefined,
+    adsetNameExplicit: readBoolean(args.adsetNameExplicit ?? args.adset_name_explicit ?? args.preserveAdsetName ?? args.preserve_adset_name) ?? undefined,
     objective: readObjective(args.objective) ?? undefined,
     dailyBudget: readNumber(args.dailyBudget) ?? undefined,
     lifetimeBudget: readNumber(args.lifetimeBudget) ?? undefined,
+    campaignDailyBudget: readNumber(args.campaignDailyBudget ?? args.campaign_daily_budget) ?? undefined,
+    campaignLifetimeBudget: readNumber(args.campaignLifetimeBudget ?? args.campaign_lifetime_budget) ?? undefined,
+    adsetDailyBudget: readNumber(args.adsetDailyBudget ?? args.adset_daily_budget) ?? undefined,
+    adsetLifetimeBudget: readNumber(args.adsetLifetimeBudget ?? args.adset_lifetime_budget) ?? undefined,
     adsetBudgetSharing: readBoolean(args.adsetBudgetSharing) ?? undefined,
+    campaignBidStrategy: readMetaEnumToken(args.campaignBidStrategy ?? args.campaign_bid_strategy) ?? undefined,
+    campaignSpendCap: readNumber(args.campaignSpendCap ?? args.campaign_spend_cap) ?? undefined,
+    campaignStartTime: readString(args.campaignStartTime ?? args.campaign_start_time) ?? undefined,
+    campaignStopTime: readString(args.campaignStopTime ?? args.campaign_stop_time) ?? undefined,
+    specialAdCategoryCountry: readCountries(args.specialAdCategoryCountry ?? args.special_ad_category_country),
+    isAdsetBudgetSharingEnabled: readBoolean(args.isAdsetBudgetSharingEnabled ?? args.is_adset_budget_sharing_enabled) ?? undefined,
+    campaignPacingType: readStringArray(args.campaignPacingType ?? args.campaign_pacing_type),
+    smartPromotionType: readMetaEnumToken(args.smartPromotionType ?? args.smart_promotion_type) ?? undefined,
+    campaignPromotedObject: readRecord(args.campaignPromotedObject ?? args.campaign_promoted_object) ?? undefined,
+    campaignGraphPayload: readRecord(args.campaignGraphPayload ?? args.campaign_graph_payload) ?? undefined,
     optimizationGoal: readOptimizationGoal(args.optimizationGoal) ?? undefined,
+    optimizationSubEvent: readMetaEnumToken(args.optimizationSubEvent ?? args.optimization_sub_event) ?? undefined,
     billingEvent: readBillingEvent(args.billingEvent) ?? undefined,
+    adsetBidStrategy: readMetaEnumToken(args.adsetBidStrategy ?? args.adset_bid_strategy ?? args.bidStrategy ?? args.bid_strategy) ?? undefined,
     bidAmount: readNumber(args.bidAmount) ?? undefined,
+    bidConstraints: readRecord(args.bidConstraints ?? args.bid_constraints) ?? undefined,
     startTime: readString(args.startTime) ?? undefined,
     endTime: readString(args.endTime) ?? undefined,
+    attributionSpec: readRecordArray(args.attributionSpec ?? args.attribution_spec),
+    destinationType: readMetaEnumToken(args.destinationType ?? args.destination_type) ?? undefined,
+    frequencyControlSpecs: readRecordArray(args.frequencyControlSpecs ?? args.frequency_control_specs),
+    adsetSchedule: readRecordArray(args.adsetSchedule ?? args.adset_schedule),
+    adsetPacingType: readStringArray(args.adsetPacingType ?? args.adset_pacing_type),
+    dailySpendCap: readNumber(args.dailySpendCap ?? args.daily_spend_cap) ?? undefined,
+    lifetimeSpendCap: readNumber(args.lifetimeSpendCap ?? args.lifetime_spend_cap) ?? undefined,
+    dailyMinSpendTarget: readNumber(args.dailyMinSpendTarget ?? args.daily_min_spend_target) ?? undefined,
+    lifetimeMinSpendTarget: readNumber(args.lifetimeMinSpendTarget ?? args.lifetime_min_spend_target) ?? undefined,
+    isDynamicCreative: readBoolean(args.isDynamicCreative ?? args.is_dynamic_creative) ?? undefined,
+    assetFeedId: readString(args.assetFeedId ?? args.asset_feed_id) ?? undefined,
+    dsaBeneficiary: readString(args.dsaBeneficiary ?? args.dsa_beneficiary) ?? undefined,
+    dsaPayor: readString(args.dsaPayor ?? args.dsa_payor) ?? undefined,
+    regionalRegulatedCategories: readStringArray(args.regionalRegulatedCategories ?? args.regional_regulated_categories),
+    adsetGraphPayload: readRecord(args.adsetGraphPayload ?? args.adset_graph_payload) ?? undefined,
     pixelId: readString(args.pixelId) ?? undefined,
     customEventType: readCustomEventType(args.customEventType) ?? undefined,
     adPixelId: readString(args.adPixelId) ?? undefined,
-    trackingSpecs: readRecord(args.trackingSpecs) ?? undefined,
+    conversionSpecs: readRecord(args.conversionSpecs ?? args.conversion_specs) ?? readRecordArray(args.conversionSpecs ?? args.conversion_specs) ?? undefined,
+    conversionDomain: readString(args.conversionDomain ?? args.conversion_domain) ?? undefined,
+    creativeAssetGroupsSpec: readRecord(args.creativeAssetGroupsSpec ?? args.creative_asset_groups_spec) ?? undefined,
+    engagementAudience: readBoolean(args.engagementAudience ?? args.engagement_audience) ?? undefined,
+    priority: readNumber(args.priority) ?? undefined,
+    displaySequence: readInteger(args.displaySequence ?? args.display_sequence) ?? undefined,
+    adScheduleStartTime: readString(args.adScheduleStartTime ?? args.ad_schedule_start_time) ?? undefined,
+    adScheduleEndTime: readString(args.adScheduleEndTime ?? args.ad_schedule_end_time) ?? undefined,
+    adGraphPayload: readRecord(args.adGraphPayload ?? args.ad_graph_payload) ?? undefined,
+    trackingSpecs: readRecord(args.trackingSpecs ?? args.tracking_specs) ?? readRecordArray(args.trackingSpecs ?? args.tracking_specs) ?? undefined,
+    targeting: readRecord(args.targeting) ?? undefined,
+    geoLocations: readRecord(args.geoLocations ?? args.geo_locations) ?? undefined,
+    excludedGeoLocations: readRecord(args.excludedGeoLocations ?? args.excluded_geo_locations) ?? undefined,
+    publisherPlatforms: readStringArray(args.publisherPlatforms ?? args.publisher_platforms),
+    facebookPositions: readStringArray(args.facebookPositions ?? args.facebook_positions),
+    instagramPositions: readStringArray(args.instagramPositions ?? args.instagram_positions),
+    messengerPositions: readStringArray(args.messengerPositions ?? args.messenger_positions),
+    audienceNetworkPositions: readStringArray(args.audienceNetworkPositions ?? args.audience_network_positions),
+    devicePlatforms: readStringArray(args.devicePlatforms ?? args.device_platforms),
+    userDevice: readStringArray(args.userDevice ?? args.user_device),
+    userOs: readStringArray(args.userOs ?? args.user_os),
+    genders: readIntegerArray(args.genders),
+    locales: readIntegerArray(args.locales),
+    customAudiences: readRecordArray(args.customAudiences ?? args.custom_audiences),
+    excludedCustomAudiences: readRecordArray(args.excludedCustomAudiences ?? args.excluded_custom_audiences),
+    flexibleSpec: readRecordArray(args.flexibleSpec ?? args.flexible_spec),
+    exclusions: readRecord(args.exclusions) ?? undefined,
+    behaviors: readRecordArray(args.behaviors),
+    lifeEvents: readRecordArray(args.lifeEvents ?? args.life_events),
+    targetingAutomation: readRecord(args.targetingAutomation ?? args.targeting_automation) ?? undefined,
     countries: readCountries(args.countries),
     ageMin: readInteger(args.ageMin) ?? undefined,
     ageMax: readInteger(args.ageMax) ?? undefined,
     imagePlacement: readImagePlacement(args.imagePlacement ?? args.placementProfile ?? args.placement) ?? undefined,
     imageAspectRatio: readImageAspectRatio(args.imageAspectRatio ?? args.aspectRatio) ?? undefined,
-    requestedUnsupportedFields: detectRequestedUnsupportedFields(args),
     rationale: readString(args.rationale) ?? undefined,
     urgency: readUrgency(args.urgency) ?? undefined,
   };
+  normalizeSubmissionPlacementIntent(input);
   validateCreativeSubmissionInput(input);
   return input;
-}
-
-function validateCreativeSubmissionCliCompatibility(input: CreativeSubmissionInput): void {
-  const issues: string[] = [];
-  const requestedUnsupported = input.requestedUnsupportedFields ?? [];
-  if (requestedUnsupported.length > 0) {
-    issues.push(
-      `Meta Ads CLI 2026/04/29 では ${requestedUnsupported.join("、")} は入稿時に反映できません。ターゲティングは国コード（targeting-countries）のみ対応です。`
-    );
-  }
-  if (input.ageMin !== undefined || input.ageMax !== undefined) {
-    issues.push("Meta Ads CLI 2026/04/29 では年齢指定を入稿時に反映できません。");
-  }
-  if (input.callToAction && !CLI_CREATIVE_CALL_TO_ACTIONS.has(input.callToAction)) {
-    issues.push(
-      `CTA ${input.callToAction} は Meta Ads CLI 2026/04/29 の creative create では使えません。対応CTA: ${joinCliValues(CLI_CREATIVE_CALL_TO_ACTIONS)}`
-    );
-  }
-  const invalidDcoCtas = (input.callToActions ?? []).filter(
-    (cta): cta is string => typeof cta === "string" && !CLI_CREATIVE_CALL_TO_ACTIONS.has(cta)
-  );
-  if (invalidDcoCtas.length > 0) {
-    issues.push(
-      `DCO CTA ${Array.from(new Set(invalidDcoCtas)).join("、")} は Meta Ads CLI 2026/04/29 では使えません。`
-    );
-  }
-  const createsAdset = !input.adsetId;
-  if (createsAdset) {
-    if (!input.optimizationGoal) {
-      issues.push("新しい広告セットを作る場合、Meta Ads CLI の必須項目として optimizationGoal が必要です。");
-    } else if (!CLI_OPTIMIZATION_GOALS.has(input.optimizationGoal)) {
-      issues.push(
-        `optimizationGoal ${input.optimizationGoal} は Meta Ads CLI 2026/04/29 の adset create では使えません。対応値: ${joinCliValues(CLI_OPTIMIZATION_GOALS)}`
-      );
-    }
-    if (!input.billingEvent) {
-      issues.push("新しい広告セットを作る場合、Meta Ads CLI の必須項目として billingEvent が必要です。");
-    } else if (!CLI_BILLING_EVENTS.has(input.billingEvent)) {
-      issues.push(
-        `billingEvent ${input.billingEvent} は Meta Ads CLI 2026/04/29 の adset create では使えません。対応値: ${joinCliValues(CLI_BILLING_EVENTS)}`
-      );
-    }
-  }
-  if (issues.length > 0) {
-    throw new Error(
-      [
-        "Meta Ads CLI で反映できる範囲外の設定が含まれているため、PR は作成しません。",
-        ...issues.map((issue) => `- ${issue}`),
-        "コピー元と完全一致させるのではなく、CLI対応範囲に置き換えてから再実行してください。",
-      ].join("\n")
-    );
-  }
 }
 
 function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
@@ -1021,11 +1135,14 @@ function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
   }
   if (requiresDestinationUrlForCurrentCreativeApply(input) && !input.linkUrl) {
     throw new Error(
-      "現在の Meta Ads CLI / Graph apply で反映できるクリエイティブ形式はリンク広告として作成するため、linkUrl または destinationUrl が必要です。キャンペーン種別ではなく、入稿するクリエイティブ形式に対する必須項目です。"
+      "現在の Graph API 入稿ではリンク広告として作成するため、linkUrl または destinationUrl が必要です。キャンペーン種別ではなく、入稿するクリエイティブ形式に対する必須項目です。"
     );
   }
   if (input.campaignId) {
     if (input.adsetId) {
+      return;
+    }
+    if (input.placementMode === "new_adset") {
       return;
     }
     if (!input.adsetName) {
@@ -1039,10 +1156,8 @@ function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
     throw new Error("adsetId を指定する場合は campaignId も必要です。");
   }
   if (
-    !input.campaignName ||
-    !input.adsetName ||
     !input.objective ||
-    (dailyBudget(input) === undefined && lifetimeBudget(input) === undefined)
+    !hasAnySubmissionBudget(input)
   ) {
     throw new Error(
       "新規キャンペーンから入稿するには campaignName、adsetName、objective、dailyBudget または lifetimeBudget が必要です。予算は広告アカウント通貨の金額で指定してください。既存キャンペーン配下に入れる場合は campaignId と adsetName、既存広告セットに入れる場合は campaignId と adsetId を指定してください。"
@@ -1050,7 +1165,365 @@ function validateCreativeSubmissionInput(input: CreativeSubmissionInput): void {
   }
 }
 
+function normalizeSubmissionPlacementIntent(input: CreativeSubmissionInput): void {
+  const mode = input.placementMode ?? inferPlacementMode(input);
+  if (!mode) return;
+  input.placementMode = mode;
+
+  if (mode === "new_campaign") {
+    if (input.campaignId && !input.inheritFromCampaignId) {
+      input.inheritFromCampaignId = input.campaignId;
+    }
+    if (input.adsetId && !input.inheritFromAdsetId) {
+      input.inheritFromAdsetId = input.adsetId;
+    }
+    delete input.campaignId;
+    delete input.adsetId;
+    return;
+  }
+
+  if (mode === "new_adset") {
+    if (input.adsetId && !input.inheritFromAdsetId) {
+      input.inheritFromAdsetId = input.adsetId;
+    }
+    delete input.adsetId;
+  }
+}
+
+function normalizeCallToActionForDestination(input: CreativeSubmissionInput): void {
+  const instagramProfileCta = inferInstagramProfileCallToActionForSubmission(input);
+  if (instagramProfileCta) input.callToAction = instagramProfileCta;
+}
+
+function inferInstagramProfileCallToActionForSubmission(input: CreativeSubmissionInput): string | null {
+  const destinationType = readString(input.destinationType)?.toUpperCase();
+  const optimizationGoal = readString(input.optimizationGoal)?.toUpperCase();
+  const linkUrl = readString(input.linkUrl)?.toLowerCase();
+  const hasInstagramIdentity = Boolean(
+    input.instagramActorId || input.instagramUserId || input.instagramAppLink
+  );
+  if (destinationType === "INSTAGRAM_PROFILE") return "VIEW_INSTAGRAM_PROFILE";
+  if (optimizationGoal === "PROFILE_VISIT" && hasInstagramIdentity) return "VIEW_INSTAGRAM_PROFILE";
+  if (hasInstagramIdentity && input.instagramAppLink) return "VIEW_INSTAGRAM_PROFILE";
+  if (hasInstagramIdentity && linkUrl && /(^https?:\/\/)?(www\.)?instagram\.com\//.test(linkUrl)) {
+    return "VIEW_INSTAGRAM_PROFILE";
+  }
+  return null;
+}
+
+function inferPlacementMode(input: CreativeSubmissionInput): CreativeSubmissionPlacementMode | null {
+  if (input.campaignId && input.adsetId) return "existing_adset";
+  if (input.campaignId && input.adsetName) return "new_adset";
+  if (input.campaignName && input.adsetName) return "new_campaign";
+  return null;
+}
+
+function applyAddroidSubmissionNamePolicy(
+  input: CreativeSubmissionInput,
+  opts: { source: CreativeSubmissionSource; timeZone: string; now: Date }
+): void {
+  const suffix = `${formatDateInTimeZone(opts.now, opts.timeZone)}_addroid`;
+  const sourceTreatsProvidedNamesAsExplicit = opts.source === "web";
+  const mode = input.placementMode ?? inferPlacementMode(input);
+  const createsCampaign = mode === "new_campaign" || (!input.campaignId && !input.adsetId);
+  const createsAdset = createsCampaign || mode === "new_adset" || Boolean(input.campaignId && !input.adsetId);
+
+  if (createsCampaign) {
+    const explicit = input.campaignNameExplicit === true || (sourceTreatsProvidedNamesAsExplicit && Boolean(input.campaignName));
+    const base = input.campaignName ?? defaultSubmissionEntityName(input, "Campaign");
+    input.campaignName = explicit ? base : appendAddroidNameSuffix(base, suffix);
+  }
+
+  if (createsAdset) {
+    const explicit = input.adsetNameExplicit === true || (sourceTreatsProvidedNamesAsExplicit && Boolean(input.adsetName));
+    const base = input.adsetName ?? defaultSubmissionEntityName(input, "Adset");
+    input.adsetName = explicit ? base : appendAddroidNameSuffix(base, suffix);
+  }
+
+  const explicitAdName = input.adNameExplicit === true || (sourceTreatsProvidedNamesAsExplicit && Boolean(input.adName));
+  const adBase = input.adName ?? input.creativeName ?? input.headline ?? defaultSubmissionEntityName(input, "Ad");
+  input.adName = explicitAdName ? adBase : appendAddroidNameSuffix(adBase, suffix);
+}
+
+function defaultSubmissionEntityName(input: CreativeSubmissionInput, entity: "Campaign" | "Adset" | "Ad"): string {
+  const base = input.creativeName ?? input.headline ?? input.title ?? input.primaryText ?? input.prompt ?? entity;
+  const compact = base.trim().replace(/\s+/g, " ");
+  if (!compact) return entity;
+  return compact.length > 80 ? compact.slice(0, 80).trim() : compact;
+}
+
+function appendAddroidNameSuffix(name: string, suffix: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return suffix;
+  if (/[ _-]\d{4}-\d{2}-\d{2}_addroid$/.test(trimmed) || trimmed === suffix) return trimmed;
+  return `${trimmed} ${suffix}`;
+}
+
+function formatDateInTimeZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+async function applyInheritedPlacementSettings(opts: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  accountId: string;
+  accountKey: string;
+  env: NodeJS.ProcessEnv;
+  input: CreativeSubmissionInput;
+}): Promise<void> {
+  if (opts.input.placementMode !== "new_campaign" && opts.input.placementMode !== "new_adset") return;
+
+  opts.input.inheritFromAdId ??= await inferInheritedAdSourceId(opts);
+  const adSource = opts.input.inheritFromAdId;
+  if (adSource) {
+    const raw = await readInheritedMetaRaw(opts, "ad", adSource);
+    opts.input.adGraphPayload ??= copyGraphFields(opts.input.adGraphPayload, raw, [
+      "conversion_domain",
+      "engagement_audience",
+    ]);
+  }
+
+  const adsetSource = opts.input.inheritFromAdsetId;
+  if (adsetSource) {
+    const raw = await readInheritedMetaRaw(opts, "adset", adsetSource);
+    opts.input.optimizationGoal = readString(raw.optimization_goal) ?? opts.input.optimizationGoal;
+    opts.input.billingEvent = readString(raw.billing_event) ?? opts.input.billingEvent;
+    opts.input.destinationType = readString(raw.destination_type) ?? opts.input.destinationType;
+    opts.input.adsetBidStrategy = readString(raw.bid_strategy) ?? opts.input.adsetBidStrategy;
+    opts.input.targeting = readRecord(raw.targeting) ?? opts.input.targeting;
+    const promotedObject = readRecord(raw.promoted_object);
+    opts.input.pageId ??= readString(promotedObject?.page_id) ?? undefined;
+    opts.input.adsetGraphPayload ??= copyGraphFields(opts.input.adsetGraphPayload, raw, [
+      "attribution_spec",
+      "bid_amount",
+      "bid_constraints",
+      "bid_strategy",
+      "daily_budget",
+      "daily_min_spend_target",
+      "daily_spend_cap",
+      "destination_type",
+      "end_time",
+      "frequency_control_specs",
+      "is_dynamic_creative",
+      "lifetime_budget",
+      "lifetime_min_spend_target",
+      "lifetime_spend_cap",
+      "optimization_goal",
+      "billing_event",
+      "pacing_type",
+      "promoted_object",
+      "start_time",
+      "targeting",
+    ]);
+  }
+
+  const campaignSource = opts.input.inheritFromCampaignId;
+  if (campaignSource) {
+    const raw = await readInheritedMetaRaw(opts, "campaign", campaignSource);
+    opts.input.objective = readObjective(raw.objective) ?? opts.input.objective;
+    opts.input.campaignBidStrategy = readString(raw.bid_strategy) ?? opts.input.campaignBidStrategy;
+    opts.input.campaignGraphPayload ??= copyGraphFields(opts.input.campaignGraphPayload, raw, [
+      "objective",
+      "buying_type",
+      "bid_strategy",
+      "daily_budget",
+      "lifetime_budget",
+      "spend_cap",
+      "start_time",
+      "stop_time",
+      "is_adset_budget_sharing_enabled",
+      "special_ad_categories",
+      "special_ad_category_country",
+    ]);
+  }
+}
+
+async function inferInheritedAdSourceId(opts: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  accountKey: string;
+  env: NodeJS.ProcessEnv;
+  input: CreativeSubmissionInput;
+}): Promise<string | undefined> {
+  const adsetSource = opts.input.inheritFromAdsetId;
+  if (!adsetSource) return undefined;
+  try {
+    const result = await runMetaAdsReadOnlyQuery({
+      prisma: opts.prisma,
+      workspaceId: opts.workspaceId,
+      env: opts.env,
+      args: {
+        resource: "ad",
+        action: "list",
+        accountKey: opts.accountKey,
+        adsetId: adsetSource,
+        limit: 25,
+      },
+    });
+    const ads = result.rows.map(readRecord).filter((row): row is Record<string, unknown> => Boolean(row));
+    const activeAds = ads.filter((ad) => {
+      const status = readString(ad.effective_status ?? ad.status)?.toUpperCase();
+      return status === "ACTIVE";
+    });
+    const candidates = activeAds.length > 0 ? activeAds : ads;
+    if (candidates.length !== 1) return undefined;
+    return readString(candidates[0]?.id) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readInheritedMetaRaw(
+  opts: {
+    prisma: PrismaClient;
+    workspaceId: string;
+    accountId: string;
+    accountKey: string;
+    env: NodeJS.ProcessEnv;
+  },
+  resource: "campaign" | "adset" | "ad",
+  externalId: string
+): Promise<Record<string, unknown>> {
+  let live: Record<string, unknown> | null = null;
+  try {
+    live = await readLiveInheritedMetaRaw(opts, resource, externalId);
+  } catch (err) {
+    const detail = err instanceof Error && err.message ? `: ${err.message}` : "";
+    const label = resource === "campaign" ? "キャンペーン" : resource === "adset" ? "広告セット" : "広告";
+    throw new Error(
+      `既存${label} ${externalId} の live Graph 設定を取得できませんでした${detail}。` +
+        "「既存設定と同じで新規作成」は正確性を保証できないため、DB キャッシュでは作成しません。Meta 接続・権限・rate limit を確認してください。"
+    );
+  }
+  if (!live || Object.keys(live).length === 0) {
+    const label = resource === "campaign" ? "キャンペーン" : resource === "adset" ? "広告セット" : "広告";
+    throw new Error(
+      `既存${label} ${externalId} の live Graph 設定が空でした。` +
+        "「既存設定と同じで新規作成」は正確性を保証できないため、DB キャッシュでは作成しません。"
+    );
+  }
+  return live;
+}
+
+async function readLiveInheritedMetaRaw(
+  opts: {
+    prisma: PrismaClient;
+    workspaceId: string;
+    accountKey: string;
+    env: NodeJS.ProcessEnv;
+  },
+  resource: "campaign" | "adset" | "ad",
+  externalId: string
+): Promise<Record<string, unknown> | null> {
+  const result = await runMetaAdsReadOnlyQuery({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    env: opts.env,
+    args: {
+      resource,
+      action: "get",
+      accountKey: opts.accountKey,
+      ...(resource === "campaign"
+        ? { campaignId: externalId }
+        : resource === "adset"
+          ? { adsetId: externalId }
+          : { adId: externalId }),
+    },
+  });
+  return readRecord(result.rows[0]);
+}
+
+function copyGraphFields(
+  current: Record<string, unknown> | undefined,
+  raw: Record<string, unknown>,
+  keys: string[]
+): Record<string, unknown> | undefined {
+  const copied: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (raw[key] !== undefined) copied[key] = raw[key];
+  }
+  if (Object.keys(copied).length === 0) return current;
+  return { ...copied, ...(current ?? {}) };
+}
+
+function sanitizeAdCreateTrackingSpecs(
+  value: unknown
+): Record<string, unknown> | Array<Record<string, unknown>> | undefined {
+  const specs = readRecordArray(value) ?? (readRecord(value) ? [readRecord(value)!] : undefined);
+  const safeSpecs = specs?.filter(isSafeAdCreateTrackingSpec) ?? [];
+  if (safeSpecs.length === 0) return undefined;
+  return Array.isArray(value) ? safeSpecs : safeSpecs[0];
+}
+
+function sanitizeAdCreateGraphPayload(
+  value: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  const next = { ...value };
+  if ("tracking_specs" in next) {
+    const trackingSpecs = sanitizeAdCreateTrackingSpecs(next.tracking_specs);
+    if (trackingSpecs === undefined) {
+      delete next.tracking_specs;
+    } else {
+      next.tracking_specs = trackingSpecs;
+    }
+  }
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
+function isSafeAdCreateTrackingSpec(spec: Record<string, unknown>): boolean {
+  return hasTrackingActionObject(spec) && !hasCreativeSpecificTrackingReference(spec);
+}
+
+function hasTrackingActionObject(spec: Record<string, unknown>): boolean {
+  return Object.keys(spec).some((key) => key !== "action.type");
+}
+
+function hasCreativeSpecificTrackingReference(spec: Record<string, unknown>): boolean {
+  const creativeSpecificKeys = new Set(["post", "post.wall", "post_id", "video", "video_id"]);
+  return Object.keys(spec).some((key) => creativeSpecificKeys.has(key));
+}
+
+function validateSubmissionActionGraph(
+  input: CreativeSubmissionInput,
+  operations: OperationProposalAction[]
+): void {
+  const mode = input.placementMode ?? inferPlacementMode(input);
+  if (!mode) return;
+  const kinds = new Set(operations.map((op) => op.kind));
+  const hasCampaignCreate = kinds.has("campaign.create");
+  const hasAdsetCreate = kinds.has("adset.create");
+  const hasAdCreate = kinds.has("ad.create");
+
+  if (!hasAdCreate) {
+    throw new Error("入稿PRの検証に失敗しました: ad.create がありません。");
+  }
+  if (mode === "new_campaign" && (!hasCampaignCreate || !hasAdsetCreate)) {
+    throw new Error(
+      "入稿PRの検証に失敗しました: 新規キャンペーン指定なのに campaign.create / adset.create が含まれていません。"
+    );
+  }
+  if (mode === "new_adset" && (hasCampaignCreate || !hasAdsetCreate)) {
+    throw new Error(
+      "入稿PRの検証に失敗しました: 既存キャンペーン配下の新規広告セット指定と生成された変更内容が一致しません。"
+    );
+  }
+  if (mode === "existing_adset" && (hasCampaignCreate || hasAdsetCreate)) {
+    throw new Error(
+      "入稿PRの検証に失敗しました: 既存広告セット配下指定なのに campaign/adset 作成が含まれています。"
+    );
+  }
+}
+
 function requiresDestinationUrlForCurrentCreativeApply(input: CreativeSubmissionInput): boolean {
+  if (hasExplicitCreativeGraphShape(input)) return false;
   if (input.mediaType === "image" || input.mediaType === "video" || input.mediaType === "carousel") return true;
   if ((input.localMediaPaths?.length ?? 0) > 0 || (input.uploadedMedia?.length ?? 0) > 0) return true;
   if (input.generateImage === true) return true;
@@ -1064,6 +1537,24 @@ function requiresDestinationUrlForCurrentCreativeApply(input: CreativeSubmission
     return true;
   }
   return Boolean(input.callToAction && input.callToAction !== "NO_BUTTON");
+}
+
+function hasExplicitCreativeGraphShape(input: CreativeSubmissionInput): boolean {
+  const graphPayload = readRecord(input.creativeGraphPayload);
+  return Boolean(
+    input.objectStorySpec ||
+      input.assetFeedSpec ||
+      input.degreesOfFreedomSpec ||
+      input.videoId ||
+      input.productSetId ||
+      input.destinationSetId ||
+      readRecord(graphPayload?.object_story_spec) ||
+      readRecord(graphPayload?.asset_feed_spec) ||
+      readRecord(graphPayload?.degrees_of_freedom_spec) ||
+      readString(graphPayload?.video_id) ||
+      readString(graphPayload?.product_set_id) ||
+      readString(graphPayload?.destination_set_id)
+  );
 }
 
 async function loadCreativeContextForSubmission(
@@ -1303,7 +1794,7 @@ async function generateCreativeTextVariants(input: {
             "Required output shape: {\"variants\":[{\"primaryText\":\"...\",\"headline\":\"...\",\"description\":\"...\",\"callToAction\":\"LEARN_MORE\",\"rationale\":\"...\"}]}",
             "Generate materially distinct variants, not minor rewrites.",
             `Respect recommended display lengths: primaryText <= ${META_TEXT_RECOMMENDED_LIMITS.primaryText} characters, headline <= ${META_TEXT_RECOMMENDED_LIMITS.headline}, description <= ${META_TEXT_RECOMMENDED_LIMITS.description}.`,
-            `callToAction must be one of: ${joinCliValues(CLI_CREATIVE_CALL_TO_ACTIONS)}.`,
+            `Prefer common Meta CTA enum tokens such as: ${joinMetaValues(COMMON_CREATIVE_CALL_TO_ACTIONS)}.`,
             "Do not invent unsupported claims, rankings, prices, guarantees, medical/safety claims, unrelated products, unrelated locations, or unrelated brands.",
             "Use landing page and creative performance context when provided.",
           ].join("\n"),
@@ -1355,7 +1846,7 @@ function normalizeCreativeTextVariant(item: Record<string, unknown>): CreativeTe
     primaryText: truncateChars(primaryText ?? headline ?? description ?? "", META_TEXT_RECOMMENDED_LIMITS.primaryText),
     headline: truncateChars(headline ?? primaryText ?? description ?? "", META_TEXT_RECOMMENDED_LIMITS.headline),
     description: truncateChars(description ?? "詳しくはこちら", META_TEXT_RECOMMENDED_LIMITS.description),
-    callToAction: CLI_CREATIVE_CALL_TO_ACTIONS.has(cta) ? cta : DEFAULT_GENERATED_CTA,
+    callToAction: cta,
     rationale: readString(item.rationale),
   };
 }
@@ -1938,8 +2429,8 @@ function placeAdDraft(
     objective: opts.input.objective,
     initialState: "paused",
     budget: removeUndefined({
-      dailyBudget: dailyBudget(opts.input),
-      lifetimeBudget: lifetimeBudget(opts.input),
+      dailyBudget: campaignDailyBudget(opts.input),
+      lifetimeBudget: campaignLifetimeBudget(opts.input),
     }),
     ...(opts.input.adsetBudgetSharing !== undefined ? { adsetBudgetSharing: opts.input.adsetBudgetSharing } : {}),
     adsets: [
@@ -1982,8 +2473,8 @@ function importedExistingCampaign(
     objective: input.objective ?? "OUTCOME_TRAFFIC",
     initialState: "paused",
     budget: removeUndefined({
-      dailyBudget: dailyBudget(input) ?? 1,
-      lifetimeBudget: lifetimeBudget(input),
+      dailyBudget: campaignDailyBudget(input) ?? 1,
+      lifetimeBudget: campaignLifetimeBudget(input),
     }),
     adsets: [adset],
   };
@@ -1999,11 +2490,11 @@ function newAdsetDraft(
     id: adsetId,
     name: input.adsetName!,
     initialState: "paused",
-    ...(dailyBudget(input) !== undefined || lifetimeBudget(input) !== undefined
+    ...(adsetDailyBudget(input, false) !== undefined || adsetLifetimeBudget(input, false) !== undefined
       ? {
           budget: removeUndefined({
-            dailyBudget: dailyBudget(input),
-            lifetimeBudget: lifetimeBudget(input),
+            dailyBudget: adsetDailyBudget(input, false),
+            lifetimeBudget: adsetLifetimeBudget(input, false),
           }),
         }
       : {}),
@@ -2063,36 +2554,46 @@ function buildCreativeSubmissionOperations(input: {
   preparedStorageKeys: string[];
   storage: LocalDiskStorage;
 }): OperationProposalAction[] {
-  const mediaPath = input.preparedStorageKeys[0]
-    ? input.storage.resolve(input.preparedStorageKeys[0])
-    : null;
-  const creativeArgs = [
-    "ads",
-    "creative",
-    "create",
-    "--name",
-    String(input.creative.name ?? input.creativeId),
-    ...flagIfString("--page-id", input.input.pageId),
-    ...(mediaPath && input.input.mediaType !== "video" ? ["--image", mediaPath] : []),
-    ...(mediaPath && input.input.mediaType === "video" ? ["--video", mediaPath] : []),
-    ...flagIfString("--body", input.input.body ?? input.input.primaryText ?? input.input.prompt),
-    ...flagIfString("--title", input.input.title ?? input.input.headline),
-    ...flagIfString("--link-url", input.input.linkUrl),
-    ...flagIfString("--description", input.input.description),
-    ...flagIfString("--call-to-action", input.input.callToAction ? cliValue(input.input.callToAction) : undefined),
-    ...flagIfString("--instagram-actor-id", input.input.instagramActorId),
-    ...flagIfString("--instagram-app-link", input.input.instagramAppLink),
-    ...repeatFlags("--titles", input.input.titles),
-    ...repeatFlags("--bodies", input.input.bodies),
-    ...repeatFlags("--descriptions", input.input.descriptions),
-    ...repeatFlags("--call-to-actions", input.input.callToActions?.map((v) => v ? cliValue(v) : "")),
-  ];
-
   const operations: OperationProposalAction[] = [
     {
-      resource: "creative",
-      verb: "create",
-      args: creativeArgs,
+      kind: "creative.create",
+      ref: operationRef("creative", input.creativeId),
+      payload: removeUndefined({
+        creativeId: input.creativeId,
+        name: String(input.creative.name ?? input.creativeId),
+        pageId: input.input.pageId,
+        storageKey: input.preparedStorageKeys[0],
+        mediaType: input.input.mediaType ?? "image",
+        body: input.input.body ?? input.input.primaryText ?? input.input.prompt,
+        primaryText: input.input.primaryText ?? input.input.prompt,
+        title: input.input.title ?? input.input.headline,
+        headline: input.input.headline,
+        linkUrl: input.input.linkUrl,
+        description: input.input.description,
+        callToAction: input.input.callToAction,
+        instagramUserId: input.input.instagramUserId ?? input.input.instagramActorId,
+        instagramActorId: input.input.instagramActorId,
+        instagramAppLink: input.input.instagramAppLink,
+        titles: input.input.titles,
+        bodies: input.input.bodies,
+        descriptions: input.input.descriptions,
+        callToActions: input.input.callToActions,
+        objectStorySpec: input.input.objectStorySpec,
+        assetFeedSpec: input.input.assetFeedSpec,
+        degreesOfFreedomSpec: input.input.degreesOfFreedomSpec,
+        urlTags: input.input.urlTags,
+        imageCrops: input.input.imageCrops,
+        platformCustomizations: input.input.platformCustomizations,
+        videoId: input.input.videoId,
+        thumbnailId: input.input.thumbnailId,
+        templateUrlSpec: input.input.templateUrlSpec,
+        productSetId: input.input.productSetId,
+        destinationSetId: input.input.destinationSetId,
+        authorizationCategory: input.input.authorizationCategory,
+        adDisclaimerSpec: input.input.adDisclaimerSpec,
+        brandedContentSponsorPageId: input.input.brandedContentSponsorPageId,
+        graphPayload: input.input.creativeGraphPayload,
+      }),
       entity: {
         nodeType: "creative",
         nodeKey: input.creativeId,
@@ -2105,23 +2606,27 @@ function buildCreativeSubmissionOperations(input: {
   let campaignRef = input.input.campaignId ?? input.placement.campaignId;
   if (input.placement.createdCampaign) {
     operations.push({
-      resource: "campaign",
-      verb: "create",
-      args: [
-        "ads",
-        "campaign",
-        "create",
-        "--name",
-        input.input.campaignName ?? input.placement.campaignId,
-        "--objective",
-        cliValue(input.input.objective ?? "OUTCOME_TRAFFIC"),
-        "--status",
-        "paused",
-        ...budgetFlagsForOperations(input.input, input.accountCurrency),
-        ...(input.input.adsetBudgetSharing !== undefined
-          ? [input.input.adsetBudgetSharing ? "--adset-budget-sharing" : "--no-adset-budget-sharing"]
-          : []),
-      ],
+      kind: "campaign.create",
+      ref: operationRef("campaign", input.placement.campaignId),
+      payload: removeUndefined({
+        campaignId: input.placement.campaignId,
+        name: input.input.campaignName ?? input.placement.campaignId,
+        objective: input.input.objective,
+        status: "PAUSED",
+        specialAdCategoryCountry: input.input.specialAdCategoryCountry,
+        dailyBudget: campaignDailyBudget(input.input),
+        lifetimeBudget: campaignLifetimeBudget(input.input),
+        adsetBudgetSharing: input.input.adsetBudgetSharing,
+        bidStrategy: input.input.campaignBidStrategy,
+        spendCap: input.input.campaignSpendCap,
+        startTime: input.input.campaignStartTime,
+        stopTime: input.input.campaignStopTime,
+        isAdsetBudgetSharingEnabled: input.input.isAdsetBudgetSharingEnabled,
+        pacingType: input.input.campaignPacingType,
+        smartPromotionType: input.input.smartPromotionType,
+        promotedObject: input.input.campaignPromotedObject,
+        graphPayload: input.input.campaignGraphPayload,
+      }),
       entity: {
         nodeType: "campaign",
         nodeKey: input.placement.campaignId,
@@ -2136,31 +2641,43 @@ function buildCreativeSubmissionOperations(input: {
   let adsetRef = input.input.adsetId ?? input.placement.adsetId;
   if (input.placement.createdAdset) {
     operations.push({
-      resource: "adset",
-      verb: "create",
-      args: [
-        "ads",
-        "adset",
-        "create",
+      kind: "adset.create",
+      ref: operationRef("adset", input.placement.adsetId),
+      dependsOn: input.placement.createdCampaign ? [operationRef("campaign", input.placement.campaignId)] : undefined,
+      payload: removeUndefined({
+        adsetId: input.placement.adsetId,
         campaignRef,
-        "--name",
-        input.input.adsetName ?? input.placement.adsetId,
-        "--status",
-        "paused",
-        ...flagIfString("--optimization-goal", input.input.optimizationGoal ? cliValue(input.input.optimizationGoal) : undefined),
-        ...flagIfString("--billing-event", input.input.billingEvent ? cliValue(input.input.billingEvent) : undefined),
-        ...budgetFlagsForOperations(input.input, input.accountCurrency),
-        ...(input.input.bidAmount !== undefined
-          ? ["--bid-amount", amountToMinorUnitsForOperations(input.input.bidAmount, input.accountCurrency)]
-          : []),
-        ...flagIfString("--start-time", input.input.startTime),
-        ...flagIfString("--end-time", input.input.endTime),
-        ...((input.input.countries ?? []).length > 0
-          ? ["--targeting-countries", (input.input.countries ?? []).join(",")]
-          : []),
-        ...flagIfString("--pixel-id", input.input.pixelId),
-        ...flagIfString("--custom-event-type", input.input.customEventType ? cliValue(input.input.customEventType) : undefined),
-      ],
+        name: input.input.adsetName ?? input.placement.adsetId,
+        status: "PAUSED",
+        optimizationGoal: input.input.optimizationGoal,
+        optimizationSubEvent: input.input.optimizationSubEvent,
+        billingEvent: input.input.billingEvent,
+        bidStrategy: input.input.adsetBidStrategy,
+        dailyBudget: adsetDailyBudget(input.input, input.placement.createdCampaign),
+        lifetimeBudget: adsetLifetimeBudget(input.input, input.placement.createdCampaign),
+        bidAmount: input.input.bidAmount,
+        bidConstraints: input.input.bidConstraints,
+        startTime: input.input.startTime,
+        endTime: input.input.endTime,
+        targeting: buildSubmissionTargeting(input.input),
+        pixelId: input.input.pixelId,
+        customEventType: input.input.customEventType,
+        attributionSpec: input.input.attributionSpec,
+        destinationType: input.input.destinationType,
+        frequencyControlSpecs: input.input.frequencyControlSpecs,
+        adsetSchedule: input.input.adsetSchedule,
+        pacingType: input.input.adsetPacingType,
+        dailySpendCap: input.input.dailySpendCap,
+        lifetimeSpendCap: input.input.lifetimeSpendCap,
+        dailyMinSpendTarget: input.input.dailyMinSpendTarget,
+        lifetimeMinSpendTarget: input.input.lifetimeMinSpendTarget,
+        isDynamicCreative: input.input.isDynamicCreative,
+        assetFeedId: input.input.assetFeedId,
+        dsaBeneficiary: input.input.dsaBeneficiary,
+        dsaPayor: input.input.dsaPayor,
+        regionalRegulatedCategories: input.input.regionalRegulatedCategories,
+        graphPayload: input.input.adsetGraphPayload,
+      }),
       entity: {
         nodeType: "adset",
         nodeKey: input.placement.adsetId,
@@ -2175,22 +2692,30 @@ function buildCreativeSubmissionOperations(input: {
   }
 
   operations.push({
-    resource: "ad",
-    verb: "create",
-    args: [
-      "ads",
-      "ad",
-      "create",
-      adsetRef,
-      "--name",
-      input.input.adName ?? input.input.creativeName ?? input.adId,
-      "--creative-id",
+    kind: "ad.create",
+    ref: operationRef("ad", input.adId),
+    dependsOn: [
       operationRef("creative", input.creativeId),
-      "--status",
-      "paused",
-      ...flagIfString("--pixel-id", input.input.adPixelId),
-      ...(input.input.trackingSpecs ? ["--tracking-specs", JSON.stringify(input.input.trackingSpecs)] : []),
+      ...(input.placement.createdAdset ? [operationRef("adset", input.placement.adsetId)] : []),
     ],
+    payload: removeUndefined({
+      adId: input.adId,
+      adsetRef,
+      name: input.input.adName ?? input.input.creativeName ?? input.adId,
+      creativeRef: operationRef("creative", input.creativeId),
+      status: "PAUSED",
+      pixelId: input.input.adPixelId,
+      conversionSpecs: input.input.conversionSpecs,
+      conversionDomain: input.input.conversionDomain,
+      creativeAssetGroupsSpec: input.input.creativeAssetGroupsSpec,
+      engagementAudience: input.input.engagementAudience,
+      priority: input.input.priority,
+      displaySequence: input.input.displaySequence,
+      adScheduleStartTime: input.input.adScheduleStartTime,
+      adScheduleEndTime: input.input.adScheduleEndTime,
+      trackingSpecs: sanitizeAdCreateTrackingSpecs(input.input.trackingSpecs),
+      graphPayload: sanitizeAdCreateGraphPayload(input.input.adGraphPayload),
+    }),
     entity: {
       nodeType: "ad",
       nodeKey: input.adId,
@@ -2203,6 +2728,37 @@ function buildCreativeSubmissionOperations(input: {
   });
 
   return operations;
+}
+
+function buildSubmissionTargeting(input: CreativeSubmissionInput): Record<string, unknown> | undefined {
+  const targeting = removeUndefined({
+    ...(input.targeting ?? {}),
+    geo_locations:
+      input.geoLocations ??
+      input.targeting?.geo_locations ??
+      ((input.countries && input.countries.length > 0) ? { countries: input.countries } : undefined),
+    excluded_geo_locations: input.excludedGeoLocations,
+    age_min: input.ageMin,
+    age_max: input.ageMax,
+    publisher_platforms: input.publisherPlatforms,
+    facebook_positions: input.facebookPositions,
+    instagram_positions: input.instagramPositions,
+    messenger_positions: input.messengerPositions,
+    audience_network_positions: input.audienceNetworkPositions,
+    device_platforms: input.devicePlatforms,
+    user_device: input.userDevice,
+    user_os: input.userOs,
+    genders: input.genders,
+    locales: input.locales,
+    custom_audiences: input.customAudiences,
+    excluded_custom_audiences: input.excludedCustomAudiences,
+    flexible_spec: input.flexibleSpec,
+    exclusions: input.exclusions,
+    behaviors: input.behaviors,
+    life_events: input.lifeEvents,
+    targeting_automation: input.targetingAutomation,
+  });
+  return Object.keys(targeting).length > 0 ? targeting : undefined;
 }
 
 function operationRef(nodeType: string, nodeKey: string): string {
@@ -2493,6 +3049,44 @@ function lifetimeBudget(input: CreativeSubmissionInput): number | undefined {
   return input.lifetimeBudget;
 }
 
+function campaignDailyBudget(input: CreativeSubmissionInput): number | undefined {
+  return input.campaignDailyBudget ?? input.dailyBudget;
+}
+
+function campaignLifetimeBudget(input: CreativeSubmissionInput): number | undefined {
+  return input.campaignLifetimeBudget ?? input.lifetimeBudget;
+}
+
+function adsetDailyBudget(input: CreativeSubmissionInput, createdCampaign: boolean): number | undefined {
+  return input.adsetDailyBudget ?? (!createdCampaign ? input.dailyBudget : undefined);
+}
+
+function adsetLifetimeBudget(input: CreativeSubmissionInput, createdCampaign: boolean): number | undefined {
+  return input.adsetLifetimeBudget ?? (!createdCampaign ? input.lifetimeBudget : undefined);
+}
+
+function hasAnySubmissionBudget(input: CreativeSubmissionInput): boolean {
+  return (
+    campaignDailyBudget(input) !== undefined ||
+    campaignLifetimeBudget(input) !== undefined ||
+    input.adsetDailyBudget !== undefined ||
+    input.adsetLifetimeBudget !== undefined ||
+    graphPayloadHasBudget(input.campaignGraphPayload) ||
+    graphPayloadHasBudget(input.adsetGraphPayload)
+  );
+}
+
+function graphPayloadHasBudget(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    value.daily_budget !== undefined ||
+    value.lifetime_budget !== undefined ||
+    value.spend_cap !== undefined ||
+    value.daily_spend_cap !== undefined ||
+    value.lifetime_spend_cap !== undefined
+  );
+}
+
 function bidAmount(input: CreativeSubmissionInput): number | undefined {
   return input.bidAmount;
 }
@@ -2521,6 +3115,21 @@ function readStringArray(value: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+function readIntegerArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.flatMap((item) => {
+    const n = readInteger(item);
+    return n === null ? [] : [n];
+  });
+  return out.length > 0 ? out : undefined;
+}
+
+function readRecordArray(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter(isRecord);
+  return out.length > 0 ? out : undefined;
+}
+
 function readPositiveInteger(value: unknown): number | null {
   const n = readInteger(value);
   return n !== null && n > 0 ? n : null;
@@ -2545,6 +3154,15 @@ function readCountries(value: unknown): string[] | undefined {
 function readMediaType(value: unknown): CreativeSubmissionInput["mediaType"] | null {
   const v = readString(value);
   if (v === "image" || v === "video" || v === "carousel" || v === "text") return v;
+  return null;
+}
+
+function readPlacementMode(value: unknown): CreativeSubmissionPlacementMode | null {
+  const raw = readString(value)?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (!raw) return null;
+  if (raw === "existing_adset" || raw === "existing_ad_set") return "existing_adset";
+  if (raw === "new_adset" || raw === "new_ad_set") return "new_adset";
+  if (raw === "new_campaign") return "new_campaign";
   return null;
 }
 
@@ -2604,16 +3222,7 @@ function readCallToAction(value: unknown): CreativeSubmissionInput["callToAction
 }
 
 function readObjective(value: unknown): CreativeSubmissionInput["objective"] | null {
-  const v = readString(value)?.toUpperCase();
-  if (
-    v === "OUTCOME_AWARENESS" ||
-    v === "OUTCOME_TRAFFIC" ||
-    v === "OUTCOME_ENGAGEMENT" ||
-    v === "OUTCOME_LEADS" ||
-    v === "OUTCOME_APP_PROMOTION" ||
-    v === "OUTCOME_SALES"
-  ) return v;
-  return null;
+  return readMetaEnumToken(value);
 }
 
 function readOptimizationGoal(value: unknown): CreativeSubmissionInput["optimizationGoal"] | null {
@@ -2630,62 +3239,7 @@ function readMetaEnumToken(value: unknown): string | null {
   return null;
 }
 
-function detectRequestedUnsupportedFields(args: Record<string, unknown>): string[] | undefined {
-  const labels: Array<[string, string]> = [
-    ["targeting", "詳細ターゲティング"],
-    ["geoLocations", "地域半径・都市指定"],
-    ["geo_locations", "地域半径・都市指定"],
-    ["excludedGeoLocations", "除外地域"],
-    ["excluded_geo_locations", "除外地域"],
-    ["publisherPlatforms", "配信面"],
-    ["publisher_platforms", "配信面"],
-    ["facebookPositions", "Facebook配置"],
-    ["facebook_positions", "Facebook配置"],
-    ["instagramPositions", "Instagram配置"],
-    ["instagram_positions", "Instagram配置"],
-    ["messengerPositions", "Messenger配置"],
-    ["messenger_positions", "Messenger配置"],
-    ["audienceNetworkPositions", "Audience Network配置"],
-    ["audience_network_positions", "Audience Network配置"],
-    ["devicePlatforms", "デバイス指定"],
-    ["device_platforms", "デバイス指定"],
-    ["userDevice", "端末指定"],
-    ["user_device", "端末指定"],
-    ["userOs", "OS指定"],
-    ["user_os", "OS指定"],
-    ["genders", "性別指定"],
-    ["locales", "言語指定"],
-    ["customAudiences", "カスタムオーディエンス"],
-    ["custom_audiences", "カスタムオーディエンス"],
-    ["excludedCustomAudiences", "除外カスタムオーディエンス"],
-    ["excluded_custom_audiences", "除外カスタムオーディエンス"],
-    ["flexibleSpec", "詳細ターゲティング条件"],
-    ["flexible_spec", "詳細ターゲティング条件"],
-    ["exclusions", "除外詳細ターゲティング"],
-    ["behaviors", "行動ターゲティング"],
-    ["lifeEvents", "ライフイベント"],
-    ["life_events", "ライフイベント"],
-    ["advantageAudience", "Advantage audience"],
-    ["advantage_audience", "Advantage audience"],
-    ["targetingAutomation", "Advantage audience"],
-    ["targeting_automation", "Advantage audience"],
-  ];
-  const out: string[] = [];
-  for (const [key, label] of labels) {
-    if (hasNonEmptyValue(args[key])) out.push(label);
-  }
-  return out.length > 0 ? Array.from(new Set(out)) : undefined;
-}
-
-function hasNonEmptyValue(value: unknown): boolean {
-  if (value === undefined || value === null) return false;
-  if (typeof value === "string") return value.trim().length > 0;
-  if (Array.isArray(value)) return value.length > 0;
-  if (isRecord(value)) return Object.keys(value).length > 0;
-  return true;
-}
-
-function joinCliValues(values: Set<string>): string {
+function joinMetaValues(values: Set<string>): string {
   return Array.from(values).sort().join(" / ");
 }
 

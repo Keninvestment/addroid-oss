@@ -69,6 +69,59 @@ test("createCreativeSubmissionProposal writes creative/ad draft through GitOps P
   }
 });
 
+test("createCreativeSubmissionProposal drops ad create tracking specs without an object", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-tracking-specs-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "cli-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        accountKey: "primary",
+        creativeName: "tracking-specs",
+        adName: "Tracking Specs Ad",
+        headline: "Tracking Specs",
+        primaryText: "Try the new offer today.",
+        campaignId: "cmp_existing",
+        adsetId: "as_existing",
+        mediaType: "text",
+        trackingSpecs: [
+          { "action.type": ["visit_instagram_profile"] },
+          { "action.type": ["instagram_direct_message_reply"], page: ["281900655012835"] },
+          { "action.type": ["post_engagement"], post: ["old_post_id"], "post.wall": ["281900655012835"] },
+        ],
+        adGraphPayload: {
+          tracking_specs: [
+            { "action.type": ["visit_instagram_profile"] },
+            { "action.type": ["link_click"], object: ["281900655012835"] },
+          ],
+        },
+      },
+    });
+
+    const operation = operationJsonFromDiff(github.created[0]!.files[0]!.diff);
+    const ad = operation.actions.find((action) => action.kind === "ad.create");
+    assert.deepEqual(ad?.payload.trackingSpecs, [
+      { "action.type": ["instagram_direct_message_reply"], page: ["281900655012835"] },
+    ]);
+    assert.deepEqual(ad?.payload.graphPayload?.tracking_specs, [
+      { "action.type": ["link_click"], object: ["281900655012835"] },
+    ]);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
 test("createCreativeSubmissionProposal can create a new adset under an existing campaign", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-adset-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
@@ -110,19 +163,103 @@ test("createCreativeSubmissionProposal can create a new adset under an existing 
     assert.equal(result.prNumber, 42);
     assert.equal(result.planOk, true);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /"nodeKey": "summer-jp"/);
-    assert.match(pr.files[0]!.diff, /"Summer JP"/);
-    assert.match(pr.files[0]!.diff, /"--optimization-goal"/);
-    assert.match(pr.files[0]!.diff, /"link_clicks"/);
-    assert.match(pr.files[0]!.diff, /"--billing-event"/);
-    assert.match(pr.files[0]!.diff, /"impressions"/);
-    assert.match(pr.files[0]!.diff, /"--bid-amount"/);
-    assert.match(pr.files[0]!.diff, /"3"/);
+    assert.match(pr.files[0]!.diff, /"nodeKey": "summer-jp-\d{4}-\d{2}-\d{2}_addroid"/);
+    assert.match(pr.files[0]!.diff, /"Summer JP \d{4}-\d{2}-\d{2}_addroid"/);
+    assert.match(pr.files[0]!.diff, /"kind": "adset\.create"/);
+    assert.match(pr.files[0]!.diff, /"optimizationGoal": "LINK_CLICKS"/);
+    assert.match(pr.files[0]!.diff, /"billingEvent": "IMPRESSIONS"/);
+    assert.match(pr.files[0]!.diff, /"bidAmount": 3/);
     assert.match(pr.files[0]!.diff, /"pixel_123"/);
     assert.match(pr.files[0]!.diff, /"page_123"/);
     assert.match(pr.files[0]!.diff, /"https:\/\/example.com\/summer"/);
-    assert.match(pr.files[0]!.diff, /"shop_now"/);
+    assert.match(pr.files[0]!.diff, /"callToAction": "SHOP_NOW"/);
     assert.match(pr.files[0]!.diff, /\{\{creative:summer-sale\}\}/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal appends addroid date suffix unless names are explicit", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-name-suffix-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const autoGithub = new FakeGithubAdapter();
+    await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: autoGithub as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: normalizeCreativeSubmissionInput({
+        accountKey: "primary",
+        placementMode: "new_campaign",
+        creativeName: "auto-name-creative",
+        headline: "Auto Name",
+        primaryText: "Auto name submission.",
+        pageId: "page_123",
+        linkUrl: "https://example.com/auto",
+        callToAction: "LEARN_MORE",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        dailyBudget: 500,
+        mediaType: "text",
+      }),
+    });
+    const auto = operationJsonFromDiff(autoGithub.created[0]!.files[0]!.diff);
+    const autoCampaign = auto.actions.find((action) => action.kind === "campaign.create");
+    const autoAdset = auto.actions.find((action) => action.kind === "adset.create");
+    const autoAd = auto.actions.find((action) => action.kind === "ad.create");
+    assert.match(String(autoCampaign?.payload.name), /\d{4}-\d{2}-\d{2}_addroid$/);
+    assert.match(String(autoAdset?.payload.name), /\d{4}-\d{2}-\d{2}_addroid$/);
+    assert.match(String(autoAd?.payload.name), /\d{4}-\d{2}-\d{2}_addroid$/);
+
+    const explicitGithub = new FakeGithubAdapter();
+    await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: explicitGithub as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: normalizeCreativeSubmissionInput({
+        accountKey: "primary",
+        placementMode: "new_campaign",
+        campaignName: "Exact Campaign",
+        campaignNameExplicit: true,
+        adsetName: "Exact Adset",
+        adsetNameExplicit: true,
+        adName: "Exact Ad",
+        adNameExplicit: true,
+        creativeName: "explicit-name-creative",
+        headline: "Exact Name",
+        primaryText: "Explicit name submission.",
+        pageId: "page_123",
+        linkUrl: "https://example.com/exact",
+        callToAction: "LEARN_MORE",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "IMPRESSIONS",
+        dailyBudget: 500,
+        mediaType: "text",
+      }),
+    });
+    const explicit = operationJsonFromDiff(explicitGithub.created[0]!.files[0]!.diff);
+    const explicitCampaign = explicit.actions.find((action) => action.kind === "campaign.create");
+    const explicitAdset = explicit.actions.find((action) => action.kind === "adset.create");
+    const explicitAd = explicit.actions.find((action) => action.kind === "ad.create");
+    assert.equal(explicitCampaign?.payload.name, "Exact Campaign");
+    assert.equal(explicitAdset?.payload.name, "Exact Adset");
+    assert.equal(explicitAd?.payload.name, "Exact Ad");
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -247,12 +384,85 @@ test("createCreativeSubmissionProposal adopts an existing Meta campaign and crea
     const pr = github.created[0]!;
     assert.match(pr.files[0]!.diff, /120228334025190756/);
     assert.match(pr.files[0]!.diff, /新規広告セット/);
-    assert.match(pr.files[0]!.diff, /link_clicks/);
-    assert.match(pr.files[0]!.diff, /impressions/);
-    assert.match(pr.files[0]!.diff, /"--daily-budget"/);
-    assert.match(pr.files[0]!.diff, /"500"/);
+    assert.match(pr.files[0]!.diff, /"optimizationGoal": "LINK_CLICKS"/);
+    assert.match(pr.files[0]!.diff, /"billingEvent": "IMPRESSIONS"/);
+    assert.match(pr.files[0]!.diff, /"dailyBudget": 500/);
     assert.match(pr.files[0]!.diff, /\{\{creative:new-set-profile\}\}/);
   } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal treats resolver ids as inheritance only for new_campaign placement", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-new-campaign-intent-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  const restoreFetch = installMetaGraphReadMock({
+    cmp_existing_from_resolver: {
+      id: "cmp_existing_from_resolver",
+      objective: "OUTCOME_TRAFFIC",
+      buying_type: "AUCTION",
+      daily_budget: "200",
+    },
+    as_existing_from_resolver: {
+      id: "as_existing_from_resolver",
+      optimization_goal: "PROFILE_VISIT",
+      billing_event: "IMPRESSIONS",
+      destination_type: "INSTAGRAM_PROFILE",
+      targeting: { age_min: 20, geo_locations: { countries: ["JP"] } },
+      promoted_object: { page_id: "281900655012835" },
+    },
+  });
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+        ADDROID_META_OAUTH_MOCK: "1",
+      },
+      input: {
+        accountKey: "primary",
+        placementMode: "new_campaign",
+        campaignId: "cmp_existing_from_resolver",
+        adsetId: "as_existing_from_resolver",
+        campaignName: "2026-05-21 CP 新規",
+        adsetName: "2026-05-21 ADS 新規",
+        creativeName: "new-campaign-creative",
+        adName: "New Campaign Ad",
+        headline: "New Campaign",
+        primaryText: "既存オン配信と同様の設定で新規キャンペーンへ入稿",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        instagramActorId: "17841465387326763",
+        linkUrl: "http://instagram.com/shishasin2022kumamoto",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
+        objective: "OUTCOME_TRAFFIC",
+        optimizationGoal: "PROFILE_VISIT",
+        billingEvent: "IMPRESSIONS",
+        dailyBudget: 200,
+        targeting: { geo_locations: { countries: ["JP"] }, age_min: 20 },
+        mediaType: "text",
+      },
+    });
+
+    assert.equal(result.planOk, true);
+    assert.match(result.planSummary, /actions=4/);
+    const diff = github.created[0]!.files[0]!.diff;
+    assert.match(diff, /"kind": "campaign\.create"/);
+    assert.match(diff, /"kind": "adset\.create"/);
+    assert.match(diff, /"kind": "ad\.create"/);
+    assert.doesNotMatch(diff, /"adsetRef": "as_existing_from_resolver"/);
+    assert.match(diff, /"adsetRef": "\{\{adset:/);
+    assert.doesNotMatch(diff, /"campaignRef": "cmp_existing_from_resolver"/);
+  } finally {
+    restoreFetch();
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
@@ -300,15 +510,15 @@ test("createCreativeSubmissionProposal targets existing Meta campaign/adset with
     const pr = github.created[0]!;
     assert.match(pr.files[0]!.diff, /120228334025180756/);
     assert.match(pr.files[0]!.diff, /\{\{creative:profile-link\}\}/);
-    assert.match(pr.files[0]!.diff, /"view_instagram_profile"/);
-    assert.match(pr.files[0]!.diff, /"--instagram-actor-id"/);
+    assert.match(pr.files[0]!.diff, /"callToAction": "VIEW_INSTAGRAM_PROFILE"/);
+    assert.match(pr.files[0]!.diff, /"instagramActorId": "17841465387326763"/);
     assert.match(pr.files[0]!.diff, /"17841465387326763"/);
-    assert.match(pr.files[0]!.diff, /"--instagram-app-link"/);
+    assert.match(pr.files[0]!.diff, /"instagramAppLink":/);
     assert.match(pr.files[0]!.diff, /"instagram:\/\/user\?username=shishasin2022kumamoto&userid=65414107577"/);
-    assert.doesNotMatch(pr.files[0]!.diff, /--instagram-user-id/);
+    assert.match(pr.files[0]!.diff, /"instagramUserId": "17841465387326763"/);
     assert.doesNotMatch(pr.files[0]!.diff, /custom-event-type/);
-    assert.doesNotMatch(pr.files[0]!.diff, /optimization-goal/);
-    assert.doesNotMatch(pr.files[0]!.diff, /billing-event/);
+    assert.doesNotMatch(pr.files[0]!.diff, /optimizationGoal/);
+    assert.doesNotMatch(pr.files[0]!.diff, /billingEvent/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -425,6 +635,7 @@ test("normalizeCreativePromotionBatchInput drops null optional values", () => {
     creativeId: "4356ead2-8f2e-4cb9-a0f2-cfb0055c8666",
     campaignId: "120228334025190756",
     adsetId: "120228334025180756",
+    inheritFromAdId: "120228334025200756",
     instagramActorId: "65414107577",
     customEventType: null,
     callToAction: null,
@@ -433,6 +644,7 @@ test("normalizeCreativePromotionBatchInput drops null optional values", () => {
   });
 
   assert.equal(input.instagramActorId, "65414107577");
+  assert.equal(input.inheritFromAdId, "120228334025200756");
   assert.equal(input.customEventType, undefined);
   assert.equal(input.callToAction, undefined);
   assert.equal(input.objective, undefined);
@@ -526,6 +738,178 @@ test("createCreativePromotionProposal allows reusing a creative already attached
     assert.equal(parameters.promotedToSubmissionPrHistory?.[0]?.prNumber, 10);
     assert.equal(parameters.promotedToSubmissionPrHistory?.[1]?.prNumber, 42);
   } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativePromotionProposal prefers Instagram profile CTA for Instagram profile destinations", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-profile-cta-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  try {
+    writeOpsFixture(rootDir);
+    const prisma = fakePrisma();
+    const creativeApi = prisma.creative as unknown as {
+      findFirst: () => Promise<Record<string, unknown>>;
+      update: () => Promise<{ id: string }>;
+    };
+    creativeApi.findFirst = async () => ({
+      id: "source_cr_profile",
+      accountId: "acct_1",
+      pullRequestId: null,
+      key: "source-profile",
+      displayName: "Profile Creative",
+      mediaType: "text",
+      status: "approved",
+      prompt: "promote profile",
+      parameters: {},
+      storagePath: null,
+      spec: {
+        adText: {
+          headline: "Profile",
+          primaryText: "Visit the profile.",
+          description: "Instagram profile",
+          callToAction: "LEARN_MORE",
+        },
+      },
+      account: { key: "primary", displayName: "Primary" },
+      pullRequest: null,
+    });
+    creativeApi.update = async () => ({ id: "source_cr_profile" });
+    const github = new FakeGithubAdapter();
+    await createCreativePromotionProposal({
+      prisma: prisma as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: {
+        creativeId: "source_cr_profile",
+        campaignId: "cmp_existing",
+        adsetId: "as_existing",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        instagramAppLink: "instagram://user?username=example&userid=123",
+        linkUrl: "https://instagram.com/example",
+      },
+    });
+
+    const operation = operationJsonFromDiff(github.created[0]!.files[0]!.diff);
+    const creative = operation.actions.find((action) => action.kind === "creative.create");
+    assert.equal(creative?.payload.callToAction, "VIEW_INSTAGRAM_PROFILE");
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativePromotionProposal does not inherit ad tracking or conversion specs from source ad", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-source-ad-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  const restoreFetch = installMetaGraphReadMock({
+    cmp_active: {
+      id: "cmp_active",
+      objective: "OUTCOME_TRAFFIC",
+      buying_type: "AUCTION",
+      daily_budget: "200",
+    },
+    as_active: {
+      id: "as_active",
+      optimization_goal: "PROFILE_VISIT",
+      billing_event: "IMPRESSIONS",
+      destination_type: "INSTAGRAM_PROFILE",
+      targeting: { age_min: 20, geo_locations: { countries: ["JP"] } },
+      promoted_object: { page_id: "281900655012835" },
+    },
+    ad_active: {
+      id: "ad_active",
+      tracking_specs: [
+        { "action.type": ["visit_instagram_profile"] },
+        { "action.type": ["post_engagement"], post: ["old_post_id"], "post.wall": ["281900655012835"] },
+      ],
+      conversion_specs: [
+        { "action.type": ["onsite_conversion"], conversion_id: ["7277158392389258", "7776117722449388"] },
+      ],
+    },
+  });
+  try {
+    writeOpsFixture(rootDir);
+    const prisma = fakePrisma();
+    const creativeApi = prisma.creative as unknown as {
+      findFirst: () => Promise<Record<string, unknown>>;
+      update: () => Promise<{ id: string }>;
+    };
+    creativeApi.findFirst = async () => ({
+      id: "source_cr_context_ad",
+      accountId: "acct_1",
+      pullRequestId: null,
+      key: "source-context-ad",
+      displayName: "Context Ad Creative",
+      mediaType: "text",
+      status: "approved",
+      prompt: "promote with source ad context",
+      parameters: {
+        creativeContext: {
+          target: {
+            hierarchy: "ad",
+            nodeKey: "ad_active",
+            creative: {
+              pageId: "281900655012835",
+              linkUrl: "https://instagram.com/example",
+              instagramUserId: "17841465387326763",
+            },
+          },
+        },
+      },
+      storagePath: null,
+      spec: {
+        adText: {
+          headline: "Profile",
+          primaryText: "Visit the profile.",
+          description: "Instagram profile",
+          callToAction: "VIEW_INSTAGRAM_PROFILE",
+        },
+      },
+      account: { key: "primary", displayName: "Primary" },
+      pullRequest: null,
+    });
+    creativeApi.update = async () => ({ id: "source_cr_context_ad" });
+    const github = new FakeGithubAdapter();
+    await createCreativePromotionProposal({
+      prisma: prisma as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+        ADDROID_META_OAUTH_MOCK: "1",
+      },
+      input: {
+        creativeId: "source_cr_context_ad",
+        placementMode: "new_campaign",
+        inheritFromCampaignId: "cmp_active",
+        inheritFromAdsetId: "as_active",
+        campaignName: "Copied Campaign",
+        adsetName: "Copied Adset",
+        objective: "OUTCOME_TRAFFIC",
+        dailyBudget: 200,
+      },
+    });
+
+    const operation = operationJsonFromDiff(github.created[0]!.files[0]!.diff);
+    const ad = operation.actions.find((action) => action.kind === "ad.create");
+    assert.equal(ad?.payload.trackingSpecs, undefined);
+    assert.equal(ad?.payload.conversionSpecs, undefined);
+    assert.equal(ad?.payload.graphPayload?.tracking_specs, undefined);
+    assert.equal(ad?.payload.graphPayload?.conversion_specs, undefined);
+  } finally {
+    restoreFetch();
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
@@ -627,11 +1011,10 @@ test("createCreativeSubmissionProposal lets PR review carry business validation 
           dailyBudget: 0,
           mediaType: "text",
         },
-      });
+    });
     assert.equal(result.planOk, true);
     assert.equal(github.created.length, 1);
-    assert.match(github.created[0]!.files[0]!.diff, /"--daily-budget"/);
-    assert.match(github.created[0]!.files[0]!.diff, /"0"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"dailyBudget": 0/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -707,8 +1090,7 @@ test("createCreativeSubmissionProposal writes account-currency budget to operati
 
     assert.equal(result.planOk, true);
     const pr = github.created[0]!;
-    assert.match(pr.files[0]!.diff, /"--daily-budget"/);
-    assert.match(pr.files[0]!.diff, /"500"/);
+    assert.match(pr.files[0]!.diff, /"dailyBudget": 500/);
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
@@ -1127,47 +1509,254 @@ test("createStandaloneCreativeGeneration sends reference image to provider only 
   }
 });
 
-test("createCreativeSubmissionProposal rejects settings Meta Ads CLI cannot apply", async () => {
+test("createCreativeSubmissionProposal accepts Graph-only targeting and objective settings", async () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-cli-limit-"));
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
   try {
     writeOpsFixture(rootDir);
     const github = new FakeGithubAdapter();
-    await assert.rejects(
-      () =>
-        createCreativeSubmissionProposal({
-          prisma: fakePrisma() as never,
-          githubAdapter: github as unknown as GithubAdapter,
-          workspaceId: "ws_1",
-          actor: "test",
-          source: "cli-chat",
-          env: {
-            ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
-            ADDROID_HOME: homeDir,
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma() as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "cli-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+      },
+      input: normalizeCreativeSubmissionInput({
+        accountKey: "primary",
+        creativeName: "profile-visit",
+        adName: "Profile Visit Ad",
+        headline: "Profile Visit",
+        primaryText: "Try the offer today.",
+        pageId: "page_123",
+        linkUrl: "https://example.com/profile",
+        callToAction: "VIEW_INSTAGRAM_PROFILE",
+        campaignId: "cmp_existing",
+        adsetName: "Profile Visit JP",
+        optimizationGoal: "PROFILE_VISIT",
+        optimizationSubEvent: "NONE",
+        billingEvent: "IMPRESSIONS",
+        adsetBidStrategy: "LOWEST_COST_WITHOUT_CAP",
+        attributionSpec: [{ event_type: "CLICK_THROUGH", window_days: 7 }],
+        destinationType: "INSTAGRAM_PROFILE",
+        creativeGraphPayload: { url_tags: "utm_source=meta&utm_medium=paid" },
+        adGraphPayload: { conversion_domain: "example.com" },
+        ageMin: 20,
+        publisherPlatforms: ["instagram"],
+        countries: ["JP"],
+        mediaType: "text",
+      }),
+    });
+    assert.equal(result.planOk, true);
+    assert.equal(github.created.length, 1);
+    assert.match(github.created[0]!.files[0]!.diff, /"optimizationGoal": "PROFILE_VISIT"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"optimizationSubEvent": "NONE"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"bidStrategy": "LOWEST_COST_WITHOUT_CAP"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"attributionSpec"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"destinationType": "INSTAGRAM_PROFILE"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"graphPayload"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"conversion_domain": "example.com"/);
+    assert.match(github.created[0]!.files[0]!.diff, /"age_min": 20/);
+    assert.match(github.created[0]!.files[0]!.diff, /"publisher_platforms"/);
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal keeps inherited campaign budget off new adset", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-inherit-budget-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  const restoreFetch = installMetaGraphReadMock({
+    cmp_active: {
+      id: "cmp_active",
+      objective: "OUTCOME_TRAFFIC",
+      buying_type: "AUCTION",
+      daily_budget: "200",
+    },
+    as_active: {
+      id: "as_active",
+      optimization_goal: "PROFILE_VISIT",
+      billing_event: "IMPRESSIONS",
+      destination_type: "INSTAGRAM_PROFILE",
+      targeting: { age_min: 20, geo_locations: { countries: ["JP"] } },
+      promoted_object: { page_id: "281900655012835" },
+    },
+    ad_active: {
+      id: "ad_active",
+      tracking_specs: [
+        { "action.type": ["visit_instagram_profile"] },
+        { "action.type": ["instagram_direct_message_reply"], page: ["281900655012835"] },
+        { "action.type": ["post_engagement"], post: ["old_post_id"], "post.wall": ["281900655012835"] },
+      ],
+      conversion_specs: [
+        { "action.type": ["onsite_conversion"], conversion_id: ["7277158392389258", "7776117722449388"] },
+      ],
+    },
+  });
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    const result = await createCreativeSubmissionProposal({
+      prisma: fakePrisma({
+        hierarchyNodes: [
+          {
+            nodeType: "campaign",
+            externalId: "cmp_active",
+            spec: {
+              raw: {
+                objective: "OUTCOME_TRAFFIC",
+                buying_type: "AUCTION",
+                daily_budget: "200",
+              },
+            },
           },
-          input: normalizeCreativeSubmissionInput({
-            accountKey: "primary",
-            creativeName: "profile-visit",
-            adName: "Profile Visit Ad",
-            headline: "Profile Visit",
-            primaryText: "Try the offer today.",
-            pageId: "page_123",
-            linkUrl: "https://example.com/profile",
-            callToAction: "VIEW_INSTAGRAM_PROFILE",
-            campaignId: "cmp_existing",
-            adsetName: "Profile Visit JP",
-            optimizationGoal: "PROFILE_VISIT",
-            billingEvent: "IMPRESSIONS",
-            ageMin: 20,
-            publisherPlatforms: ["instagram"],
-            countries: ["JP"],
-            mediaType: "text",
-          }),
+          {
+            nodeType: "adset",
+            externalId: "as_active",
+            spec: {
+              raw: {
+                optimization_goal: "PROFILE_VISIT",
+                billing_event: "IMPRESSIONS",
+                destination_type: "INSTAGRAM_PROFILE",
+                targeting: { age_min: 20, geo_locations: { countries: ["JP"] } },
+                promoted_object: { page_id: "281900655012835" },
+              },
+            },
+          },
+        ],
+      }) as never,
+      githubAdapter: github as unknown as GithubAdapter,
+      workspaceId: "ws_1",
+      actor: "test",
+      source: "web-chat",
+      env: {
+        ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+        ADDROID_HOME: homeDir,
+        ADDROID_META_OAUTH_MOCK: "1",
+      },
+      input: normalizeCreativeSubmissionInput({
+        accountKey: "primary",
+        placementMode: "new_campaign",
+        inheritFromCampaignId: "cmp_active",
+        inheritFromAdsetId: "as_active",
+        inheritFromAdId: "ad_active",
+        creativeName: "profile-copy",
+        adName: "Profile Copy Ad",
+        headline: "Profile Copy",
+        primaryText: "Visit the Instagram profile.",
+        pageId: "281900655012835",
+        instagramUserId: "17841465387326763",
+        linkUrl: "https://instagram.com/example",
+        callToAction: "LEARN_MORE",
+        campaignName: "Copied Campaign",
+        adsetName: "Copied Adset",
+        objective: "OUTCOME_ENGAGEMENT",
+        optimizationGoal: "LINK_CLICKS",
+        billingEvent: "CLICKS",
+        destinationType: "WEBSITE",
+        dailyBudget: 200,
+        mediaType: "text",
+      }),
+    });
+
+    assert.equal(result.planOk, true);
+    const operation = operationJsonFromDiff(github.created[0]!.files[0]!.diff);
+    const creative = operation.actions.find((action) => action.kind === "creative.create");
+    const campaign = operation.actions.find((action) => action.kind === "campaign.create");
+    const adset = operation.actions.find((action) => action.kind === "adset.create");
+    const ad = operation.actions.find((action) => action.kind === "ad.create");
+    assert.equal(creative?.payload.callToAction, "VIEW_INSTAGRAM_PROFILE");
+    assert.equal(campaign?.payload.objective, "OUTCOME_TRAFFIC");
+    assert.equal(campaign?.payload.graphPayload?.objective, "OUTCOME_TRAFFIC");
+    assert.equal(campaign?.payload.dailyBudget, 200);
+    assert.equal(adset?.payload.dailyBudget, undefined);
+    assert.equal(adset?.payload.optimizationGoal, "PROFILE_VISIT");
+    assert.equal(adset?.payload.billingEvent, "IMPRESSIONS");
+    assert.equal(adset?.payload.destinationType, "INSTAGRAM_PROFILE");
+    assert.equal(adset?.payload.graphPayload?.optimization_goal, "PROFILE_VISIT");
+    assert.equal(adset?.payload.graphPayload?.billing_event, "IMPRESSIONS");
+    assert.deepEqual(adset?.payload.graphPayload?.promoted_object, { page_id: "281900655012835" });
+    assert.equal(ad?.payload.trackingSpecs, undefined);
+    assert.equal(ad?.payload.conversionSpecs, undefined);
+    assert.equal(ad?.payload.graphPayload?.tracking_specs, undefined);
+    assert.equal(ad?.payload.graphPayload?.conversion_specs, undefined);
+  } finally {
+    restoreFetch();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  }
+});
+
+test("createCreativeSubmissionProposal refuses DB-only inheritance for new campaign creation", async () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-inherit-fail-closed-"));
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-creative-home-"));
+  const restoreFetch = installMetaGraphReadMock({});
+  try {
+    writeOpsFixture(rootDir);
+    const github = new FakeGithubAdapter();
+    await assert.rejects(
+      createCreativeSubmissionProposal({
+        prisma: fakePrisma({
+          hierarchyNodes: [
+            {
+              nodeType: "campaign",
+              externalId: "cmp_cache_only",
+              spec: { raw: { objective: "OUTCOME_TRAFFIC", daily_budget: "200" } },
+            },
+            {
+              nodeType: "adset",
+              externalId: "as_cache_only",
+              spec: {
+                raw: {
+                  optimization_goal: "PROFILE_VISIT",
+                  billing_event: "IMPRESSIONS",
+                  destination_type: "INSTAGRAM_PROFILE",
+                  targeting: { age_min: 20, geo_locations: { countries: ["JP"] } },
+                },
+              },
+            },
+          ],
+        }) as never,
+        githubAdapter: github as unknown as GithubAdapter,
+        workspaceId: "ws_1",
+        actor: "test",
+        source: "web-chat",
+        env: {
+          ADDROID_OPS_REPO_LOCAL_DIR: rootDir,
+          ADDROID_HOME: homeDir,
+          ADDROID_META_OAUTH_MOCK: "1",
+        },
+        input: normalizeCreativeSubmissionInput({
+          accountKey: "primary",
+          placementMode: "new_campaign",
+          inheritFromCampaignId: "cmp_cache_only",
+          inheritFromAdsetId: "as_cache_only",
+          campaignName: "Copied Campaign",
+          adsetName: "Copied Adset",
+          creativeName: "cache-only-copy",
+          adName: "Cache Only Copy Ad",
+          headline: "Profile Copy",
+          primaryText: "Visit the Instagram profile.",
+          pageId: "281900655012835",
+          instagramUserId: "17841465387326763",
+          linkUrl: "https://instagram.com/example",
+          callToAction: "VIEW_INSTAGRAM_PROFILE",
+          objective: "OUTCOME_TRAFFIC",
+          optimizationGoal: "PROFILE_VISIT",
+          billingEvent: "IMPRESSIONS",
+          dailyBudget: 200,
+          mediaType: "text",
         }),
-      /Meta Ads CLI で反映できる範囲外/
+      }),
+      /DB キャッシュでは作成しません/
     );
     assert.equal(github.created.length, 0);
   } finally {
+    restoreFetch();
     fs.rmSync(rootDir, { recursive: true, force: true });
     fs.rmSync(homeDir, { recursive: true, force: true });
   }
@@ -1193,6 +1782,17 @@ schedules:
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, content, "utf8");
   }
+}
+
+function operationJsonFromDiff(diff: string): {
+  actions: Array<{ kind: string; payload: Record<string, any> }>;
+} {
+  const json = diff
+    .split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+  return JSON.parse(json);
 }
 
 function snapshotRow(input: {
@@ -1231,7 +1831,9 @@ function snapshotRow(input: {
   };
 }
 
-function fakePrisma() {
+function fakePrisma(options: {
+  hierarchyNodes?: Array<{ nodeType: string; externalId: string; spec: unknown }>;
+} = {}) {
   let aiRunSeq = 0;
   let creativeSeq = 0;
   return {
@@ -1250,7 +1852,31 @@ function fakePrisma() {
     },
     adAccount: {
       async findUnique() {
-        return { id: "acct_1", key: "primary", displayName: "Primary", currency: "JPY", timezoneName: "Asia/Tokyo" };
+        return { id: "acct_1", key: "primary", displayName: "Primary", currency: "JPY", timezoneName: "Asia/Tokyo", metaAccountId: "act_123" };
+      },
+      async findFirst() {
+        return { id: "acct_1", key: "primary", displayName: "Primary", currency: "JPY", timezoneName: "Asia/Tokyo", metaAccountId: "act_123" };
+      },
+    },
+    oAuthToken: {
+      async findFirst() {
+        return {
+          provider: "meta",
+          accountIdentifier: "mock-user",
+          scopes: [],
+          accessTokenCiphertext: "mock-token",
+          refreshTokenCiphertext: null,
+          expiresAt: null,
+          connectedAt: new Date("2026-05-22T00:00:00.000Z"),
+        };
+      },
+    },
+    adsHierarchyNode: {
+      async findFirst(query: { where?: { nodeType?: string; OR?: Array<Record<string, string>> } }) {
+        const nodeType = query.where?.nodeType;
+        const ids = query.where?.OR?.flatMap((item) => Object.values(item)) ?? [];
+        const node = options.hierarchyNodes?.find((item) => item.nodeType === nodeType && ids.includes(item.externalId));
+        return node ? { spec: node.spec } : null;
       },
     },
     githubPullRequest: {
@@ -1283,6 +1909,31 @@ function fakePrisma() {
         return { id: "audit_1" };
       },
     },
+  };
+}
+
+function installMetaGraphReadMock(objects: Record<string, Record<string, unknown>>): () => void {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const rawUrl = typeof input === "string" || input instanceof URL ? String(input) : input.url;
+    const url = new URL(rawUrl);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const id = decodeURIComponent(parts[parts.length - 1] ?? "");
+    if (id === "instagram_accounts") {
+      return {
+        ok: true,
+        json: async () => ({ data: [] }),
+      } as Response;
+    }
+    const body = objects[id];
+    return {
+      ok: Boolean(body),
+      status: body ? 200 : 404,
+      json: async () => body ?? { error: { message: `missing mock graph object ${id}` } },
+    } as Response;
+  }) as typeof fetch;
+  return () => {
+    globalThis.fetch = originalFetch;
   };
 }
 

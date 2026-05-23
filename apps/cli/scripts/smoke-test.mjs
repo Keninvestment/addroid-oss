@@ -11,8 +11,8 @@
 //   - npm install lifecycle が postinstall の non-invasive next-step message まで通る
 //   - bin が `process.execPath` で `dist/index.mjs` を起動できる (tsx 不要)
 //   - `addroid --help` が Usage を 0 で返す
-//   - `addroid doctor` が clean smoke env (DATABASE_URL なし、ENCRYPTION_KEY ダミー、
-//     ADDROID_META_ADS_CLI_MOCK=1) で 9 件の check を出力し 0 か 1 で終わる
+//   - `addroid doctor` が clean smoke env (DATABASE_URL なし、ENCRYPTION_KEY ダミー)
+//     で check を出力し 0 か 1 で終わる
 //
 // 本スクリプトはネットワーク・DB・pg-boss を一切叩かない。
 // CI からは `npm run package:smoke --workspace apps/cli` で呼ばれる。
@@ -174,7 +174,6 @@ try {
   doctorEnv.HOME = homeDir;
   doctorEnv.ADDROID_HOME = homeDir;
   doctorEnv.ENCRYPTION_KEY = ENCRYPTION_KEY_B64;
-  doctorEnv.ADDROID_META_ADS_CLI_MOCK = "1";
 
   const doctorResult = run(binPath, ["doctor"], {
     captureOutput: true,
@@ -193,8 +192,6 @@ try {
   }
   for (const name of [
     "uv",
-    "python3.12",
-    "meta-ads-cli",
     "DATABASE_URL",
     "ENCRYPTION_KEY",
     "config",

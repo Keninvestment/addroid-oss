@@ -337,5 +337,5 @@ function formatSlackAgentReply(
 
 function isSlackVisibleExecution(execution: { display: string; status: string }): boolean {
   if (execution.status !== "ok") return true;
-  return execution.display !== "Meta Ads CLI read-only query";
+  return execution.display !== "Meta Graph read-only query";
 }

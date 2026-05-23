@@ -33,6 +33,7 @@ import type {
   AdsLoader,
   AdsLoaderInput,
   AdsLoadResult,
+  GraphOperationAction,
   MetaCliOperationAction,
 } from "@addroid/queue";
 
@@ -339,7 +340,94 @@ function normalizeOperationManifest(value: unknown): ApplyAction[] {
   if (!accountKey) throw new Error("operation manifest accountKey is required");
   const rawActions = Array.isArray(value.actions) ? value.actions : [];
   if (rawActions.length === 0) throw new Error("operation manifest actions[] is required");
+  if (value.version === 2) {
+    return rawActions.map((raw) => normalizeGraphOperationAction(accountKey, raw));
+  }
   return rawActions.map((raw) => normalizeOperationAction(accountKey, raw));
+}
+
+const GRAPH_OPERATION_KINDS = new Set<GraphOperationAction["kind"]>([
+  "campaign.create",
+  "campaign.update",
+  "campaign.delete",
+  "campaign.status",
+  "adset.create",
+  "adset.update",
+  "adset.delete",
+  "adset.status",
+  "creative.create",
+  "creative.update",
+  "creative.delete",
+  "ad.create",
+  "ad.update",
+  "ad.delete",
+  "ad.status",
+]);
+
+function normalizeGraphOperationAction(accountKey: string, raw: unknown): ApplyAction {
+  if (!isRecord(raw)) throw new Error("operation action must be an object");
+  const kind = readString(raw.kind) as GraphOperationAction["kind"] | null;
+  if (!kind || !GRAPH_OPERATION_KINDS.has(kind)) {
+    throw new Error(`unsupported graph operation kind: ${kind ?? "(missing)"}`);
+  }
+  const payload = isRecord(raw.payload) ? raw.payload : {};
+  const ref = readString(raw.ref) ?? undefined;
+  const dependsOn = Array.isArray(raw.dependsOn)
+    ? raw.dependsOn.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+    : undefined;
+  const entity = isRecord(raw.entity)
+    ? (raw.entity as GraphOperationAction["entity"])
+    : deriveGraphEntity(kind, ref, payload);
+  return {
+    kind,
+    account: accountKey,
+    ...(ref ? { ref } : {}),
+    ...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
+    payload,
+    ...(entity ? { entity } : {}),
+    ...(raw.externalIdRequired === true ? { externalIdRequired: true } : {}),
+  };
+}
+
+function deriveGraphEntity(
+  kind: GraphOperationAction["kind"],
+  ref: string | undefined,
+  payload: Record<string, unknown>
+): GraphOperationAction["entity"] | undefined {
+  const [nodeType, verb] = kind.split(".") as [string, string];
+  if (nodeType !== "campaign" && nodeType !== "adset" && nodeType !== "ad" && nodeType !== "creative") {
+    return undefined;
+  }
+  const nodeKey =
+    readString(payload[`${nodeType}Id`]) ??
+    readString(payload.id) ??
+    (ref ? ref.split(":").slice(1).join(":") : null);
+  if (!nodeKey) return undefined;
+  return {
+    nodeType,
+    nodeKey,
+    displayName: readString(payload.name) ?? undefined,
+    ...(nodeType === "adset"
+      ? {
+          parentNodeType: "campaign",
+          parentNodeKey: readString(payload.campaignRef) ?? readString(payload.campaignId) ?? undefined,
+        }
+      : {}),
+    ...(nodeType === "ad"
+      ? {
+          parentNodeType: "adset",
+          parentNodeKey: readString(payload.adsetRef) ?? readString(payload.adsetId) ?? undefined,
+        }
+      : {}),
+    status: normalizeEntityStatus(readString(payload.status)),
+  };
+}
+
+function normalizeEntityStatus(value: string | null): string | undefined {
+  const v = value?.trim().toLowerCase();
+  if (v === "active" || v === "paused" || v === "archived") return v;
+  if (v === "deleted") return "archived";
+  return undefined;
 }
 
 function normalizeOperationAction(accountKey: string, raw: unknown): ApplyAction {

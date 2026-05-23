@@ -1,4 +1,4 @@
-// AdDroid OSS — Activate 用の Meta CLI executor.
+// AdDroid OSS — Activate 用の Meta Graph API executor.
 //
 // `runActivate` (queue) から呼ばれる ActivateExecutor の本番 / mock 実装。
 // apply-meta-executor.ts と同じパターンで、production は `MetaCliRunner.run` を
@@ -19,6 +19,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import {
+  META_GRAPH_API_VERSION,
   MetaAdapterUnauthenticatedError,
   MetaCliMissingTokenError,
   MetaCliRunner,
@@ -76,6 +77,145 @@ function activateNodeToCliArgs(node: ActivateNodeSnapshot): {
   };
 }
 
+function activateNodeToGraphResource(node: ActivateNodeSnapshot): {
+  resource: "campaigns" | "adsets" | "ads";
+  id: string;
+} | null {
+  if (!node.externalId) return null;
+  const resource =
+    node.nodeType === "campaign"
+      ? "campaigns"
+      : node.nodeType === "adset"
+        ? "adsets"
+        : node.nodeType === "ad"
+          ? "ads"
+          : null;
+  if (!resource) return null;
+  return { resource, id: node.externalId };
+}
+
+class MetaGraphActivateError extends Error {
+  readonly exitClass: MetaCliExitClass;
+  readonly status: number | null;
+  readonly payload: JsonValue;
+
+  constructor(input: {
+    message: string;
+    exitClass: MetaCliExitClass;
+    status?: number | null;
+    payload?: JsonValue;
+  }) {
+    super(input.message);
+    this.name = "MetaGraphActivateError";
+    this.exitClass = input.exitClass;
+    this.status = input.status ?? null;
+    this.payload = input.payload ?? null;
+  }
+}
+
+function graphEndpoint(pathname: string): string {
+  const cleaned = pathname.replace(/^\/+/, "");
+  return `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${cleaned}`;
+}
+
+async function postGraphJson(
+  pathname: string,
+  accessToken: string,
+  body: Record<string, unknown>
+): Promise<{ status: number; json: unknown }> {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "object") form.set(key, JSON.stringify(value));
+    else if (typeof value === "boolean") form.set(key, value ? "true" : "false");
+    else form.set(key, String(value));
+  }
+  const res = await fetch(graphEndpoint(pathname), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form.toString(),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw graphError(res.status, json);
+  return { status: res.status, json };
+}
+
+function graphError(status: number, json: unknown): MetaGraphActivateError {
+  const error =
+    typeof json === "object" &&
+    json !== null &&
+    !Array.isArray(json) &&
+    typeof (json as { error?: unknown }).error === "object" &&
+    (json as { error?: unknown }).error !== null
+      ? ((json as { error: Record<string, unknown> }).error)
+      : null;
+  const code = typeof error?.code === "number" ? error.code : null;
+  const message =
+    typeof error?.message === "string"
+      ? error.message
+      : `Meta Graph API returned HTTP ${status}`;
+  return new MetaGraphActivateError({
+    message,
+    exitClass: classifyGraphError(status, code),
+    status,
+    payload: json as JsonValue,
+  });
+}
+
+function classifyGraphError(status: number, code: number | null): MetaCliExitClass {
+  if (status === 401 || code === 190 || code === 102 || code === 104 || code === 463 || code === 467) {
+    return "auth_error";
+  }
+  if (status === 429 || code === 4 || code === 17 || code === 32 || code === 613) {
+    return "rate_limit_error";
+  }
+  if (status >= 400 && status < 500) return "api_error";
+  return "unknown_error";
+}
+
+function graphActivatePayload(input: {
+  accountKey: string;
+  resource: string;
+  externalId: string;
+  status: MetaCliExitClass;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  requestId: string;
+  stdout?: string;
+  stderr?: string;
+  statusCode?: number | null;
+  response?: JsonValue;
+}): Record<string, JsonValue> {
+  return {
+    accountKey: input.accountKey,
+    binary: "meta-graph-api",
+    sanitizedCommand: "meta-graph-api activate",
+    sanitizedArgs: ["activate", input.resource, input.externalId, "--status", "ACTIVE"],
+    exitCode: input.status === "success" ? 0 : input.statusCode ?? null,
+    signal: null,
+    exitClass: input.status,
+    recommendedAction: recommendActionForExit(input.status) as unknown as JsonValue,
+    durationMs: input.durationMs,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    timedOut: false,
+    stdout: input.stdout ?? "",
+    stderr: input.stderr ?? "",
+    throttleHeaders: null,
+    mode: "graph",
+    resource: input.resource,
+    verb: "activate",
+    externalId: input.externalId,
+    response: input.response ?? null,
+    refType: "ads_hierarchy",
+    refId: input.requestId,
+  };
+}
+
 // ---------------------------------------------------------------------
 // regression fix: canonical pre-spawn payload shape (Activate)
 //
@@ -128,6 +268,172 @@ function prefailedActivatePayloadEnvelope(
     stderr: input.stderr,
     throttleHeaders: null,
   };
+}
+
+// ---------------------------------------------------------------------
+// GraphActivateExecutor
+// ---------------------------------------------------------------------
+
+export interface GraphActivateExecutorOptions {
+  metaAdapter: MetaAdapter;
+}
+
+export class GraphActivateExecutor implements ActivateExecutor {
+  private readonly metaAdapter: MetaAdapter;
+
+  constructor(opts: GraphActivateExecutorOptions) {
+    this.metaAdapter = opts.metaAdapter;
+  }
+
+  async executeActivate(input: ActivateExecuteInput): Promise<ActivateExecuteResult> {
+    const built = activateNodeToGraphResource(input.node);
+    if (!built) {
+      return {
+        status: "skipped",
+        message: `cannot activate: nodeType=${input.node.nodeType} externalId=${input.node.externalId ?? "null"}`,
+        logPayload: {
+          mode: "graph",
+          reason: !input.node.externalId
+            ? "no_external_id"
+            : "unsupported_node_type",
+          nodeType: input.node.nodeType,
+        } satisfies JsonValue,
+      };
+    }
+
+    const startedAt = new Date();
+    let lease;
+    try {
+      lease = await this.metaAdapter.loadAccessTokenPlaintext();
+    } catch (err) {
+      if (
+        err instanceof MetaTokenExpiredError ||
+        err instanceof MetaAdapterUnauthenticatedError
+      ) {
+        const finishedAt = new Date();
+        const detail = err.message;
+        return {
+          status: "auth_error",
+          message: `meta graph ${built.resource} activate aborted before request: ${detail}`,
+          logPayload: graphActivatePayload({
+            accountKey: input.node.accountKey,
+            resource: built.resource,
+            externalId: built.id,
+            status: "auth_error",
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: finishedAt.getTime() - startedAt.getTime(),
+            requestId: input.node.hierarchyId,
+            stderr: detail,
+          }) satisfies JsonValue,
+          notify: {
+            auditAction: "oauth.meta.reauth_required",
+            detail,
+          },
+        };
+      }
+      throw err;
+    }
+    if (!lease) {
+      const finishedAt = new Date();
+      const detail = "Meta token is missing; reconnect Meta.";
+      return {
+        status: "auth_error",
+        message: `meta graph ${built.resource} activate aborted before request: ${detail}`,
+        logPayload: graphActivatePayload({
+          accountKey: input.node.accountKey,
+          resource: built.resource,
+          externalId: built.id,
+          status: "auth_error",
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          durationMs: finishedAt.getTime() - startedAt.getTime(),
+          requestId: input.node.hierarchyId,
+          stderr: detail,
+        }) satisfies JsonValue,
+        notify: {
+          auditAction: "oauth.meta.reauth_required",
+          detail,
+        },
+      };
+    }
+
+    try {
+      const response = await postGraphJson(built.id, lease.accessToken, {
+        status: "ACTIVE",
+      });
+      const finishedAt = new Date();
+      return {
+        status: "success",
+        message: `meta graph ${built.resource} activate succeeded (${built.id})`,
+        logPayload: graphActivatePayload({
+          accountKey: input.node.accountKey,
+          resource: built.resource,
+          externalId: built.id,
+          status: "success",
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          durationMs: finishedAt.getTime() - startedAt.getTime(),
+          requestId: input.node.hierarchyId,
+          stdout: JSON.stringify(response.json ?? {}),
+          statusCode: response.status,
+          response: response.json as JsonValue,
+        }) satisfies JsonValue,
+        appliedRemotely: true,
+        externalId: built.id,
+      };
+    } catch (err) {
+      if (err instanceof MetaGraphActivateError) {
+        const finishedAt = new Date();
+        const status: ActivateExecuteResult["status"] =
+          err.exitClass === "auth_error"
+            ? "auth_error"
+            : err.exitClass === "rate_limit_error"
+              ? "rate_limit_error"
+              : err.exitClass === "api_error"
+                ? "api_error"
+                : "unknown_error";
+        const out: ActivateExecuteResult = {
+          status,
+          message: `meta graph ${built.resource} activate failed: ${err.message}`,
+          logPayload: graphActivatePayload({
+            accountKey: input.node.accountKey,
+            resource: built.resource,
+            externalId: built.id,
+            status: err.exitClass,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: finishedAt.getTime() - startedAt.getTime(),
+            requestId: input.node.hierarchyId,
+            stderr: err.message,
+            statusCode: err.status,
+            response: err.payload,
+          }) satisfies JsonValue,
+        };
+        const rec = recommendActionForExit(err.exitClass);
+        if (rec.kind === "retry_with_backoff") {
+          out.retry = {
+            delayMs: Math.min(
+              rec.maxBackoffMs,
+              rec.initialBackoffMs * Math.pow(2, input.attempt)
+            ),
+            maxAttempts: rec.maxAttempts,
+          };
+        } else if (
+          rec.kind === "notify_reauth" ||
+          rec.kind === "notify_api_error" ||
+          rec.kind === "fail_fast_notify"
+        ) {
+          out.notify = {
+            auditAction: rec.auditAction,
+            detail: rec.reason,
+          };
+        }
+        return out;
+      }
+      throw err;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -396,7 +702,7 @@ export interface ResolveActivateExecutorOptions {
 
 export interface ActivateExecutorSelection {
   executor: ActivateExecutor;
-  mode: "cli" | "mock";
+  mode: "graph" | "cli" | "mock";
   reason: string;
   /**
    * regression fix: cli モードでの version verification 結果。`ok=false` でも
@@ -431,6 +737,17 @@ export async function resolveActivateExecutor(
   opts: ResolveActivateExecutorOptions
 ): Promise<ActivateExecutorSelection> {
   const env = opts.env ?? process.env;
+  const useInternalCliBackend =
+    env.ADDROID_META_ADS_CLI_MOCK !== "1" &&
+    (opts.versionResolver !== undefined || opts.spawnImpl !== undefined);
+  if (env.ADDROID_META_ADS_CLI_MOCK !== "1" && !useInternalCliBackend) {
+    return {
+      executor: new GraphActivateExecutor({ metaAdapter: opts.metaAdapter }),
+      mode: "graph",
+      reason:
+        "using Meta Graph API as canonical activate route; Meta Ads CLI is optional diagnostic/future backend only",
+    };
+  }
   const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
   if (!binaryPath) {
     return {

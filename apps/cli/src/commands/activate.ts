@@ -203,7 +203,7 @@ function printHuman(
     message: string;
     finalAuditAction: string;
   },
-  mode: "cli" | "mock",
+  mode: "graph" | "cli" | "mock",
   reason: string
 ): void {
   const lines: string[] = [];

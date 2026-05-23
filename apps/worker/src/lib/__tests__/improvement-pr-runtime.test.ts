@@ -24,14 +24,14 @@ function writeFixture(files: Record<string, string>): {
 function manifest(amount: string): string {
   return JSON.stringify(
     {
-      version: 1,
+      version: 2,
       accountKey: "primary",
       intent: "set_budget",
       actions: [
         {
-          resource: "adsets",
-          verb: "update",
-          args: ["ads", "adset", "update", "as_123", "--daily-budget", amount],
+          kind: "adset.update",
+          payload: { adsetId: "as_123", dailyBudget: Number(amount) },
+          entity: { nodeType: "adset", nodeKey: "as_123" },
         },
       ],
     },
@@ -105,7 +105,7 @@ test("plan validator surfaces validation errors when applied operation is invali
         {
           path: "operations/primary/broken.json",
           action: "create",
-          diff: diff(JSON.stringify({ version: 1, accountKey: "primary", actions: [] })),
+          diff: diff(JSON.stringify({ version: 2, accountKey: "primary", actions: [] })),
         },
       ],
     });

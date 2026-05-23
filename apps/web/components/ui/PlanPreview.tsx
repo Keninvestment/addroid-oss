@@ -43,7 +43,7 @@ export function PlanPreview({
     return (
       <EmptyState
         title="plan に該当する変更はありません。"
-        description="operations/*.json に apply 対象の Meta CLI 操作がありません。"
+        description="operations/*.json に apply 対象の Graph API 操作がありません。"
       />
     );
   }

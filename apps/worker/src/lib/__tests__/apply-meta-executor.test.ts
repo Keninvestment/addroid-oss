@@ -35,6 +35,7 @@ type CreateCampaignAction = ApplyAction & { kind: "create_campaign" };
 import {
   CliApplyExecutor,
   FailClosedApplyExecutor,
+  GraphApplyExecutor,
   MockApplyExecutor,
   extractExternalIdFromCliStdout,
   resolveApplyExecutor,
@@ -938,6 +939,32 @@ class FakeMetaAdapter implements MetaAdapter {
   }
 }
 
+async function makeDiagnosticCliExecutor(opts: {
+  lease?: MetaAccessTokenLease | null;
+  versionResolver?: () => Promise<string>;
+} = {}): Promise<CliApplyExecutor> {
+  const runner = new MetaCliRunner({
+    binaryPath: "/usr/local/bin/meta-ads-cli",
+    spawnImpl: makeSpawn([], []),
+    loadTokenForAccount: async () =>
+      opts.lease === null ? null : { accessToken: opts.lease?.accessToken ?? TOKEN },
+    baseEnv: { PATH: "/usr/bin" } as NodeJS.ProcessEnv,
+    minVersion: "0.5.0",
+    versionResolver: opts.versionResolver ?? (async () => "meta-ads-cli 0.5.0"),
+    requireVerifiedVersion: true,
+  });
+  await runner.verifyVersion();
+  return new CliApplyExecutor({
+    runner,
+    metaAdapter: new FakeMetaAdapter(opts.lease ?? {
+      accessToken: TOKEN,
+      scopes: ["ads_management"],
+      expiresAt: null,
+      accountIdentifier: "primary",
+    }),
+  });
+}
+
 // regression fix: CLI 未設定で `ADDROID_META_ADS_CLI_MOCK=1` を明示的に立てた
 // 「local-test simulation」要求のときだけ MockApplyExecutor を選ぶ。
 
@@ -956,10 +983,7 @@ test("resolveApplyExecutor: ADDROID_META_CLI_BIN unset + ADDROID_META_ADS_CLI_MO
   assert.match(sel.reason, /ADDROID_META_ADS_CLI_MOCK=1/);
 });
 
-// regression fix: CLI 未設定 + MOCK フラグ無し は既定で fail-closed。
-// MockApplyExecutor を暗黙に選んで `apply.executed` を audit に積んではならない。
-
-test("resolveApplyExecutor: ADDROID_META_CLI_BIN unset and no MOCK flag → FailClosedApplyExecutor that returns unknown_error", async () => {
+test("resolveApplyExecutor: ADDROID_META_CLI_BIN unset and no MOCK flag → GraphApplyExecutor", async () => {
   const sel = await resolveApplyExecutor({
     env: {} as NodeJS.ProcessEnv,
     metaAdapter: new FakeMetaAdapter({
@@ -969,31 +993,88 @@ test("resolveApplyExecutor: ADDROID_META_CLI_BIN unset and no MOCK flag → Fail
       accountIdentifier: "primary",
     }),
   });
-  assert.equal(sel.mode, "fail_closed");
-  assert.ok(sel.executor instanceof FailClosedApplyExecutor);
+  assert.equal(sel.mode, "graph");
+  assert.ok(sel.executor instanceof GraphApplyExecutor);
   assert.ok(!(sel.executor instanceof MockApplyExecutor));
-  assert.match(sel.reason, /fail closed/);
+  assert.match(sel.reason, /Graph API/);
   assert.equal(sel.versionVerification, undefined);
+});
 
-  const result = await sel.executor.executeAction({
-    action: createCampaignAction(),
-    context: ctx(),
-    attempt: 0,
-  });
-  assert.equal(result.status, "unknown_error");
-  assert.equal(result.retry, undefined);
-  assert.ok(result.notify, "fail-closed apply must surface a notify hint for the orchestrator");
-  assert.equal(result.notify!.auditAction, "meta.cli_unknown_error");
-  const payload = result.logPayload as Record<string, unknown>;
-  assert.equal(payload.mode, "fail_closed");
-  assert.equal(payload.stage, "resolve_executor");
-  assert.equal(payload.reason, "cli_not_configured");
-  assert.equal(payload.accountKey, "primary");
-  assert.equal(payload.resource, "campaigns");
-  assert.equal(payload.verb, "create");
-  // sanity: sanitized command does not include any token (there is none here)
-  assert.equal(typeof payload.sanitizedCommand, "string");
-  assert.ok(!(payload.sanitizedCommand as string).includes(TOKEN));
+test("GraphApplyExecutor passes graphPayload through, resolves nested refs, and drops protected fields", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; body: URLSearchParams }> = [];
+  try {
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, body: new URLSearchParams(String(init?.body ?? "")) });
+      if (url.includes("/campaigns")) return Response.json({ id: "cmp_meta_1" });
+      if (url.includes("/adsets")) return Response.json({ id: "as_meta_1" });
+      return Response.json({ error: { code: 100, message: "unexpected" } }, { status: 400 });
+    }) as typeof fetch;
+
+    const executor = new GraphApplyExecutor({
+      metaAdapter: META_ADAPTER,
+      resolveAdAccountId: async () => "act_123",
+      resolveAdAccountCurrency: async () => "JPY",
+    });
+
+    const campaign = await executor.executeAction({
+      action: {
+        kind: "campaign.create",
+        account: "primary",
+        ref: "campaign:spring",
+        payload: {
+          name: "Spring",
+          objective: "OUTCOME_TRAFFIC",
+          status: "PAUSED",
+        },
+      },
+      context: ctx(),
+      attempt: 0,
+    });
+    assert.equal(campaign.status, "success");
+    const campaignBody = calls.find((call) => call.url.includes("/campaigns"))!.body;
+    assert.equal(campaignBody.get("objective"), "OUTCOME_TRAFFIC");
+    assert.equal(campaignBody.has("buying_type"), false);
+    assert.equal(campaignBody.has("special_ad_categories"), false);
+
+    const adset = await executor.executeAction({
+      action: {
+        kind: "adset.create",
+        account: "primary",
+        payload: {
+          campaignRef: "{{campaign:spring}}",
+          name: "Raw Ad Set",
+          status: "PAUSED",
+          optimizationGoal: "LINK_CLICKS",
+          graphPayload: {
+            campaign_id: "{{campaign:spring}}",
+            bid_strategy: "LOWEST_COST_WITHOUT_CAP",
+            attribution_spec: [{ event_type: "CLICK_THROUGH", window_days: 7 }],
+            access_token: "do-not-send",
+            id: "read-only",
+            nested: { access_token: "nested-secret", ok: true },
+          },
+        },
+      },
+      context: ctx(),
+      attempt: 0,
+    });
+    assert.equal(adset.status, "success");
+
+    const adsetBody = calls.find((call) => call.url.includes("/adsets"))!.body;
+    assert.equal(adsetBody.get("campaign_id"), "cmp_meta_1");
+    assert.equal(adsetBody.get("bid_strategy"), "LOWEST_COST_WITHOUT_CAP");
+    assert.equal(adsetBody.has("targeting"), false);
+    assert.equal(adsetBody.has("access_token"), false);
+    assert.equal(adsetBody.has("id"), false);
+    assert.deepEqual(JSON.parse(adsetBody.get("nested") ?? "{}"), { ok: true });
+    assert.deepEqual(JSON.parse(adsetBody.get("attribution_spec") ?? "[]"), [
+      { event_type: "CLICK_THROUGH", window_days: 7 },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("FailClosedApplyExecutor: skipped for unsupported action kinds (matches Cli/Mock contract)", async () => {
@@ -1017,22 +1098,16 @@ test("FailClosedApplyExecutor: skipped for unsupported action kinds (matches Cli
   assert.equal(payload.actionKind, "create_experiment");
 });
 
-// regression fix: CLI が configured (ADDROID_META_CLI_BIN 設定) のときは
-// token が無くても/期限切れでも MockApplyExecutor に倒さず、CliApplyExecutor を選び、
-// 個別の executeAction 呼び出しが auth_error + reauth notify を返すこと。
-
-test("resolveApplyExecutor: CLI bin set but no Meta token → CliApplyExecutor that fails auth_error per invocation", async () => {
+test("resolveApplyExecutor: CLI bin set but no Meta token → GraphApplyExecutor that fails auth_error per invocation", async () => {
   const sel = await resolveApplyExecutor({
     env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
     metaAdapter: new FakeMetaAdapter(null),
-    // regression fix: CLI バージョン検証を素通しできるよう、test seam で
-    // `--version` の出力を直接返す。
     versionResolver: async () => "meta-ads-cli 0.5.0",
   });
-  assert.equal(sel.mode, "cli");
-  assert.ok(sel.executor instanceof CliApplyExecutor);
-  assert.match(sel.reason, /token loaded per invocation/);
-  assert.equal(sel.versionVerification?.ok, true);
+  assert.equal(sel.mode, "graph");
+  assert.ok(sel.executor instanceof GraphApplyExecutor);
+  assert.match(sel.reason, /Graph API/);
+  assert.equal(sel.versionVerification, undefined);
 
   const result = await sel.executor.executeAction({
     action: createCampaignAction(),
@@ -1043,15 +1118,14 @@ test("resolveApplyExecutor: CLI bin set but no Meta token → CliApplyExecutor t
   assert.ok(result.notify, "missing-token must surface a reauth notify hint");
   assert.equal(result.notify!.auditAction, "oauth.meta.reauth_required");
   const payload = result.logPayload as Record<string, unknown>;
-  assert.equal(payload.stage, "load_token");
-  assert.equal(payload.errorName, "MetaCliMissingTokenError");
   assert.equal(payload.accountKey, "primary");
+  assert.equal(payload.mode, "graph");
   // sanity: token wasn't somehow leaked into the sanitized command (there is no token here)
   assert.equal(typeof payload.sanitizedCommand, "string");
   assert.ok(!(payload.sanitizedCommand as string).includes(TOKEN));
 });
 
-test("resolveApplyExecutor: CLI bin + Meta token present → CliApplyExecutor", async () => {
+test("resolveApplyExecutor: CLI bin + Meta token present → GraphApplyExecutor", async () => {
   const sel = await resolveApplyExecutor({
     env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
     metaAdapter: new FakeMetaAdapter({
@@ -1062,13 +1136,13 @@ test("resolveApplyExecutor: CLI bin + Meta token present → CliApplyExecutor", 
     }),
     versionResolver: async () => "meta-ads-cli 0.5.0",
   });
-  assert.equal(sel.mode, "cli");
-  assert.ok(sel.executor instanceof CliApplyExecutor);
-  assert.match(sel.reason, /meta-ads-cli/);
-  assert.equal(sel.versionVerification?.ok, true);
+  assert.equal(sel.mode, "graph");
+  assert.ok(sel.executor instanceof GraphApplyExecutor);
+  assert.match(sel.reason, /Graph API/);
+  assert.equal(sel.versionVerification, undefined);
 });
 
-test("resolveApplyExecutor: adapter throws MetaTokenExpiredError → CliApplyExecutor that returns auth_error with reauth notify", async () => {
+test("resolveApplyExecutor: adapter throws MetaTokenExpiredError → GraphApplyExecutor that returns auth_error with reauth notify", async () => {
   const throwingAdapter: MetaAdapter = {
     async beginOAuth(): Promise<MetaBeginOAuthResult> {
       throw new Error("not used");
@@ -1094,8 +1168,8 @@ test("resolveApplyExecutor: adapter throws MetaTokenExpiredError → CliApplyExe
     metaAdapter: throwingAdapter,
     versionResolver: async () => "meta-ads-cli 0.5.0",
   });
-  assert.equal(sel.mode, "cli");
-  assert.ok(sel.executor instanceof CliApplyExecutor);
+  assert.equal(sel.mode, "graph");
+  assert.ok(sel.executor instanceof GraphApplyExecutor);
 
   const result = await sel.executor.executeAction({
     action: createCampaignAction(),
@@ -1106,7 +1180,7 @@ test("resolveApplyExecutor: adapter throws MetaTokenExpiredError → CliApplyExe
   assert.ok(result.notify, "expired-token must surface a reauth notify hint");
   assert.equal(result.notify!.auditAction, "oauth.meta.reauth_required");
   const payload = result.logPayload as Record<string, unknown>;
-  assert.equal(payload.errorName, "MetaTokenExpiredError");
+  assert.match(String(payload.stderr ?? ""), /expired|Meta token/i);
 });
 
 test("resolveApplyExecutor: token loader is invoked per executeAction call (reauth picks up next time)", async () => {
@@ -1143,7 +1217,7 @@ test("resolveApplyExecutor: token loader is invoked per executeAction call (reau
     metaAdapter: adapter,
     versionResolver: async () => "meta-ads-cli 0.5.0",
   });
-  assert.equal(sel.mode, "cli");
+  assert.equal(sel.mode, "graph");
 
   // resolveApplyExecutor itself MUST NOT pre-load the token (lease is per-invocation).
   assert.equal(callCount, 0, "resolveApplyExecutor must not pre-load the token at startup");
@@ -1158,7 +1232,7 @@ test("resolveApplyExecutor: token loader is invoked per executeAction call (reau
   });
   assert.equal(first.status, "auth_error");
   const firstPayload = first.logPayload as Record<string, unknown>;
-  assert.equal(firstPayload.errorName, "MetaTokenExpiredError");
+  assert.match(String(firstPayload.stderr ?? ""), /expired|Meta token/i);
   assert.equal(callCount, 1, "first executeAction must trigger a token load");
 
   // Operator reauths — adapter now reports no token at all (still pre-spawn failure
@@ -1173,21 +1247,13 @@ test("resolveApplyExecutor: token loader is invoked per executeAction call (reau
   });
   assert.equal(second.status, "auth_error");
   const secondPayload = second.logPayload as Record<string, unknown>;
-  assert.equal(
-    secondPayload.errorName,
-    "MetaCliMissingTokenError",
-    "second call must reflect the latest adapter state, not the captured first-call lease"
-  );
+  assert.match(String(secondPayload.stderr ?? ""), /no Meta access token found/);
   assert.equal(callCount, 2, "token loader must be re-invoked on each executeAction call");
 });
 
-// regression fix: CLI binary/version 未検証で apply を起動しようとした場合、
-// runner は spawn を拒否し、executor は unknown_error + meta.cli_unknown_error
-// notify を返す (mock fallback で実 Meta API 操作を装わない)。
-
-test("resolveApplyExecutor: verifyVersion fails (CLI unrunnable) → executeAction returns unknown_error with cli_unknown_error notify and never spawns", async () => {
+test("resolveApplyExecutor: CLI versionResolver is ignored by canonical Graph route", async () => {
   const spawnLog: SpawnLog[] = [];
-  // CLI バイナリは取得できる前提だが、bump が --version 失敗を返すケース。
+  let called = false;
   const sel = await resolveApplyExecutor({
     env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
     metaAdapter: new FakeMetaAdapter({
@@ -1198,36 +1264,18 @@ test("resolveApplyExecutor: verifyVersion fails (CLI unrunnable) → executeActi
     }),
     spawnImpl: makeSpawn([], spawnLog),
     versionResolver: async () => {
+      called = true;
       throw new Error("ENOENT: meta-ads-cli not installed");
     },
   });
-  assert.equal(sel.mode, "cli");
-  assert.ok(sel.executor instanceof CliApplyExecutor);
-  assert.equal(sel.versionVerification?.ok, false);
-  assert.match(sel.reason, /failed version verification/);
-
-  const result = await sel.executor.executeAction({
-    action: createCampaignAction(),
-    context: ctx(),
-    attempt: 0,
-  });
-  assert.equal(result.status, "unknown_error");
-  assert.equal(result.retry, undefined);
-  assert.ok(result.notify, "version-unverified must surface a notify hint");
-  assert.equal(result.notify!.auditAction, "meta.cli_unknown_error");
-
-  const payload = result.logPayload as Record<string, unknown>;
-  assert.equal(payload.stage, "verify_version");
-  assert.equal(payload.errorName, "MetaCliVersionUnverifiedError");
-  const verification = payload.verification as Record<string, unknown> | null;
-  assert.ok(verification);
-  assert.equal(verification!.ok, false);
-
-  // sanity: spawn は1度も呼ばれていない (mock fallback ではなく fail-closed)。
+  assert.equal(sel.mode, "graph");
+  assert.ok(sel.executor instanceof GraphApplyExecutor);
+  assert.equal(sel.versionVerification, undefined);
+  assert.equal(called, false);
   assert.equal(spawnLog.length, 0);
 });
 
-test("resolveApplyExecutor: verifyVersion returns older-than-min version → executeAction unknown_error", async () => {
+test("resolveApplyExecutor: older CLI versions do not affect canonical Graph selection", async () => {
   const spawnLog: SpawnLog[] = [];
   const sel = await resolveApplyExecutor({
     env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
@@ -1240,19 +1288,9 @@ test("resolveApplyExecutor: verifyVersion returns older-than-min version → exe
     spawnImpl: makeSpawn([], spawnLog),
     versionResolver: async () => "meta-ads-cli 0.4.9",
   });
-  assert.equal(sel.mode, "cli");
-  assert.equal(sel.versionVerification?.ok, false);
-  assert.equal(sel.versionVerification?.actualVersion, "0.4.9");
-  assert.match(sel.versionVerification?.detail ?? "", /older than required/);
-
-  const result = await sel.executor.executeAction({
-    action: createCampaignAction(),
-    context: ctx(),
-    attempt: 0,
-  });
-  assert.equal(result.status, "unknown_error");
-  assert.equal(result.notify!.auditAction, "meta.cli_unknown_error");
-  assert.equal(spawnLog.length, 0, "must not spawn CLI when version is older than minVersion");
+  assert.equal(sel.mode, "graph");
+  assert.equal(sel.versionVerification, undefined);
+  assert.equal(spawnLog.length, 0, "must not spawn CLI while Graph is the canonical route");
 });
 
 // ---------------------------------------------------------------------
@@ -1344,19 +1382,12 @@ test("FailClosedApplyExecutor: pre-spawn unknown_error payload includes canonica
 });
 
 test("CliApplyExecutor.executeAction: version-unverified pre-spawn unknown_error payload includes canonical CLI evidence fields", async () => {
-  const sel = await resolveApplyExecutor({
-    env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
-    metaAdapter: new FakeMetaAdapter({
-      accessToken: TOKEN,
-      scopes: ["ads_management"],
-      expiresAt: null,
-      accountIdentifier: "primary",
-    }),
+  const executor = await makeDiagnosticCliExecutor({
     versionResolver: async () => {
       throw new Error("ENOENT: meta-ads-cli not installed");
     },
   });
-  const result = await sel.executor.executeAction({
+  const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
     attempt: 0,
@@ -1375,12 +1406,8 @@ test("CliApplyExecutor.executeAction: version-unverified pre-spawn unknown_error
 });
 
 test("CliApplyExecutor.executeAction: pre-spawn auth_error (missing token) payload includes canonical CLI evidence fields", async () => {
-  const sel = await resolveApplyExecutor({
-    env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
-    metaAdapter: new FakeMetaAdapter(null),
-    versionResolver: async () => "meta-ads-cli 0.5.0",
-  });
-  const result = await sel.executor.executeAction({
+  const executor = await makeDiagnosticCliExecutor({ lease: null });
+  const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(),
     attempt: 0,
@@ -1489,19 +1516,12 @@ test("MockApplyExecutor: success payload omits approvalRecordId when context doe
 });
 
 test("CliApplyExecutor.executeAction: pre-spawn version-unverified payload propagates context.prNumber and approvalRecordId", async () => {
-  const sel = await resolveApplyExecutor({
-    env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
-    metaAdapter: new FakeMetaAdapter({
-      accessToken: TOKEN,
-      scopes: ["ads_management"],
-      expiresAt: null,
-      accountIdentifier: "primary",
-    }),
+  const executor = await makeDiagnosticCliExecutor({
     versionResolver: async () => {
       throw new Error("ENOENT: meta-ads-cli not installed");
     },
   });
-  const result = await sel.executor.executeAction({
+  const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx({ approvalRecordId: "appr-vuv-001" }),
     attempt: 0,
@@ -1521,12 +1541,8 @@ test("CliApplyExecutor.executeAction: pre-spawn version-unverified payload propa
 });
 
 test("CliApplyExecutor.executeAction: pre-spawn auth_error payload propagates context.prNumber and approvalRecordId", async () => {
-  const sel = await resolveApplyExecutor({
-    env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
-    metaAdapter: new FakeMetaAdapter(null),
-    versionResolver: async () => "meta-ads-cli 0.5.0",
-  });
-  const result = await sel.executor.executeAction({
+  const executor = await makeDiagnosticCliExecutor({ lease: null });
+  const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx({ approvalRecordId: "appr-auth-001" }),
     attempt: 0,
@@ -1546,12 +1562,8 @@ test("CliApplyExecutor.executeAction: pre-spawn auth_error payload propagates co
 });
 
 test("CliApplyExecutor.executeAction: pre-spawn auth_error omits approvalRecordId when context does not carry it", async () => {
-  const sel = await resolveApplyExecutor({
-    env: { ADDROID_META_CLI_BIN: "/usr/local/bin/meta-ads-cli" } as NodeJS.ProcessEnv,
-    metaAdapter: new FakeMetaAdapter(null),
-    versionResolver: async () => "meta-ads-cli 0.5.0",
-  });
-  const result = await sel.executor.executeAction({
+  const executor = await makeDiagnosticCliExecutor({ lease: null });
+  const result = await executor.executeAction({
     action: createCampaignAction(),
     context: ctx(), // approvalRecordId 未設定
     attempt: 0,

@@ -131,6 +131,8 @@ export {
   type ExecuteActionInput,
   type ExecuteActionResult,
   type ExecuteActionStatus,
+  type GraphOperationAction,
+  type GraphOperationKind,
   type MetaCliOperationAction,
   type MetaActionExecutor,
   type RunExecuteApplyOptions,

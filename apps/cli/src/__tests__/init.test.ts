@@ -418,7 +418,7 @@ test("init --non-interactive --yes は .env と workspace 名を初期化する"
       const envRaw = fs.readFileSync(envFile, "utf8");
       assert.match(envRaw, /DATABASE_URL=postgresql:\/\/addroid@localhost:5432\/addroid/);
       assert.match(envRaw, /ENCRYPTION_KEY=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=/);
-      assert.match(envRaw, /ADDROID_META_ADS_CLI_MOCK=1/);
+      assert.doesNotMatch(envRaw, /ADDROID_META_ADS_CLI_MOCK=/);
 
       const configRaw = fs.readFileSync(path.join(home, "config.yaml"), "utf8");
       assert.match(configRaw, /slug: client-ads/);
@@ -904,7 +904,7 @@ test("init --non-interactive --yes は --install-deps なしでは依存イン�
   });
 });
 
-test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ads CLI をセットアップする", async () => {
+test("init --non-interactive --install-deps は Meta Ads CLI を標準セットアップしない", async () => {
   await withTempHome(async (home) => {
     const envFile = path.join(home, ".env");
     const calls: string[] = [];
@@ -939,15 +939,6 @@ test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ad
             if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
               return { status: 0, stdout: "", stderr: "" };
             }
-            if (line.includes("python install 3.13")) {
-              return { status: 0, stdout: "", stderr: "" };
-            }
-            if (line.includes("tool install meta-ads --python 3.13")) {
-              return { status: 0, stdout: "", stderr: "" };
-            }
-            if (line.includes("command -v meta")) {
-              return { status: 0, stdout: path.join(home, ".local/bin/meta"), stderr: "" };
-            }
             return { status: 1, stdout: "", stderr: "not found" };
           },
         }
@@ -955,13 +946,10 @@ test("init --non-interactive --install-deps は --yes なしでも不足 Meta Ad
     );
 
     assert.equal(code, 0, out.stdout + out.stderr);
-    const installCall = calls.find((c) => c.includes("tool install meta-ads --python 3.13"));
-    assert.ok(installCall);
-    assert.match(installCall, /uv_bin/);
-    assert.equal(installCall.includes('|| "$HOME/.local/bin/uv"'), false);
     assert.match(out.stdout, /Dependency setup:/);
-    assert.match(out.stdout, /Meta Ads CLI\s+: ok - Meta Ads CLI installed/);
-    assert.match(fs.readFileSync(envFile, "utf8"), /ADDROID_META_CLI_BIN=.*\/\.local\/bin\/meta/);
+    assert.ok(!calls.some((c) => c.includes("tool install meta-ads")));
+    assert.doesNotMatch(out.stdout, /Meta Ads CLI/);
+    assert.doesNotMatch(fs.readFileSync(envFile, "utf8"), /ADDROID_META_CLI_BIN=/);
   });
 });
 

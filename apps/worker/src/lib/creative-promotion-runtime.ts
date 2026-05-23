@@ -93,6 +93,11 @@ export async function createCreativePromotionProposal(opts: {
     promotionInput.adName ?? `${sourceCreative.displayName ?? sourceCreative.key} ad`,
     promotionAttemptId
   );
+  const callToAction =
+    promotionInput.callToAction ??
+    inferInstagramProfileCallToAction(promotionInput) ??
+    adText?.callToAction ??
+    undefined;
   const submissionInput: CreativeSubmissionInput = {
     ...promotionInput,
     accountKey: promotionInput.accountKey ?? sourceCreative.account.key,
@@ -102,7 +107,7 @@ export async function createCreativePromotionProposal(opts: {
     headline: promotionInput.headline ?? adText?.headline ?? undefined,
     primaryText: promotionInput.primaryText ?? adText?.primaryText ?? undefined,
     description: promotionInput.description ?? adText?.description ?? undefined,
-    callToAction: promotionInput.callToAction ?? adText?.callToAction ?? undefined,
+    callToAction,
     mediaType: uploadedMedia.length > 0 ? mediaTypeFromStoredCreative(sourceCreative.mediaType) : "text",
     uploadedMedia: uploadedMedia.length > 0 ? uploadedMedia : undefined,
     rationale:
@@ -217,11 +222,21 @@ export function normalizeCreativePromotionInput(args: Record<string, unknown>): 
   return {
     creativeId,
     accountKey: readString(args.accountKey) ?? undefined,
+    placementMode: readPlacementMode(args.placementMode ?? args.placement_mode ?? args.submissionPlacementMode) ?? undefined,
+    inheritFromCampaignId: readString(
+      args.inheritFromCampaignId ?? args.inherit_from_campaign_id ?? args.sourceCampaignId ?? args.source_campaign_id
+    ) ?? undefined,
+    inheritFromAdsetId: readString(
+      args.inheritFromAdsetId ?? args.inherit_from_adset_id ?? args.sourceAdsetId ?? args.source_adset_id
+    ) ?? undefined,
+    inheritFromAdId: readString(
+      args.inheritFromAdId ?? args.inherit_from_ad_id ?? args.sourceAdId ?? args.source_ad_id ?? args.existingAdId ?? args.existing_ad_id
+    ) ?? undefined,
     creativeName: readString(args.creativeName) ?? undefined,
     adName: readString(args.adName) ?? undefined,
     headline: readString(args.headline) ?? undefined,
     primaryText: readString(args.primaryText) ?? undefined,
-    callToAction: (readString(args.callToAction) ?? undefined) as CreativePromotionInput["callToAction"] | undefined,
+    callToAction: readMetaEnumToken(args.callToAction) ?? undefined,
     pageId: readString(args.pageId) ?? undefined,
     title: readString(args.title) ?? undefined,
     body: readString(args.body) ?? undefined,
@@ -237,20 +252,61 @@ export function normalizeCreativePromotionInput(args: Record<string, unknown>): 
     objective: (readString(args.objective) ?? undefined) as CreativePromotionInput["objective"] | undefined,
     dailyBudget: readNumber(args.dailyBudget) ?? undefined,
     lifetimeBudget: readNumber(args.lifetimeBudget) ?? undefined,
-    adsetBudgetSharing: readBoolean(args.adsetBudgetSharing) ?? undefined,
-    optimizationGoal: readString(args.optimizationGoal) ?? undefined,
-    billingEvent: readString(args.billingEvent) ?? undefined,
+    campaignDailyBudget: readNumber(args.campaignDailyBudget ?? args.campaign_daily_budget) ?? undefined,
+    campaignLifetimeBudget: readNumber(args.campaignLifetimeBudget ?? args.campaign_lifetime_budget) ?? undefined,
+    adsetDailyBudget: readNumber(args.adsetDailyBudget ?? args.adset_daily_budget) ?? undefined,
+    adsetLifetimeBudget: readNumber(args.adsetLifetimeBudget ?? args.adset_lifetime_budget) ?? undefined,
+    adsetBudgetSharing: readBoolean(args.adsetBudgetSharing ?? args.adset_budget_sharing) ?? undefined,
+    campaignBidStrategy: readMetaEnumToken(args.campaignBidStrategy ?? args.campaign_bid_strategy) ?? undefined,
+    campaignSpendCap: readNumber(args.campaignSpendCap ?? args.campaign_spend_cap) ?? undefined,
+    campaignStartTime: readString(args.campaignStartTime ?? args.campaign_start_time) ?? undefined,
+    campaignStopTime: readString(args.campaignStopTime ?? args.campaign_stop_time) ?? undefined,
+    specialAdCategoryCountry: readStringArray(args.specialAdCategoryCountry ?? args.special_ad_category_country),
+    isAdsetBudgetSharingEnabled: readBoolean(args.isAdsetBudgetSharingEnabled ?? args.is_adset_budget_sharing_enabled) ?? undefined,
+    campaignPacingType: readStringArray(args.campaignPacingType ?? args.campaign_pacing_type),
+    optimizationGoal: readMetaEnumToken(args.optimizationGoal ?? args.optimization_goal) ?? undefined,
+    optimizationSubEvent: readMetaEnumToken(args.optimizationSubEvent ?? args.optimization_sub_event) ?? undefined,
+    billingEvent: readMetaEnumToken(args.billingEvent ?? args.billing_event) ?? undefined,
+    adsetBidStrategy: readMetaEnumToken(args.adsetBidStrategy ?? args.adset_bid_strategy ?? args.bidStrategy ?? args.bid_strategy) ?? undefined,
     bidAmount: readNumber(args.bidAmount) ?? undefined,
+    bidConstraints: readRecord(args.bidConstraints ?? args.bid_constraints) ?? undefined,
     startTime: readString(args.startTime) ?? undefined,
     endTime: readString(args.endTime) ?? undefined,
+    attributionSpec: readRecordArray(args.attributionSpec ?? args.attribution_spec),
+    destinationType: readMetaEnumToken(args.destinationType ?? args.destination_type) ?? undefined,
+    frequencyControlSpecs: readRecordArray(args.frequencyControlSpecs ?? args.frequency_control_specs),
+    adsetSchedule: readRecordArray(args.adsetSchedule ?? args.adset_schedule),
+    adsetPacingType: readStringArray(args.adsetPacingType ?? args.adset_pacing_type),
+    dailySpendCap: readNumber(args.dailySpendCap ?? args.daily_spend_cap) ?? undefined,
+    lifetimeSpendCap: readNumber(args.lifetimeSpendCap ?? args.lifetime_spend_cap) ?? undefined,
+    dailyMinSpendTarget: readNumber(args.dailyMinSpendTarget ?? args.daily_min_spend_target) ?? undefined,
+    lifetimeMinSpendTarget: readNumber(args.lifetimeMinSpendTarget ?? args.lifetime_min_spend_target) ?? undefined,
+    isDynamicCreative: readBoolean(args.isDynamicCreative ?? args.is_dynamic_creative) ?? undefined,
     pixelId: readString(args.pixelId) ?? undefined,
     customEventType: (readString(args.customEventType) ?? undefined) as CreativePromotionInput["customEventType"] | undefined,
+    objectStorySpec: readRecord(args.objectStorySpec ?? args.object_story_spec) ?? undefined,
+    assetFeedSpec: readRecord(args.assetFeedSpec ?? args.asset_feed_spec) ?? undefined,
+    degreesOfFreedomSpec: readRecord(args.degreesOfFreedomSpec ?? args.degrees_of_freedom_spec) ?? undefined,
+    urlTags: readString(args.urlTags ?? args.url_tags) ?? undefined,
+    platformCustomizations: readRecord(args.platformCustomizations ?? args.platform_customizations) ?? undefined,
+    videoId: readString(args.videoId ?? args.video_id) ?? undefined,
+    productSetId: readString(args.productSetId ?? args.product_set_id) ?? undefined,
+    destinationSetId: readString(args.destinationSetId ?? args.destination_set_id) ?? undefined,
     adPixelId: readString(args.adPixelId) ?? undefined,
-    trackingSpecs: readRecord(args.trackingSpecs) ?? undefined,
+    conversionSpecs: readRecord(args.conversionSpecs ?? args.conversion_specs) ?? readRecordArray(args.conversionSpecs ?? args.conversion_specs) ?? undefined,
+    conversionDomain: readString(args.conversionDomain ?? args.conversion_domain) ?? undefined,
+    creativeAssetGroupsSpec: readRecord(args.creativeAssetGroupsSpec ?? args.creative_asset_groups_spec) ?? undefined,
+    engagementAudience: readBoolean(args.engagementAudience ?? args.engagement_audience) ?? undefined,
+    trackingSpecs: readRecord(args.trackingSpecs ?? args.tracking_specs) ?? readRecordArray(args.trackingSpecs ?? args.tracking_specs) ?? undefined,
     countries: readStringArray(args.countries),
     ageMin: readNumber(args.ageMin) ?? undefined,
     ageMax: readNumber(args.ageMax) ?? undefined,
-    requestedUnsupportedFields: readStringArray(args.requestedUnsupportedFields),
+    targeting: readRecord(args.targeting) ?? undefined,
+    geoLocations: readRecord(args.geoLocations ?? args.geo_locations) ?? undefined,
+    campaignGraphPayload: readRecord(args.campaignGraphPayload ?? args.campaign_graph_payload) ?? undefined,
+    adsetGraphPayload: readRecord(args.adsetGraphPayload ?? args.adset_graph_payload) ?? undefined,
+    creativeGraphPayload: readRecord(args.creativeGraphPayload ?? args.creative_graph_payload) ?? undefined,
+    adGraphPayload: readRecord(args.adGraphPayload ?? args.ad_graph_payload) ?? undefined,
     rationale: readString(args.rationale) ?? undefined,
     urgency: (readString(args.urgency) ?? undefined) as CreativePromotionInput["urgency"] | undefined,
   };
@@ -329,10 +385,16 @@ function promotionDefaultsFromSourceCreative(parameters: unknown): Partial<Creat
   const creativeContext = jsonObject(root.creativeContext);
   const target = jsonObject(creativeContext.target);
   const creative = jsonObject(target.creative);
+  const targetHierarchy = readString(target.hierarchy)?.toLowerCase();
+  const sourceAdId =
+    targetHierarchy === "ad"
+      ? readString(target.externalId ?? target.external_id ?? target.nodeKey ?? target.node_key)
+      : null;
   return {
     pageId: readString(creative.pageId) ?? undefined,
     linkUrl: readString(creative.linkUrl) ?? undefined,
     instagramUserId: readString(creative.instagramUserId) ?? undefined,
+    inheritFromAdId: sourceAdId ?? undefined,
   };
 }
 
@@ -345,7 +407,20 @@ function mergePromotionDefaults(
     pageId: input.pageId?.trim() || defaults.pageId,
     linkUrl: input.linkUrl?.trim() || defaults.linkUrl,
     instagramUserId: input.instagramUserId?.trim() || defaults.instagramUserId,
+    inheritFromAdId: input.inheritFromAdId?.trim() || defaults.inheritFromAdId,
   };
+}
+
+function inferInstagramProfileCallToAction(input: CreativePromotionInput): string | undefined {
+  const destinationType = readString(input.destinationType)?.toUpperCase();
+  const linkUrl = readString(input.linkUrl)?.toLowerCase();
+  const hasInstagramActor = Boolean(input.instagramActorId || input.instagramUserId || input.instagramAppLink);
+  if (destinationType === "INSTAGRAM_PROFILE") return "VIEW_INSTAGRAM_PROFILE";
+  if (hasInstagramActor && input.instagramAppLink) return "VIEW_INSTAGRAM_PROFILE";
+  if (hasInstagramActor && linkUrl && /(^https?:\/\/)?(www\.)?instagram\.com\//.test(linkUrl)) {
+    return "VIEW_INSTAGRAM_PROFILE";
+  }
+  return undefined;
 }
 
 async function loadSourceCreativeMedia(input: {
@@ -426,6 +501,15 @@ function readBoolean(value: unknown): boolean | null {
   return null;
 }
 
+function readPlacementMode(value: unknown): CreativePromotionInput["placementMode"] | null {
+  const normalized = readString(value)?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (!normalized) return null;
+  if (normalized === "existing_adset" || normalized === "existing_ad_set") return "existing_adset";
+  if (normalized === "new_adset" || normalized === "new_ad_set") return "new_adset";
+  if (normalized === "new_campaign") return "new_campaign";
+  return null;
+}
+
 function readStringArray(value: unknown): string[] | undefined {
   if (Array.isArray(value)) {
     const arr = value.map((item) => readString(item)).filter((item): item is string => Boolean(item));
@@ -443,6 +527,17 @@ function readStringArray(value: unknown): string[] | undefined {
 
 function readRecord(value: unknown): Record<string, unknown> | undefined {
   return isRecord(value) ? value : undefined;
+}
+
+function readRecordArray(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter(isRecord);
+  return out.length > 0 ? out : undefined;
+}
+
+function readMetaEnumToken(value: unknown): string | undefined {
+  const v = readString(value)?.toUpperCase();
+  return v && /^[A-Z][A-Z0-9_]*$/.test(v) ? v : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

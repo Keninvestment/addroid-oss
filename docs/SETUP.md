@@ -47,17 +47,15 @@ AdDroid OSS は POSIX 前提 (`0600` パーミッション、`pg_dump` / `pg_res
 | npm | 10 以上 (Node 22 同梱) | `npm --version` |
 | PostgreSQL | 16 以上 | `psql --version` |
 | uv | 最新 | `uv --version` |
-| Python | 3.12 以上 (`addroid init` は Meta CLI 互換の安定版 3.13 を導入) | `python3 --version` / `uv python find '>=3.12'` |
-| Meta Ads CLI | `meta ads --help` が呼び出せること | `addroid init` で `uv tool install meta-ads --python 3.13` を試行 |
+| GitHub CLI | 推奨 (`connect github` のブラウザ認証で使用) | `gh --version` |
 
 Node.js / npm 以外は `addroid init` が初回セットアップ中に診断します。不足分が
 ある場合は実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う
 system 変更は既定で no です。セットアップに失敗した場合は表示されたコマンドを
 手動で実行し、再度 `npm run addroid -- init` を実行してください。
 
-`addroid doctor` は上記すべてを 1 コマンドで検証します (実装済み)。
-テスト環境で Meta Ads CLI を導入できない場合は `ADDROID_META_ADS_CLI_MOCK=1` を
-設定すると `meta-ads-cli` チェックを mock 経由で `ok` 扱いにできます。
+`addroid doctor` は上記を 1 コマンドで検証します (実装済み)。Meta 入稿・レポートは
+Graph API を正規経路にするため、Meta Ads CLI / Python は標準必須依存ではありません。
 
 ---
 
@@ -171,7 +169,7 @@ npm run addroid -- init
 実行するコマンドを見せた上で個別に確認します。
 主な処理は次の通りです。
 
-- `uv` / Python 3.12+ / Meta Ads CLI / PostgreSQL 16+ の診断と不足依存のインストール
+- `uv` / GitHub CLI / PostgreSQL 16+ の診断と不足依存のインストール
 - `.env` の作成、password 付き `DATABASE_URL` と `ENCRYPTION_KEY` の保存
 - `~/.addroid/config.yaml`、`secrets.local.yaml`、`storage` / `logs` / `run` の作成
 - ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
@@ -285,8 +283,6 @@ Meta Access Token が必須です。Meta 未接続のままでは Apply / Activa
 |---|---|
 | `platform` | macOS / Linux / WSL2 のいずれかか (Windows native は error、それ以外は warn) |
 | `uv` | uv コマンドが PATH にあるか |
-| `python3.12` | Python 3.12+ が利用可能か (`uv python find '>=3.12'` で見つかる uv-managed Python も可) |
-| `meta-ads-cli` | Meta Ads CLI (`meta ads --help` / `ADDROID_META_CLI_BIN` / `meta-ads` / `meta_ads` / `metaads`) が呼び出せるか (`ADDROID_META_ADS_CLI_MOCK=1` で mock 経由扱い) |
 | `github-cli` | GitHub CLI (`gh --version`) が呼び出せるか。client id 不要のブラウザ認証に使用 |
 | `postgres-16` | PostgreSQL 16+ が `psql --version` から判別できるか (`psql` が無ければ warn) |
 | `DATABASE_URL` | 設定済みで Prisma 経由で `SELECT 1` できるか |
@@ -326,7 +322,6 @@ GitHub token と ops repo 連携を必ず登録してください。CLI は GitH
 
 ```bash
 ADDROID_META_OAUTH_MOCK=1     # Meta adapter を MockMetaAdapter に固定
-ADDROID_META_ADS_CLI_MOCK=1   # Meta Ads CLI 検出を mock ok 扱いに
 ADDROID_GITHUB_OAUTH_MOCK=1   # GitHub OAuth を mock adapter で完結
 ADDROID_LLM_MOCK=1            # LLM Provider を MockLLMProvider に固定
 ADDROID_IMAGE_MOCK=1          # Image Provider を MockImageProvider に固定

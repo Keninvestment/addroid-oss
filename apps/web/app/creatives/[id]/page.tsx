@@ -510,7 +510,7 @@ export default async function CreativeDetailPage({
                   spec.adText?.description ? `description=${spec.adText.description}` : null,
                   spec.adText?.callToAction ? `callToAction=${spec.adText.callToAction}` : null,
                   "このCreativeが過去の入稿PRに紐づいていても、別キャンペーンや2回目の入稿として再度PR化できます。",
-                  "不足している placement、campaignId/adsetId、campaignName/adsetName、objective、予算、pageId、対応済み optimizationGoal、billingEvent、linkUrl、国ターゲティングはツール実行前に短く質問してください。",
+                  "不足している placement、campaignId/adsetId、campaignName/adsetName、objective、予算、pageId、optimizationGoal、billingEvent、linkUrl、国ターゲティングはツール実行前に短く質問してください。",
                   "Meta へ直接変更せず、必ず GitOps PR と dry-run の経路を使ってください。",
                 ].filter(Boolean).join("\n")}
               />

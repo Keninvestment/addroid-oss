@@ -50,14 +50,14 @@ function writeFixture(files: Record<string, string>): { dir: string; cleanup: ()
 function operation(accountKey = "primary"): string {
   return JSON.stringify(
     {
-      version: 1,
+      version: 2,
       accountKey,
       intent: "set_budget",
       actions: [
         {
-          resource: "adsets",
-          verb: "update",
-          args: ["ads", "adset", "update", "as_123", "--daily-budget", "300"],
+          kind: "adset.update",
+          payload: { adsetId: "as_123", dailyBudget: 300 },
+          entity: { nodeType: "adset", nodeKey: "as_123" },
         },
       ],
     },
@@ -98,18 +98,18 @@ test("validate --json emits operation counts", async () => {
   }
 });
 
-test("validate exits 1 on unsupported Meta CLI operation", async () => {
+test("validate exits 1 on unsupported Graph operation", async () => {
   const { dir, cleanup } = writeFixture({
     "operations/primary/unsupported.json": JSON.stringify({
-      version: 1,
+      version: 2,
       accountKey: "primary",
-      actions: [{ resource: "experiments", verb: "create", args: ["ads", "experiment", "create"] }],
+      actions: [{ kind: "experiment.create", payload: { name: "x" } }],
     }),
   });
   try {
     const { code, out } = await capture(() => runValidate(["--root", dir]));
     assert.equal(code, 1);
-    assert.match(out.stdout, /unsupported Meta CLI operation/);
+    assert.match(out.stdout, /unsupported Graph operation kind/);
   } finally {
     cleanup();
   }
@@ -136,7 +136,7 @@ test("plan --dry-run reports operation actions", async () => {
     const { code, out } = await capture(() => runPlan(["--root", dir, "--dry-run"]));
     assert.equal(code, 0, out.stdout + out.stderr);
     assert.match(out.stdout, /actions\s*:\s*1/);
-    assert.match(out.stdout, /adsets:update account=primary/);
+    assert.match(out.stdout, /adset:update account=primary/);
   } finally {
     cleanup();
   }

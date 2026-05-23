@@ -25,8 +25,9 @@ const entry = path.resolve(here, "src", "index.ts");
 const outFile = path.resolve(here, "dist", "index.mjs");
 
 // 外部のままにするモジュール:
-//   - `pg-boss`, `yaml`, `zod` は package.json に `dependencies` として宣言済み。
+//   - `pg-boss`, `sharp`, `yaml`, `zod` は package.json に `dependencies` として宣言済み。
 //     install 時に npm が解決する。これらは ESM/CJS の named export 互換が良い。
+//     `sharp` は CJS/native 依存の dynamic require を持つため、ESM バンドルには inline しない。
 //   - `next` は `addroid up` が `await import("next")` で動的解決する。グローバル
 //     インストール時には next はインストールされないため、`addroid up` 不可で OK。
 //     `addroid doctor` 等の他コマンドには影響しない。
@@ -34,7 +35,7 @@ const outFile = path.resolve(here, "dist", "index.mjs");
 //
 // `@prisma/client` は external 化せず、`alias` で `prisma-shim.mjs` に差し替える
 // (詳細はそのファイル参照)。実 CJS は shim 内の `createRequire` で遅延ロードする。
-const EXTERNAL_RUNTIME_DEPS = ["pg-boss", "yaml", "zod", "next"];
+const EXTERNAL_RUNTIME_DEPS = ["pg-boss", "sharp", "yaml", "zod", "next"];
 
 await fs.mkdir(path.dirname(outFile), { recursive: true });
 

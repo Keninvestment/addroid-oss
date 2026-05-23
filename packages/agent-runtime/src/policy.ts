@@ -79,7 +79,7 @@ export function evaluateAgentToolPolicy(
     if (!allowedResources.has(resource) || !allowedActions.has(action)) {
       return {
         allowed: false,
-        reason: "query_meta_ads only allows read-only Meta Ads CLI list/get/current operations",
+        reason: "query_meta_ads only allows read-only Meta Graph list/get/current operations",
       };
     }
     if (action === "current" && resource !== "adaccount") {

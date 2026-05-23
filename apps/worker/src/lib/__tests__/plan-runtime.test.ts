@@ -66,7 +66,7 @@ schedules:
 function operationManifest(accountKey: string, actions: unknown[]): string {
   return `${JSON.stringify(
     {
-      version: 1,
+      version: 2,
       accountKey,
       intent: "other",
       source: "test",
@@ -87,7 +87,10 @@ test("runPlanForRoot returns ok=true and risk=ok for a clean repo with paused ca
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
     "operations/primary/create-campaign.json": operationManifest("primary", [
-      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "Fall Promo", "--objective", "outcome_traffic", "--status", "paused"] },
+      {
+        kind: "campaign.create",
+        payload: { campaignId: "cmp_fall", name: "Fall Promo", objective: "OUTCOME_TRAFFIC", status: "PAUSED" },
+      },
     ]),
   });
   try {
@@ -112,12 +115,12 @@ test("runPlanForRoot returns ok=true and risk=ok for a clean repo with paused ca
 
 // ---- runPlanForRoot: dry-run failure (validation error) ------------
 
-test("runPlanForRoot reports dry-run failure for unsupported operation with ok=false", () => {
+test("runPlanForRoot reports dry-run failure for unsupported Graph operation with ok=false", () => {
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
     "operations/primary/unsupported.json": operationManifest("primary", [
-      { resource: "campaign", verb: "dance", args: ["ads", "campaign", "dance"] },
+      { kind: "campaign.dance", payload: { campaignId: "cmp_1" } },
     ]),
   });
   try {
@@ -127,8 +130,32 @@ test("runPlanForRoot reports dry-run failure for unsupported operation with ok=f
     assert.equal(out.perAccount.length, 1);
     assert.match(
       out.perAccount[0]!.findings.map((e) => e.message).join("\n"),
-      /unsupported Meta CLI operation/
+      /unsupported Graph operation kind/
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot rejects ACTIVE create status inside graphPayload", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/create-active-raw.json": operationManifest("primary", [
+      {
+        kind: "campaign.create",
+        payload: {
+          campaignId: "cmp_active",
+          name: "Active Campaign",
+          graphPayload: { status: "ACTIVE" },
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, false);
+    assert.ok(out.validationErrors.some((e) => e.message.includes("cannot create ACTIVE")));
   } finally {
     cleanup();
   }
@@ -140,7 +167,7 @@ test("runPlanForRoot surfaces invalid operation manifest as validation errors", 
   const { dir, cleanup } = writeFixture({
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
-    "operations/primary/invalid.json": `{"version":1,"accountKey":"primary","actions":"nope"}\n`,
+    "operations/primary/invalid.json": `{"version":2,"accountKey":"primary","actions":"nope"}\n`,
   });
   try {
     const out = runPlanForRoot({ rootDir: dir });
@@ -163,10 +190,10 @@ test("runPlanForRoot accountFilter restricts perAccount to matching account", ()
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
     "operations/primary/a.json": operationManifest("primary", [
-      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "A"] },
+      { kind: "campaign.create", payload: { campaignId: "cmp_a", name: "A", status: "PAUSED" } },
     ]),
     "operations/secondary/b.json": operationManifest("secondary", [
-      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "B"] },
+      { kind: "campaign.create", payload: { campaignId: "cmp_b", name: "B", status: "PAUSED" } },
     ]),
   });
   try {
@@ -186,7 +213,7 @@ test("persistPlanRun records info-level execution log on a clean plan", async ()
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
     "operations/primary/create-campaign.json": operationManifest("primary", [
-      { resource: "campaign", verb: "create", args: ["ads", "campaign", "create", "--name", "Fall Promo"] },
+      { kind: "campaign.create", payload: { campaignId: "cmp_fall", name: "Fall Promo", status: "PAUSED" } },
     ]),
   });
   try {
@@ -224,7 +251,7 @@ test("persistPlanRun records error-level log when validation fails", async () =>
     ".addroid/project.yaml": VALID_PROJECT,
     "workflows/cron.yaml": VALID_CRON,
     "operations/primary/unsupported.json": operationManifest("primary", [
-      { resource: "campaign", verb: "dance", args: ["ads", "campaign", "dance"] },
+      { kind: "campaign.dance", payload: { campaignId: "cmp_1" } },
     ]),
   });
   try {

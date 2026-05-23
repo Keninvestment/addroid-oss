@@ -381,7 +381,7 @@ class FakeMetaAdapter implements MetaAdapter {
   }
 }
 
-test("resolveActivateExecutor: ADDROID_META_CLI_BIN 未設定 → fail-closed MockActivateExecutor", async () => {
+test("resolveActivateExecutor: ADDROID_META_CLI_BIN 未設定でも GraphActivateExecutor を返す", async () => {
   const sel = await resolveActivateExecutor({
     env: {} as NodeJS.ProcessEnv,
     metaAdapter: new FakeMetaAdapter({
@@ -391,21 +391,8 @@ test("resolveActivateExecutor: ADDROID_META_CLI_BIN 未設定 → fail-closed Mo
       accountIdentifier: "primary",
     }),
   });
-  assert.equal(sel.mode, "mock");
-  assert.ok(sel.executor instanceof MockActivateExecutor);
-  assert.match(sel.reason, /ADDROID_META_CLI_BIN is not set/);
-  assert.match(sel.reason, /fail closed/i);
-
-  // regression fix: mock 経路は success を返さず、必ず fail-closed
-  // unknown_error + meta.cli_unknown_error notify を返すこと。
-  const result = await sel.executor.executeActivate({
-    node: pausedCampaign(),
-    attempt: 0,
-    request: { hierarchyId: "node-1", actor: "user:cli", source: "cli" },
-  });
-  assert.equal(result.status, "unknown_error");
-  assert.equal(result.appliedRemotely, undefined);
-  assert.equal(result.notify?.auditAction, "meta.cli_unknown_error");
+  assert.equal(sel.mode, "graph");
+  assert.match(sel.reason, /Meta Graph API/);
 });
 
 // regression fix: token 未連携でも CLI bin が設定済みなら CliActivateExecutor を

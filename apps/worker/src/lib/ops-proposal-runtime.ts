@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { Prisma, type PrismaClient } from "@addroid/db";
-import type { MetaCliOperationAction } from "@addroid/queue";
+import type { GraphOperationAction, MetaCliOperationAction } from "@addroid/queue";
 import type {
   CreatePullRequestFile,
   GithubAdapter,
@@ -28,9 +28,13 @@ export interface OpsChangeProposalInput {
 }
 
 export interface OperationProposalAction {
-  resource: string;
-  verb: string;
-  args: string[];
+  kind?: GraphOperationAction["kind"];
+  ref?: string;
+  dependsOn?: string[];
+  payload?: Record<string, unknown>;
+  resource?: string;
+  verb?: string;
+  args?: string[];
   entity?: MetaCliOperationAction["entity"];
   externalIdRequired?: boolean;
 }
@@ -216,14 +220,14 @@ export async function createOpsChangeProposal(opts: {
 }
 
 interface OperationManifest {
-  version: 1;
+  version: 2;
   accountKey: string;
   intent: OpsChangeProposalInput["intent"];
   source: string;
   actor: string;
   rationale: string | null;
   createdAt: string;
-  actions: Array<Omit<MetaCliOperationAction, "kind" | "account">>;
+  actions: Array<Omit<GraphOperationAction, "account">>;
 }
 
 function buildOperationManifest(input: {
@@ -234,7 +238,7 @@ function buildOperationManifest(input: {
 }): OperationManifest {
   const actions = normalizeOperationActions(input.input, input.accountKey);
   return {
-    version: 1,
+    version: 2,
     accountKey: input.accountKey,
     intent: input.input.intent,
     source: input.source,
@@ -248,39 +252,49 @@ function buildOperationManifest(input: {
 function normalizeOperationActions(
   input: OpsChangeProposalInput,
   accountKey: string
-): Array<Omit<MetaCliOperationAction, "kind" | "account">> {
+): Array<Omit<GraphOperationAction, "account">> {
   if (Array.isArray(input.operations) && input.operations.length > 0) {
-    return input.operations.map((op) => ({
-      resource: normalizeResourceName(op.resource),
-      verb: op.verb,
-      args: op.args,
-      ...(op.entity ? { entity: op.entity } : {}),
-      ...(op.externalIdRequired ? { externalIdRequired: true } : {}),
-    }));
+    return input.operations.map((op) => normalizeProposalOperation(op));
   }
   const targets = normalizeTargetsFromInput(input);
   if (targets.length === 0) throw new Error("targets または operations を指定してください。");
   return targets.map((target) => operationFromTarget(input, target, accountKey));
 }
 
+function normalizeProposalOperation(op: OperationProposalAction): Omit<GraphOperationAction, "account"> {
+  if (op.kind && op.payload) {
+    return {
+      kind: op.kind,
+      ...(op.ref ? { ref: op.ref } : {}),
+      ...(op.dependsOn ? { dependsOn: op.dependsOn } : {}),
+      payload: op.payload,
+      ...(op.entity ? { entity: op.entity } : {}),
+      ...(op.externalIdRequired ? { externalIdRequired: true } : {}),
+    };
+  }
+  const converted = convertLegacyProposalOperation(op);
+  if (converted) return converted;
+  throw new Error("operations は Graph payload 形式 {kind,payload} で指定してください。");
+}
+
 function operationFromTarget(
   input: OpsChangeProposalInput,
   target: OpsChangeProposalTarget,
   _accountKey: string
-): Omit<MetaCliOperationAction, "kind" | "account"> {
+): Omit<GraphOperationAction, "account"> {
   const desired = input.desiredChanges ?? {};
   if (input.intent === "budget_change") {
     if (target.level === "ad") {
       throw new Error("予算変更の対象は campaign または adset を指定してください。ad には budget を設定できません。");
     }
-    const flags = budgetChangeFlags(desired);
-    if (flags.length === 0) throw new Error("予算変更には dailyBudget または lifetimeBudget が必要です。");
-    const resource = target.level === "campaign" ? "campaigns" : "adsets";
-    const cliResource = target.level === "campaign" ? "campaign" : "adset";
+    const payload = budgetChangePayload(desired);
+    if (Object.keys(payload).length === 0) throw new Error("予算変更には dailyBudget または lifetimeBudget が必要です。");
     return {
-      resource,
-      verb: "update",
-      args: ["ads", cliResource, "update", target.id, ...flags],
+      kind: target.level === "campaign" ? "campaign.update" : "adset.update",
+      payload: {
+        [`${target.level}Id`]: target.id,
+        ...payload,
+      },
       entity: {
         nodeType: target.level,
         nodeKey: target.id,
@@ -288,12 +302,12 @@ function operationFromTarget(
     };
   }
   const status = desiredStatus(input);
-  const cliResource = target.level;
-  const resource = target.level === "campaign" ? "campaigns" : target.level === "adset" ? "adsets" : "ads";
   return {
-    resource,
-    verb: "update",
-    args: ["ads", cliResource, "update", target.id, "--status", status],
+    kind: `${target.level}.status` as GraphOperationAction["kind"],
+    payload: {
+      [`${target.level}Id`]: target.id,
+      status: status.toUpperCase(),
+    },
     entity: {
       nodeType: target.level,
       nodeKey: target.id,
@@ -324,12 +338,60 @@ function normalizeTargetsFromInput(input: OpsChangeProposalInput): OpsChangeProp
   return out;
 }
 
-function budgetChangeFlags(desired: Record<string, unknown>): string[] {
-  const out: string[] = [];
+function budgetChangePayload(desired: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
   const dailyBudget = readNumber(desired.dailyBudget);
   const lifetimeBudget = readNumber(desired.lifetimeBudget);
-  if (dailyBudget !== null) out.push("--daily-budget", String(Math.round(dailyBudget)));
-  if (lifetimeBudget !== null) out.push("--lifetime-budget", String(Math.round(lifetimeBudget)));
+  if (dailyBudget !== null) out.dailyBudget = dailyBudget;
+  if (lifetimeBudget !== null) out.lifetimeBudget = lifetimeBudget;
+  return out;
+}
+
+function convertLegacyProposalOperation(op: OperationProposalAction): Omit<GraphOperationAction, "account"> | null {
+  const resource = op.resource ? normalizeResourceName(op.resource) : "";
+  const verb = op.verb?.trim().toLowerCase() ?? "";
+  const args = op.args ?? [];
+  if (!resource || !verb || args.length === 0) return null;
+  const entity = op.entity;
+  const targetId = entity?.nodeKey ?? args[3] ?? args[2];
+  if ((resource === "campaigns" || resource === "adsets" || resource === "ads") && verb === "update") {
+    const nodeType = resource === "campaigns" ? "campaign" : resource === "adsets" ? "adset" : "ad";
+    return {
+      kind: `${nodeType}.update` as GraphOperationAction["kind"],
+      payload: {
+        [`${nodeType}Id`]: targetId,
+        ...legacyFlagsToPayload(args),
+      },
+      ...(entity ? { entity } : {}),
+      ...(op.externalIdRequired ? { externalIdRequired: true } : {}),
+    };
+  }
+  return null;
+}
+
+function legacyFlagsToPayload(args: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const flag = args[i];
+    const value = args[i + 1];
+    if (!flag?.startsWith("--") || value === undefined) continue;
+    switch (flag) {
+      case "--status":
+        out.status = value.toUpperCase();
+        break;
+      case "--name":
+        out.name = value;
+        break;
+      case "--daily-budget":
+        out.dailyBudget = Number(value);
+        break;
+      case "--lifetime-budget":
+        out.lifetimeBudget = Number(value);
+        break;
+      default:
+        break;
+    }
+  }
   return out;
 }
 
@@ -370,8 +432,8 @@ function normalizeResourceName(resource: string): string {
   }
 }
 
-function formatOperationChange(action: Omit<MetaCliOperationAction, "kind" | "account">): string {
-  return `${action.resource}:${action.verb} ${action.args.join(" ")}`;
+function formatOperationChange(action: Omit<GraphOperationAction, "account">): string {
+  return `${action.kind}${action.ref ? ` ref=${action.ref}` : ""}`;
 }
 
 function summarizeOperationManifest(manifest: OperationManifest): string {

@@ -20,7 +20,6 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import fs from "node:fs";
 import path from "node:path";
 import { isSupportedMetaCliOperation } from "@addroid/meta-adapter";
-
 export type PlanRunSource = "web" | "web-chat" | "slack-chat" | "agent-task" | "ci" | "cli";
 
 export interface PlanCounts {
@@ -46,11 +45,14 @@ export interface PlanFinding {
 }
 
 export interface OperationPlanAction {
-  kind: "meta_cli_operation";
+  kind: "meta_cli_operation" | "graph_operation";
   account: string;
   resource: string;
   verb: string;
   args: string[];
+  graphKind?: string;
+  ref?: string;
+  payload?: Record<string, unknown>;
 }
 
 export interface PerAccountPlanSummary {
@@ -174,7 +176,7 @@ function countActions(
   for (const a of actions) {
     if (a.verb === "create") creates += 1;
     else if (a.verb === "update" || a.verb === "connect" || a.verb === "disconnect" || a.verb === "assign-user") updates += 1;
-    else if (a.verb === "delete") deletes += 1;
+    else if (a.verb === "delete" || a.verb === "status_delete") deletes += 1;
   }
   let errors = 0;
   let warnings = 0;
@@ -223,10 +225,47 @@ function normalizeOperationManifest(
   if (!accountKey) errors.push({ file, message: "accountKey is required" });
   const rawActions = Array.isArray(value.actions) ? value.actions : [];
   if (rawActions.length === 0) errors.push({ file, message: "actions[] is required" });
+  const version = value.version === 2 ? 2 : 1;
   rawActions.forEach((raw, index) => {
     const pointer = `/actions/${index}`;
     if (!isRecord(raw)) {
       errors.push({ file, pointer, message: "operation action must be an object" });
+      return;
+    }
+    if (version === 2) {
+      const kind = readString(raw.kind);
+      if (!kind || !isSupportedGraphOperationKind(kind)) {
+        const message = `unsupported Graph operation kind: ${kind ?? "(missing)"}`;
+        errors.push({ file, pointer, message });
+        findings.push({ level: "error", pointer, message });
+        return;
+      }
+      const payload = isRecord(raw.payload) ? raw.payload : {};
+      const [resource, verb] = kind.split(".");
+      if (!resource || !verb) {
+        const message = `invalid Graph operation kind: ${kind}`;
+        errors.push({ file, pointer, message });
+        findings.push({ level: "error", pointer, message });
+        return;
+      }
+      const graphPayload = isRecord(payload.graphPayload) ? payload.graphPayload : {};
+      const status = (readString(payload.status) ?? readString(graphPayload.status))?.toUpperCase();
+      if (verb === "create" && status === "ACTIVE") {
+        const message = "apply phase cannot create ACTIVE Meta objects; use PAUSED then audited activate flow";
+        errors.push({ file, pointer, message });
+        findings.push({ level: "error", pointer, message });
+        return;
+      }
+      actions.push({
+        kind: "graph_operation",
+        account: accountKey ?? "",
+        resource,
+        verb,
+        args: [],
+        graphKind: kind,
+        ref: readString(raw.ref) ?? undefined,
+        payload,
+      });
       return;
     }
     const resource = readString(raw.resource);
@@ -238,7 +277,7 @@ function normalizeOperationManifest(
     }
     const support = isSupportedMetaCliOperation(args);
     if (!support.supported) {
-      const message = `unsupported Meta CLI operation: ${resource}:${verb}`;
+      const message = `unsupported legacy operation: ${resource}:${verb}`;
       errors.push({ file, pointer, message });
       findings.push({ level: "error", pointer, message });
       return;
@@ -252,6 +291,28 @@ function normalizeOperationManifest(
     });
   });
   return { accountKey, actions, findings, errors, warnings };
+}
+
+const GRAPH_OPERATION_KINDS = new Set([
+  "campaign.create",
+  "campaign.update",
+  "campaign.delete",
+  "campaign.status",
+  "adset.create",
+  "adset.update",
+  "adset.delete",
+  "adset.status",
+  "creative.create",
+  "creative.update",
+  "creative.delete",
+  "ad.create",
+  "ad.update",
+  "ad.delete",
+  "ad.status",
+]);
+
+function isSupportedGraphOperationKind(kind: string): boolean {
+  return GRAPH_OPERATION_KINDS.has(kind);
 }
 
 function readString(value: unknown): string | null {

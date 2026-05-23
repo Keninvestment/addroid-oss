@@ -25,13 +25,13 @@ export const CRON_PRESETS = [
   {
     name: "daily_report",
     cron: "0 9 * * *",
-    description: "Meta Ads CLI 経由で前日の日次レポートを毎朝取得する",
+    description: "Meta Graph API 経由で前日の日次レポートを毎朝取得する",
     enabledByDefault: false,
   },
   {
     name: "today_report",
     cron: "0 * * * *",
-    description: "Meta Ads CLI 経由で当日の日次レポートを毎時取得する",
+    description: "Meta Graph API 経由で当日の日次レポートを毎時取得する",
     enabledByDefault: false,
   },
   {

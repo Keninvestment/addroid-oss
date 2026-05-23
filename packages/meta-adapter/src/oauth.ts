@@ -12,8 +12,8 @@
 
 import { randomBytes } from "node:crypto";
 
-/** Meta Graph API のバージョン。Marketing API は v18+ で安定。 */
-export const META_GRAPH_API_VERSION = "v19.0";
+/** Meta Graph API / Marketing API のバージョン。入稿・読取・OAuth で統一する。 */
+export const META_GRAPH_API_VERSION = "v25.0";
 
 /** Meta Login for Business の authorize endpoint。 */
 export const META_AUTHORIZE_URL = `https://www.facebook.com/${META_GRAPH_API_VERSION}/dialog/oauth`;

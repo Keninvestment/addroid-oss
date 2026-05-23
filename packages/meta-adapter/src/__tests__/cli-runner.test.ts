@@ -374,12 +374,12 @@ test("MetaCliRunner.run merges extraEnv but token keys override", async () => {
       ACCESS_TOKEN: "must-not-win",
       AD_ACCOUNT_ID: "act_must_not_win",
       META_ACCESS_TOKEN: "must-not-win",
-      META_API_VERSION: "v19.0",
+      META_API_VERSION: "v25.0",
       FOO: "bar",
     },
   });
   const env = log[0]!.options.env as Record<string, string>;
-  assert.equal(env.META_API_VERSION, "v19.0");
+  assert.equal(env.META_API_VERSION, "v25.0");
   assert.equal(env.FOO, "bar");
   assert.equal(env.ACCESS_TOKEN, TOKEN);
   assert.equal(env.AD_ACCOUNT_ID, "act_2");

@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
 import { type PrismaClient } from "@addroid/db";
-import { getCryptoBoundary } from "@addroid/config";
+import { META_GRAPH_API_VERSION, fetchInsights } from "@addroid/meta-adapter";
+import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 
 export async function runMetaAdsReadOnlyQuery(opts: {
   prisma: PrismaClient;
@@ -9,163 +9,254 @@ export async function runMetaAdsReadOnlyQuery(opts: {
   env?: NodeJS.ProcessEnv;
 }): Promise<{ label: string; rows: unknown[]; rowCount: number; message: string }> {
   const env = opts.env ?? process.env;
-  const plan = buildMetaAdsReadOnlyInvocation(opts.args);
-  const runtime = await prepareMetaAdsCliRuntime({
-    prisma: opts.prisma,
-    workspaceId: opts.workspaceId,
-    accountKey: plan.accountKey,
-    requiresAdAccount: plan.requiresAdAccount,
-    env,
-  });
-  const childEnv: NodeJS.ProcessEnv = {
-    ...env,
-    ACCESS_TOKEN: runtime.accessToken,
-    META_ACCESS_TOKEN: runtime.accessToken,
-  };
-  if (runtime.adAccountId) childEnv.AD_ACCOUNT_ID = runtime.adAccountId;
-  if (plan.businessId) childEnv.BUSINESS_ID = plan.businessId;
-  const result = await spawnMetaAdsCli({
-    binaryPath: runtime.binaryPath,
-    args: plan.args,
-    env: childEnv,
-  });
-  if (result.code !== 0) {
-    throw new Error(
-      [
-        "Meta Ads の読み取りに失敗しました。",
-        sanitizeMetaCliText(result.stderr || result.stdout, runtime.accessToken),
-      ].join("\n")
-    );
-  }
-  const rows = extractMetaAdsReadOnlyRows(parseUnknownJson(result.stdout));
-  return {
-    label: plan.label,
-    rows,
-    rowCount: rows.length,
-    message: `Meta Ads から ${plan.label} を取得しました。結果: ${rows.length}件`,
-  };
-}
-
-function buildMetaAdsReadOnlyInvocation(args: Record<string, unknown>): {
-  accountKey: string | null;
-  businessId: string | null;
-  requiresAdAccount: boolean;
-  args: string[];
-  label: string;
-} {
-  const resource = normalizeMetaResource(requireMetaString(args, "resource"));
-  const action = optionalMetaEnum(args, "action", ["get", "list", "current"]) ?? (resource === "insights" ? "get" : "list");
-  if (action === "current" && resource !== "adaccount") throw new Error("current は adaccount のみ対応しています");
-  const accountKey = readMetaStringArg(args, "accountKey", "account_key");
-  const businessId = readMetaStringArg(args, "businessId", "business_id");
-  const out = ["--output", "json", "ads"];
-  if (businessId) out.push("--business-id", businessId);
-  if (resource === "insights") {
-    if (action !== "get") throw new Error("insights は get のみ対応しています");
-    out.push("insights", "get");
-    const fields = readStringArray(args.fields);
-    out.push("--fields", (fields.length ? fields : ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency", "cpm", "cpp", "actions"]).join(","));
-    const datePreset = optionalMetaEnumValue(readMetaStringArg(args, "datePreset", "date_preset"), "datePreset", [
-      "today", "yesterday", "last_3d", "last_7d", "last_14d", "last_30d", "last_90d", "this_month", "last_month",
-    ]);
-    if (datePreset) out.push("--date-preset", datePreset);
-    pushMetaOptional(out, "--since", readMetaStringArg(args, "since"));
-    pushMetaOptional(out, "--until", readMetaStringArg(args, "until"));
-    const timeIncrement = optionalMetaEnumValue(readMetaStringArg(args, "timeIncrement", "time_increment"), "timeIncrement", ["daily", "weekly", "monthly", "all_days"]);
-    if (timeIncrement) out.push("--time-increment", timeIncrement);
-    const breakdowns = readStringArray(args.breakdowns).concat(readStringArray(args.breakdown));
-    for (const breakdown of breakdowns) out.push("--breakdown", breakdown);
-    pushMetaOptional(out, "--campaign-id", readMetaStringArg(args, "campaignId", "campaign_id"));
-    pushMetaOptional(out, "--adset-id", readMetaStringArg(args, "adsetId", "adset_id"));
-    pushMetaOptional(out, "--ad-id", readMetaStringArg(args, "adId", "ad_id"));
-    pushMetaOptional(out, "--sort", args.sort);
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-    return { accountKey, businessId, requiresAdAccount: true, args: out, label: "insights" };
-  }
-  out.push(metaResourceCommand(resource), action);
-  if (action === "current") return { accountKey, businessId, requiresAdAccount: false, args: out, label: "adaccount current" };
-  if (action === "get") {
-    const id = readMetaResourceId(resource, args);
-    if (!id && resource !== "adaccount") throw new Error(`${metaResourceCommand(resource)} get には id が必要です`);
-    if (id) out.push(id);
-  } else {
-    const parentId =
-      resource === "adset"
-        ? readMetaStringArg(args, "campaignId", "campaign_id")
-        : resource === "ad"
-          ? readMetaStringArg(args, "adsetId", "adset_id")
-          : null;
-    if (parentId) out.push(parentId);
-    if (resource === "product_feed" || resource === "product_item" || resource === "product_set") {
-      const catalogId = readMetaStringArg(args, "catalogId", "catalog_id");
-      if (!catalogId) throw new Error(`${metaResourceCommand(resource)} list には catalogId が必要です`);
-      out.push("--catalog-id", catalogId);
-    }
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-  }
-  return {
-    accountKey,
-    businessId,
-    requiresAdAccount: resourceRequiresAdAccount(resource, businessId),
-    args: out,
-    label: `${metaResourceCommand(resource)} ${action}`,
-  };
-}
-
-async function prepareMetaAdsCliRuntime(opts: {
-  prisma: PrismaClient;
-  workspaceId: string;
-  accountKey: string | null;
-  requiresAdAccount: boolean;
-  env: NodeJS.ProcessEnv;
-}): Promise<{ binaryPath: string; accessToken: string; adAccountId: string | null }> {
-  const binaryPath = opts.env.ADDROID_META_CLI_BIN?.trim();
-  if (!binaryPath) throw new Error("ADDROID_META_CLI_BIN が未設定です");
-  const token = await opts.prisma.oAuthToken.findFirst({
-    where: { provider: "meta" },
-    orderBy: { connectedAt: "desc" },
-    select: { accessTokenCiphertext: true },
-  });
-  if (!token) throw new Error("Meta token が未接続です。");
-  const account = opts.accountKey
+  const resource = normalizeMetaResource(requireMetaString(opts.args, "resource"));
+  const action = readMetaStringArg(opts.args, "action") ?? (resource === "insights" ? "get" : "list");
+  const accountKey = readMetaStringArg(opts.args, "accountKey", "account_key");
+  const account = accountKey
     ? await opts.prisma.adAccount.findFirst({
-        where: { workspaceId: opts.workspaceId, OR: [{ key: opts.accountKey }, { metaAccountId: opts.accountKey }] },
+        where: { workspaceId: opts.workspaceId, OR: [{ key: accountKey }, { metaAccountId: accountKey }] },
         orderBy: { updatedAt: "desc" },
-        select: { key: true, metaAccountId: true },
       })
     : await opts.prisma.adAccount.findFirst({
         where: { workspaceId: opts.workspaceId, active: true },
         orderBy: { updatedAt: "desc" },
-        select: { key: true, metaAccountId: true },
       });
-  const adAccountId = account?.metaAccountId ?? account?.key ?? opts.accountKey;
-  if (!adAccountId && opts.requiresAdAccount) throw new Error("広告アカウントが選択されていません。");
+  let label = `${resource} ${action}`;
+  let rows: unknown[] = [];
+  if (resource === "insights") {
+    const adAccountId = account?.metaAccountId ?? account?.key ?? accountKey;
+    if (!adAccountId) throw new Error("広告アカウントが選択されていません。`addroid account` で選択してください。");
+    const selection = await buildPrismaMetaAdapterSelection({ prisma: opts.prisma, env });
+    const lease = await selection.adapter.loadAccessTokenPlaintext();
+    if (!lease) throw new Error("Meta token が未接続です。`addroid connect meta` を実行してください。");
+    const fields = readStringArray(opts.args.fields);
+    rows = await fetchInsights({
+      accessToken: lease.accessToken,
+      adAccountId,
+      fields: fields.length ? fields : ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency", "cpm", "cpp", "actions"],
+      level: graphInsightsLevel(opts.args),
+      datePreset: readMetaStringArg(opts.args, "datePreset", "date_preset") ?? undefined,
+      timeRange:
+        readMetaStringArg(opts.args, "since") || readMetaStringArg(opts.args, "until")
+          ? {
+              since: readMetaStringArg(opts.args, "since") ?? readMetaStringArg(opts.args, "until")!,
+              until: readMetaStringArg(opts.args, "until") ?? readMetaStringArg(opts.args, "since")!,
+            }
+          : undefined,
+      timeIncrement: readMetaStringArg(opts.args, "timeIncrement", "time_increment") ?? undefined,
+      breakdowns: readStringArray(opts.args.breakdowns).concat(readStringArray(opts.args.breakdown)),
+      limit: readPositiveInt(opts.args.limit) ?? 100,
+    });
+    label = "insights";
+  } else if (resource === "adaccount") {
+    if (!account) throw new Error("広告アカウントが選択されていません。`addroid account` で選択してください。");
+    const selection = await buildPrismaMetaAdapterSelection({ prisma: opts.prisma, env });
+    const lease = await selection.adapter.loadAccessTokenPlaintext();
+    if (!lease) throw new Error("Meta token が未接続です。`addroid connect meta` を実行してください。");
+    rows = await fetchGraphReadRows({
+      accessToken: lease.accessToken,
+      resource,
+      action,
+      accountId: account.metaAccountId ?? account.key,
+      args: opts.args,
+      prisma: opts.prisma,
+      accountDbId: account.id,
+    });
+  } else if (resource === "campaign" || resource === "adset" || resource === "ad" || resource === "creative" || resource === "page") {
+    if (!account) throw new Error("広告アカウントが選択されていません。`addroid account` で選択してください。");
+    const selection = await buildPrismaMetaAdapterSelection({ prisma: opts.prisma, env });
+    const lease = await selection.adapter.loadAccessTokenPlaintext();
+    if (!lease) throw new Error("Meta token が未接続です。`addroid connect meta` を実行してください。");
+    rows = await fetchGraphReadRows({
+      accessToken: lease.accessToken,
+      resource,
+      action,
+      accountId: account.metaAccountId ?? account.key,
+      args: opts.args,
+      prisma: opts.prisma,
+      accountDbId: account.id,
+    });
+  }
   return {
-    binaryPath,
-    accessToken: getCryptoBoundary(opts.env).decrypt(token.accessTokenCiphertext),
-    adAccountId: adAccountId ?? null,
+    label,
+    rows,
+    rowCount: rows.length,
+    message: `Meta Ads から ${label} を取得しました。結果: ${rows.length}件`,
   };
 }
 
-function spawnMetaAdsCli(input: {
-  binaryPath: string;
-  args: string[];
-  env: NodeJS.ProcessEnv;
-}): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(input.binaryPath, input.args, {
-      env: input.env,
-      stdio: ["ignore", "pipe", "pipe"],
+async function fetchGraphReadRows(input: {
+  accessToken: string;
+  resource: MetaReadOnlyResource;
+  action: string;
+  accountId: string;
+  args: Record<string, unknown>;
+  prisma: PrismaClient;
+  accountDbId: string;
+}): Promise<unknown[]> {
+  const accountPath = normalizeGraphAccountId(input.accountId);
+  if (input.resource === "adaccount") {
+    return [
+      await fetchGraphObject(accountPath, input.accessToken, {
+        fields: "id,account_id,name,account_status,currency,timezone_name,business{id,name}",
+      }),
+    ];
+  }
+  if (input.resource === "page") {
+    const id = readMetaResourceId(input.resource, input.args);
+    if (!id) return [];
+    return [await fetchGraphObject(id, input.accessToken, { fields: "id,name,instagram_business_account{id,username},connected_instagram_account{id,username}" })];
+  }
+  if (input.resource === "creative") {
+    const id = readMetaResourceId(input.resource, input.args);
+    if (id) {
+      return [await fetchGraphObject(id, input.accessToken, { fields: graphFieldsForResource(input.resource) })];
+    }
+    return fetchGraphEdgeRows(`${accountPath}/adcreatives`, input.accessToken, {
+      fields: graphFieldsForResource(input.resource),
+      limit: String(readPositiveInt(input.args.limit) ?? 50),
     });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
-    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  }
+  if (input.resource === "campaign" || input.resource === "adset" || input.resource === "ad") {
+    const id = await resolveMetaReadId(input);
+    if (id && (input.action === "get" || input.action === "current")) {
+      return [await fetchGraphObject(id, input.accessToken, { fields: graphFieldsForResource(input.resource) })];
+    }
+    const edgePath = await graphListPath(input, accountPath);
+    return fetchGraphEdgeRows(edgePath, input.accessToken, {
+      fields: graphFieldsForResource(input.resource),
+      limit: String(readPositiveInt(input.args.limit) ?? 50),
+    });
+  }
+  return [];
+}
+
+async function graphListPath(
+  input: {
+    resource: MetaReadOnlyResource;
+    args: Record<string, unknown>;
+    prisma: PrismaClient;
+    accountDbId: string;
+  },
+  accountPath: string
+): Promise<string> {
+  if (input.resource === "campaign") return `${accountPath}/campaigns`;
+  if (input.resource === "adset") {
+    const campaignId = await resolveHierarchyId(input.prisma, input.accountDbId, "campaign", readMetaStringArg(input.args, "campaignId", "campaign_id"));
+    return campaignId ? `${campaignId}/adsets` : `${accountPath}/adsets`;
+  }
+  if (input.resource === "ad") {
+    const adsetId = await resolveHierarchyId(input.prisma, input.accountDbId, "adset", readMetaStringArg(input.args, "adsetId", "adset_id"));
+    if (adsetId) return `${adsetId}/ads`;
+    const campaignId = await resolveHierarchyId(input.prisma, input.accountDbId, "campaign", readMetaStringArg(input.args, "campaignId", "campaign_id"));
+    return campaignId ? `${campaignId}/ads` : `${accountPath}/ads`;
+  }
+  return accountPath;
+}
+
+async function resolveMetaReadId(input: {
+  resource: MetaReadOnlyResource;
+  args: Record<string, unknown>;
+  prisma: PrismaClient;
+  accountDbId: string;
+}): Promise<string | null> {
+  const raw = readMetaResourceId(input.resource, input.args);
+  if (!raw) return null;
+  if (input.resource === "campaign" || input.resource === "adset" || input.resource === "ad") {
+    return await resolveHierarchyId(input.prisma, input.accountDbId, input.resource, raw);
+  }
+  return raw;
+}
+
+async function resolveHierarchyId(
+  prisma: PrismaClient,
+  accountDbId: string,
+  nodeType: "campaign" | "adset" | "ad",
+  raw: string | null
+): Promise<string | null> {
+  if (!raw) return null;
+  const row = await prisma.adsHierarchyNode.findFirst({
+    where: {
+      accountId: accountDbId,
+      nodeType,
+      OR: [{ id: raw }, { externalId: raw }, { nodeKey: raw }],
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { externalId: true },
   });
+  return row?.externalId || raw;
+}
+
+async function fetchGraphObject(
+  path: string,
+  accessToken: string,
+  params: Record<string, string>
+): Promise<unknown> {
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${path}`);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok) throw graphReadError(response.status, json);
+  if (isRecord(json) && isRecord(json.error)) throw graphReadError(response.status, json);
+  return json;
+}
+
+async function fetchGraphEdgeRows(
+  path: string,
+  accessToken: string,
+  params: Record<string, string>
+): Promise<unknown[]> {
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_API_VERSION}/${path}`);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  const response = await fetch(url.toString(), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok) throw graphReadError(response.status, json);
+  if (isRecord(json) && isRecord(json.error)) throw graphReadError(response.status, json);
+  return extractMetaAdsReadOnlyRows(json);
+}
+
+function graphReadError(status: number, payload: unknown): Error {
+  const message = isRecord(payload) && isRecord(payload.error)
+    ? readOptionalString(payload.error.message) ?? `Meta Graph read failed (${status})`
+    : `Meta Graph read failed (${status})`;
+  return new Error(message);
+}
+
+function graphFieldsForResource(resource: MetaReadOnlyResource): string {
+  switch (resource) {
+    case "campaign":
+      return "id,name,status,effective_status,objective,buying_type,daily_budget,lifetime_budget,budget_remaining,bid_strategy,spend_cap,special_ad_categories,special_ad_category_country,is_adset_budget_sharing_enabled,created_time,updated_time,start_time,stop_time";
+    case "adset":
+      return "id,name,status,effective_status,campaign_id,daily_budget,lifetime_budget,budget_remaining,optimization_goal,billing_event,bid_amount,bid_strategy,bid_constraints,targeting,promoted_object,attribution_spec,destination_type,frequency_control_specs,pacing_type,daily_spend_cap,lifetime_spend_cap,daily_min_spend_target,lifetime_min_spend_target,is_dynamic_creative,created_time,updated_time,start_time,end_time";
+    case "ad":
+      return "id,name,status,effective_status,campaign_id,adset_id,creative{id,name,title,body,call_to_action_type,object_url,template_url,object_story_spec,thumbnail_url,image_url,video_id,effective_object_story_id,instagram_user_id,instagram_permalink_url},tracking_specs,conversion_specs,created_time,updated_time";
+    case "creative":
+      return "id,name,title,body,call_to_action_type,object_url,template_url,object_story_spec,thumbnail_url,image_url,video_id,effective_object_story_id,instagram_user_id,instagram_permalink_url,asset_feed_spec,degrees_of_freedom_spec,url_tags";
+    default:
+      return "id,name";
+  }
+}
+
+function normalizeGraphAccountId(value: string): string {
+  return value.startsWith("act_") ? value : `act_${value}`;
+}
+
+function graphInsightsLevel(args: Record<string, unknown>): "account" | "campaign" | "adset" | "ad" {
+  if (readMetaStringArg(args, "adId", "ad_id")) return "ad";
+  if (readMetaStringArg(args, "adsetId", "adset_id")) return "adset";
+  if (readMetaStringArg(args, "campaignId", "campaign_id")) return "campaign";
+  const level = readMetaStringArg(args, "level");
+  return level === "campaign" || level === "adset" || level === "ad" ? level : "account";
 }
 
 type MetaReadOnlyResource =
@@ -177,17 +268,6 @@ function normalizeMetaResource(value: string): MetaReadOnlyResource {
   const allowed: MetaReadOnlyResource[] = ["insights", "adaccount", "campaign", "adset", "ad", "creative", "catalog", "dataset", "page", "product_feed", "product_item", "product_set"];
   if (allowed.includes(normalized as MetaReadOnlyResource)) return normalized as MetaReadOnlyResource;
   throw new Error(`resource は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
-function metaResourceCommand(resource: MetaReadOnlyResource): string {
-  return resource.replace(/_/g, "-");
-}
-
-function resourceRequiresAdAccount(resource: MetaReadOnlyResource, businessId: string | null): boolean {
-  if (resource === "adaccount" || resource === "page") return false;
-  if ((resource === "catalog" || resource === "dataset") && businessId) return false;
-  if (resource === "product_feed" || resource === "product_item" || resource === "product_set") return false;
-  return true;
 }
 
 function readMetaResourceId(resource: MetaReadOnlyResource, args: Record<string, unknown>): string | null {
@@ -225,17 +305,6 @@ function readMetaStringArg(args: Record<string, unknown>, ...keys: string[]): st
   return null;
 }
 
-function optionalMetaEnum<T extends string>(args: Record<string, unknown>, key: string, allowed: readonly T[]): T | null {
-  return optionalMetaEnumValue(readOptionalString(args[key]), key, allowed);
-}
-
-function optionalMetaEnumValue<T extends string>(value: string | null, key: string, allowed: readonly T[]): T | null {
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if ((allowed as readonly string[]).includes(normalized)) return normalized as T;
-  throw new Error(`${key} は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
 function readStringArray(value: unknown): string[] {
   if (typeof value === "string" && value.trim()) return value.split(",").map((item) => item.trim()).filter(Boolean);
   return Array.isArray(value) ? value.flatMap((item) => typeof item === "string" && item.trim() ? [item.trim()] : []) : [];
@@ -243,19 +312,6 @@ function readStringArray(value: unknown): string[] {
 
 function readPositiveInt(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function pushMetaOptional(out: string[], flag: string, value: unknown): void {
-  const text = readOptionalString(value);
-  if (text) out.push(flag, text);
-}
-
-function sanitizeMetaCliText(text: string, token: string): string {
-  return text.split(token).join("[REDACTED]").trim().slice(0, 1200);
-}
-
-function parseUnknownJson(text: string): unknown {
-  try { return JSON.parse(text); } catch { return null; }
 }
 
 export function extractMetaAdsReadOnlyRows(payload: unknown): unknown[] {

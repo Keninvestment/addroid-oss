@@ -18,7 +18,6 @@ import {
 } from "@addroid/meta-adapter";
 import {
   ensureAddroidPaths,
-  getCryptoBoundary,
   homeAnchorPath,
   parseDatabaseUrl,
   resolveAddroidPaths,
@@ -96,6 +95,7 @@ import {
   type ApprovalDecisionAction,
 } from "../../worker/src/lib/approval-decision-runtime";
 import { runMetaMirrorSync } from "../../worker/src/lib/meta-mirror-runtime";
+import { runMetaAdsReadOnlyQuery } from "../../worker/src/lib/meta-ads-readonly-runtime";
 
 export interface WebAgentExecution {
   display: string;
@@ -285,6 +285,14 @@ function extractSuggestedPromotionArgs(data: unknown): Record<string, unknown> |
   const allowedKeys = [
     "creativeId",
     "accountKey",
+    "placementMode",
+    "inheritFromCampaignId",
+    "inheritFromAdsetId",
+    "inheritFromAdId",
+    "sourceCampaignId",
+    "sourceAdsetId",
+    "sourceAdId",
+    "existingAdId",
     "creativeName",
     "adName",
     "pageId",
@@ -304,14 +312,55 @@ function extractSuggestedPromotionArgs(data: unknown): Record<string, unknown> |
     "objective",
     "dailyBudget",
     "lifetimeBudget",
+    "campaignDailyBudget",
+    "campaignLifetimeBudget",
+    "adsetDailyBudget",
+    "adsetLifetimeBudget",
+    "campaignBidStrategy",
+    "campaignSpendCap",
+    "campaignStartTime",
+    "campaignStopTime",
+    "specialAdCategoryCountry",
+    "isAdsetBudgetSharingEnabled",
+    "campaignPacingType",
     "optimizationGoal",
+    "optimizationSubEvent",
     "billingEvent",
+    "adsetBidStrategy",
     "bidAmount",
+    "bidConstraints",
     "startTime",
     "endTime",
+    "attributionSpec",
+    "destinationType",
+    "frequencyControlSpecs",
+    "adsetSchedule",
+    "adsetPacingType",
+    "dailySpendCap",
+    "lifetimeSpendCap",
+    "dailyMinSpendTarget",
+    "lifetimeMinSpendTarget",
+    "isDynamicCreative",
     "pixelId",
     "customEventType",
+    "objectStorySpec",
+    "assetFeedSpec",
+    "degreesOfFreedomSpec",
+    "urlTags",
+    "platformCustomizations",
+    "videoId",
+    "productSetId",
+    "destinationSetId",
     "adPixelId",
+    "trackingSpecs",
+    "conversionSpecs",
+    "conversionDomain",
+    "creativeAssetGroupsSpec",
+    "engagementAudience",
+    "campaignGraphPayload",
+    "adsetGraphPayload",
+    "creativeGraphPayload",
+    "adGraphPayload",
     "countries",
     "rationale",
     "urgency",
@@ -326,10 +375,13 @@ function extractSuggestedPromotionArgs(data: unknown): Record<string, unknown> |
     } else if (typeof value === "boolean") {
       compact[key] = value;
     } else if (Array.isArray(value)) {
-      const values = value
-        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-        .map((item) => item.trim());
+      const values = value.map((item) => (typeof item === "string" ? item.trim() : item)).filter((item) => {
+        if (typeof item === "string") return item.length > 0;
+        return item !== undefined && item !== null;
+      });
       if (values.length > 0) compact[key] = values;
+    } else if (isRecord(value)) {
+      compact[key] = value;
     }
   }
   const creativeIds = suggestedPromotionArgs.creativeIds;
@@ -936,17 +988,93 @@ function mergePromotionArgs(
   suggested: Record<string, unknown>,
   current: Record<string, unknown>
 ): Record<string, unknown> {
-  const merged = { ...suggested };
-  for (const [key, value] of Object.entries(current)) {
+  const merged = { ...current };
+  for (const [key, value] of Object.entries(suggested)) {
     if (value === undefined || value === null) continue;
     if (typeof value === "string" && value.trim().length === 0) continue;
     if (Array.isArray(value) && value.length === 0) continue;
     merged[key] = value;
   }
+  for (const [key, value] of Object.entries(current)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "string" && value.trim().length === 0) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (isResolverAuthoritativePromotionKey(key) && suggested[key] !== undefined) continue;
+    merged[key] = value;
+  }
   if (readOptionalString(current.creativeId) && !Array.isArray(current.creativeIds)) {
     delete merged.creativeIds;
   }
+  return sanitizePromotionPlacementIntent(merged, current);
+}
+
+function isResolverAuthoritativePromotionKey(key: string): boolean {
+  return key === "pageId" ||
+    key === "linkUrl" ||
+    key === "destinationUrl" ||
+    key === "instagramUserId" ||
+    key === "instagramActorId" ||
+    key === "instagramAppLink" ||
+    key === "callToAction" ||
+    key === "objective" ||
+    key === "optimizationGoal" ||
+    key === "billingEvent" ||
+    key === "destinationType" ||
+    key === "inheritFromAdId" ||
+    key === "sourceAdId" ||
+    key === "existingAdId" ||
+    key === "trackingSpecs" ||
+    key === "conversionSpecs" ||
+    key === "targeting" ||
+    key === "campaignGraphPayload" ||
+    key === "adsetGraphPayload" ||
+    key === "creativeGraphPayload" ||
+    key === "adGraphPayload";
+}
+
+function sanitizePromotionPlacementIntent(
+  merged: Record<string, unknown>,
+  current: Record<string, unknown>
+): Record<string, unknown> {
+  const mode = readPromotionPlacementMode(
+    current.placementMode ?? current.placement_mode ?? merged.placementMode ?? merged.placement_mode
+  ) ?? inferPromotionPlacementMode(current);
+  if (mode) merged.placementMode = mode;
+  if (mode === "new_campaign") {
+    const campaignId = readOptionalString(merged.campaignId);
+    const adsetId = readOptionalString(merged.adsetId);
+    if (campaignId && !readOptionalString(merged.inheritFromCampaignId)) {
+      merged.inheritFromCampaignId = campaignId;
+    }
+    if (adsetId && !readOptionalString(merged.inheritFromAdsetId)) {
+      merged.inheritFromAdsetId = adsetId;
+    }
+    delete merged.campaignId;
+    delete merged.adsetId;
+  } else if (mode === "new_adset") {
+    const adsetId = readOptionalString(merged.adsetId);
+    if (adsetId && !readOptionalString(merged.inheritFromAdsetId)) {
+      merged.inheritFromAdsetId = adsetId;
+    }
+    delete merged.adsetId;
+  }
   return merged;
+}
+
+function inferPromotionPlacementMode(args: Record<string, unknown>): "existing_adset" | "new_adset" | "new_campaign" | null {
+  if (readOptionalString(args.campaignId) && readOptionalString(args.adsetId)) return "existing_adset";
+  if (readOptionalString(args.campaignId) && readOptionalString(args.adsetName)) return "new_adset";
+  if (readOptionalString(args.campaignName) && readOptionalString(args.adsetName)) return "new_campaign";
+  return null;
+}
+
+function readPromotionPlacementMode(value: unknown): "existing_adset" | "new_adset" | "new_campaign" | null {
+  const normalized = readOptionalString(value)?.toLowerCase().replace(/[\s-]+/g, "_");
+  if (!normalized) return null;
+  if (normalized === "existing_adset" || normalized === "existing_ad_set") return "existing_adset";
+  if (normalized === "new_adset" || normalized === "new_ad_set") return "new_adset";
+  if (normalized === "new_campaign") return "new_campaign";
+  return null;
 }
 
 function needsInstagramActorId(args: Record<string, unknown>): boolean {
@@ -1842,37 +1970,12 @@ async function runMetaAdsReadOnlyTool(
   display: string
 ): Promise<WebAgentExecution> {
   try {
-    const plan = buildMetaAdsReadOnlyInvocation(args);
-    const runtime = await prepareMetaAdsCliRuntime(workspaceId, plan.accountKey, plan.requiresAdAccount);
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      ACCESS_TOKEN: runtime.accessToken,
-      META_ACCESS_TOKEN: runtime.accessToken,
-    };
-    if (runtime.adAccountId) childEnv.AD_ACCOUNT_ID = runtime.adAccountId;
-    if (plan.businessId) childEnv.BUSINESS_ID = plan.businessId;
-    const result = await spawnMetaAdsCli({
-      binaryPath: runtime.binaryPath,
-      args: plan.args,
-      env: childEnv,
-    });
-    if (result.code !== 0) {
-      return {
-        display,
-        status: "error",
-        message: [
-          "Meta Ads の読み取りに失敗しました。",
-          sanitizeMetaCliText(result.stderr || result.stdout, runtime.accessToken),
-        ].join("\n"),
-      };
-    }
-    const payload = parseUnknownJson(result.stdout);
-    const rows = extractUnknownRows(payload);
+    const result = await runMetaGraphReadOnlyQuery(workspaceId, args);
     return {
       display,
       status: "ok",
-      message: formatMetaAdsReadOnlyExecutionSummary(plan.label, rows.length),
-      data: { label: plan.label, rows, rowCount: rows.length },
+      message: formatMetaAdsReadOnlyExecutionSummary(result.label, result.rows.length),
+      data: { label: result.label, rows: result.rows, rowCount: result.rows.length, source: "graph_api" },
       visible: false,
     };
   } catch (err) {
@@ -1884,176 +1987,24 @@ async function runMetaAdsReadOnlyTool(
   }
 }
 
+async function runMetaGraphReadOnlyQuery(
+  workspaceId: string,
+  args: Record<string, unknown>
+): Promise<{ label: string; rows: unknown[] }> {
+  const result = await runMetaAdsReadOnlyQuery({ prisma, workspaceId, args });
+  return { label: result.label, rows: result.rows };
+}
+
+function graphInsightsLevel(args: Record<string, unknown>): "account" | "campaign" | "adset" | "ad" {
+  if (readMetaStringArg(args, "adId", "ad_id")) return "ad";
+  if (readMetaStringArg(args, "adsetId", "adset_id")) return "adset";
+  if (readMetaStringArg(args, "campaignId", "campaign_id")) return "campaign";
+  const level = readMetaStringArg(args, "level");
+  return level === "account" || level === "campaign" || level === "adset" || level === "ad" ? level : "campaign";
+}
+
 function formatMetaAdsReadOnlyExecutionSummary(label: string, rowCount: number): string {
   return `Meta Ads の ${label} を確認しました (${rowCount}件)。`;
-}
-
-function buildMetaAdsReadOnlyInvocation(args: Record<string, unknown>): {
-  accountKey: string | null;
-  businessId: string | null;
-  requiresAdAccount: boolean;
-  args: string[];
-  label: string;
-} {
-  const resource = normalizeMetaResource(requireMetaString(args, "resource"));
-  const action = optionalMetaEnum(args, "action", ["get", "list", "current"]) ?? (resource === "insights" ? "get" : "list");
-  if (action !== "get" && action !== "list" && action !== "current") throw new Error("read-only action only supports get/list/current");
-  if (action === "current" && resource !== "adaccount") throw new Error("current は adaccount のみ対応しています");
-  const accountKey = readMetaStringArg(args, "accountKey", "account_key");
-  const businessId = readMetaStringArg(args, "businessId", "business_id");
-  const out = ["--output", "json", "ads"];
-  if (businessId) out.push("--business-id", businessId);
-  if (resource === "insights") {
-    if (action !== "get") throw new Error("insights は get のみ対応しています");
-    out.push("insights", "get");
-    const fields = readStringArray(args.fields);
-    out.push("--fields", (fields.length ? fields : ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency", "cpm", "cpp", "actions"]).join(","));
-    const datePreset = optionalMetaEnumValue(readMetaStringArg(args, "datePreset", "date_preset"), "datePreset", [
-      "today",
-      "yesterday",
-      "last_3d",
-      "last_7d",
-      "last_14d",
-      "last_30d",
-      "last_90d",
-      "this_month",
-      "last_month",
-    ]);
-    if (datePreset) out.push("--date-preset", datePreset);
-    const since = readMetaStringArg(args, "since");
-    const until = readMetaStringArg(args, "until");
-    if (since) out.push("--since", since);
-    if (until) out.push("--until", until);
-    const timeIncrement = optionalMetaEnumValue(
-      readMetaStringArg(args, "timeIncrement", "time_increment"),
-      "timeIncrement",
-      ["daily", "weekly", "monthly", "all_days"]
-    );
-    if (timeIncrement) out.push("--time-increment", timeIncrement);
-    const breakdowns = readStringArray(args.breakdowns).concat(readStringArray(args.breakdown));
-    for (const breakdown of breakdowns) out.push("--breakdown", breakdown);
-    pushMetaOptional(out, "--campaign-id", readMetaStringArg(args, "campaignId", "campaign_id"));
-    pushMetaOptional(out, "--adset-id", readMetaStringArg(args, "adsetId", "adset_id"));
-    pushMetaOptional(out, "--ad-id", readMetaStringArg(args, "adId", "ad_id"));
-    pushMetaOptional(out, "--sort", args.sort);
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-    return { accountKey, businessId, requiresAdAccount: true, args: out, label: "insights" };
-  }
-
-  out.push(metaResourceCommand(resource), action);
-  if (action === "current") {
-    return { accountKey, businessId, requiresAdAccount: false, args: out, label: "adaccount current" };
-  }
-  if (action === "get") {
-    const id = readMetaResourceId(resource, args);
-    if (!id && resource !== "adaccount") throw new Error(`${metaResourceCommand(resource)} get には id が必要です`);
-    if (id) out.push(id);
-  } else {
-    const parentId =
-      resource === "adset"
-        ? readMetaStringArg(args, "campaignId", "campaign_id")
-        : resource === "ad"
-          ? readMetaStringArg(args, "adsetId", "adset_id")
-          : null;
-    if (parentId) out.push(parentId);
-    if (resource === "product_feed" || resource === "product_item" || resource === "product_set") {
-      const catalogId = readMetaStringArg(args, "catalogId", "catalog_id");
-      if (!catalogId) throw new Error(`${metaResourceCommand(resource)} list には catalogId が必要です`);
-      out.push("--catalog-id", catalogId);
-    }
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-  }
-  return {
-    accountKey,
-    businessId,
-    requiresAdAccount: resourceRequiresAdAccount(resource, businessId),
-    args: out,
-    label: `${metaResourceCommand(resource)} ${action}`,
-  };
-}
-
-async function prepareMetaAdsCliRuntime(
-  workspaceId: string,
-  accountKey: string | null,
-  requiresAdAccount: boolean
-): Promise<{ binaryPath: string; accessToken: string; adAccountId: string | null }> {
-  const binaryPath = process.env.ADDROID_META_CLI_BIN?.trim();
-  if (!binaryPath) throw new Error("ADDROID_META_CLI_BIN が未設定です");
-  const crypto = getCryptoBoundary(process.env);
-  const token = await prisma.oAuthToken.findFirst({
-    where: { provider: "meta" },
-    orderBy: { connectedAt: "desc" },
-    select: { accessTokenCiphertext: true },
-  });
-  if (!token) throw new Error("Meta token が未接続です。`addroid connect meta` を実行してください。");
-  const account = accountKey
-    ? await prisma.adAccount.findFirst({
-        where: { workspaceId, OR: [{ key: accountKey }, { metaAccountId: accountKey }] },
-        orderBy: { updatedAt: "desc" },
-        select: { key: true, metaAccountId: true },
-      })
-    : await prisma.adAccount.findFirst({
-        where: { workspaceId, active: true },
-        orderBy: { updatedAt: "desc" },
-        select: { key: true, metaAccountId: true },
-      });
-  const adAccountId = account?.metaAccountId ?? account?.key ?? accountKey;
-  if (!adAccountId && requiresAdAccount) {
-    throw new Error("広告アカウントが選択されていません。`addroid account` で選択してください。");
-  }
-  return {
-    binaryPath,
-    accessToken: crypto.decrypt(token.accessTokenCiphertext),
-    adAccountId: adAccountId ?? null,
-  };
-}
-
-async function spawnMetaAdsCli(input: {
-  binaryPath: string;
-  args: string[];
-  env: NodeJS.ProcessEnv;
-}): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(input.binaryPath, input.args, {
-      env: input.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
-  });
-}
-
-function sanitizeMetaCliText(text: string, token: string): string {
-  return text.split(token).join("[REDACTED]").trim().slice(0, 1200);
-}
-
-function parseUnknownJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function extractUnknownRows(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload;
-  if (isRecord(payload)) {
-    if (Array.isArray(payload.data)) return payload.data;
-    if (Array.isArray(payload.rows)) return payload.rows;
-    if (Array.isArray(payload.results)) return payload.results;
-    if (Object.keys(payload).length > 0) return [payload];
-  }
-  return [];
 }
 
 type MetaReadOnlyResource =
@@ -2096,17 +2047,6 @@ function normalizeMetaResource(value: string): MetaReadOnlyResource {
   throw new Error(`resource は ${allowed.join(" / ")} のいずれかで指定してください`);
 }
 
-function metaResourceCommand(resource: MetaReadOnlyResource): string {
-  return resource.replace(/_/g, "-");
-}
-
-function resourceRequiresAdAccount(resource: MetaReadOnlyResource, businessId: string | null): boolean {
-  if (resource === "adaccount" || resource === "page") return false;
-  if ((resource === "catalog" || resource === "dataset") && businessId) return false;
-  if (resource === "product_feed" || resource === "product_item" || resource === "product_set") return false;
-  return true;
-}
-
 function readMetaResourceId(resource: MetaReadOnlyResource, args: Record<string, unknown>): string | null {
   const specificKeys: Partial<Record<MetaReadOnlyResource, string[]>> = {
     adaccount: ["accountId", "account_id", "adAccountId", "ad_account_id"],
@@ -2136,29 +2076,6 @@ function readMetaStringArg(args: Record<string, unknown>, ...keys: string[]): st
   return null;
 }
 
-function optionalMetaEnum<T extends string>(
-  args: Record<string, unknown>,
-  key: string,
-  allowed: readonly T[]
-): T | null {
-  const value = readOptionalString(args[key]);
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if ((allowed as readonly string[]).includes(normalized)) return normalized as T;
-  throw new Error(`${key} は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
-function optionalMetaEnumValue<T extends string>(
-  value: string | null,
-  key: string,
-  allowed: readonly T[]
-): T | null {
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if ((allowed as readonly string[]).includes(normalized)) return normalized as T;
-  throw new Error(`${key} は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
 function readStringArray(value: unknown): string[] {
   if (typeof value === "string" && value.trim()) return value.split(",").map((item) => item.trim()).filter(Boolean);
   return Array.isArray(value)
@@ -2168,11 +2085,6 @@ function readStringArray(value: unknown): string[] {
 
 function readPositiveInt(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function pushMetaOptional(out: string[], flag: string, value: unknown): void {
-  const text = readOptionalString(value);
-  if (text) out.push(flag, text);
 }
 
 async function waitForCronRun(

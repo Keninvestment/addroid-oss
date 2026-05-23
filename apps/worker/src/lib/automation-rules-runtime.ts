@@ -25,7 +25,7 @@ import {
   loadAutomationRules,
   type AutomationRuleYaml,
 } from "@addroid/ops-schemas";
-import type { AutomationCliMutationExecutor } from "./automation-action-executor.js";
+import type { AutomationMutationExecutor } from "./automation-action-executor.js";
 import {
   buildCurrentAutomationBaseline,
   readRuleCalibration,
@@ -36,7 +36,7 @@ export interface RunAutomationRulesOnceOptions {
   prisma: PrismaClient;
   workspaceId: string;
   insightsProvider: DailyReportInsightsProvider;
-  mutationExecutor: AutomationCliMutationExecutor | null;
+  mutationExecutor: AutomationMutationExecutor | null;
   env?: NodeJS.ProcessEnv;
   fallbackTimeZone?: string | null;
   ruleKey?: string;

@@ -126,6 +126,19 @@ function approvalState(decision: string | null): StatusState {
   return "warn";
 }
 
+function approvalRequiresAction(decision: string | null): boolean {
+  return decision === null || decision === "approval_required";
+}
+
+function approvalDecisionLabel(decision: string | null): string {
+  if (decision === "approved") return "承認済み";
+  if (decision === "auto_approved") return "自動承認済み";
+  if (decision === "rejected") return "非承認済み";
+  if (decision === "auto_blocked") return "自動ブロック";
+  if (decision === "approval_required") return "承認待ち";
+  return "承認待ち";
+}
+
 function applyJobState(state: string | null): StatusState {
   if (state === "succeeded" || state === "simulated") return "ok";
   if (state === "failed") return "error";
@@ -340,17 +353,19 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
 
   const canMerge =
     pr.state === "open" &&
-    latestDecision !== "rejected" &&
-    latestDecision !== "auto_blocked";
+    approvalRequiresAction(latestDecision);
 
   const mergeBlockedReason = (() => {
     if (pr.state === "merged") return "この PR は既にマージ済みです。";
     if (pr.state === "closed") return "この PR は閉じられているため承認できません。";
+    if (latestDecision === "approved" || latestDecision === "auto_approved") {
+      return `${approvalDecisionLabel(latestDecision)}です。追加の承認操作は不要です。`;
+    }
     if (latestDecision === "rejected") {
-      return "approval_records.decision=rejected が記録されているため承認できません。";
+      return "非承認済みです。この PR からの反映処理は起動しません。";
     }
     if (latestDecision === "auto_blocked") {
-      return "approval_records.decision=auto_blocked が記録されているため承認できません (上流の policy が拒否)。";
+      return "自動ブロック済みです。上流の policy が拒否したため承認できません。";
     }
     return null;
   })();
@@ -480,7 +495,11 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
         >
           {!canMerge ? (
             <EmptyState
-              title="この PR は Web UI から承認できません。"
+              title={
+                approvalRequiresAction(latestDecision)
+                  ? "この PR は Web UI から承認できません。"
+                  : "この PR は判断済みです。"
+              }
               description={
                 mergeBlockedReason ?? "現在のステータスでは承認操作は許可されていません。"
               }
@@ -613,7 +632,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                   empty={
                     <EmptyState
                       title="実行ログはまだありません。"
-                      description="反映処理が進むと、開始・検証・Meta CLI 実行結果がここに表示されます。"
+                      description="反映処理が進むと、開始・検証・Graph API 実行結果がここに表示されます。"
                     />
                   }
                   columns={[

@@ -5,9 +5,8 @@
 // `addroid doctor` in a clean smoke-test environment." を裏打ちする。
 //
 // 本テストでは DATABASE_URL を外し、ADDROID_HOME を一時ディレクトリに切り替え、
-// ADDROID_META_ADS_CLI_MOCK=1 を設定して Meta Ads CLI を mock 経由で扱うこと、
 // ENCRYPTION_KEY を 32 バイトに固定することで本物の依存関係に触れない範囲を確認する。
-// uv / Python / psql は実環境を見るため、見つからなくても doctor 自身は actionable
+// uv / psql は実環境を見るため、見つからなくても doctor 自身は actionable
 // hint を出して終了することを assert する。
 
 import { describe, it } from "node:test";
@@ -59,8 +58,6 @@ async function withCleanEnv<T>(
     "ADDROID_HOME",
     "DATABASE_URL",
     "ENCRYPTION_KEY",
-    "ADDROID_META_ADS_CLI_MOCK",
-    "ADDROID_META_CLI_BIN",
     ...Object.keys(overrides),
   ];
   const prev: Record<string, string | undefined> = {};
@@ -69,8 +66,6 @@ async function withCleanEnv<T>(
   process.env.ADDROID_HOME = dir;
   delete process.env.DATABASE_URL;
   delete process.env.ENCRYPTION_KEY;
-  delete process.env.ADDROID_META_ADS_CLI_MOCK;
-  delete process.env.ADDROID_META_CLI_BIN;
   for (const [k, v] of Object.entries(overrides)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -88,11 +83,10 @@ async function withCleanEnv<T>(
 }
 
 describe("addroid doctor", () => {
-  it("clean smoke env (DATABASE_URL 未設定 + Meta CLI mock + 32-byte key) で check 行と overall を出力する", async () => {
+  it("clean smoke env (DATABASE_URL 未設定 + 32-byte key) で check 行と overall を出力する", async () => {
     await withCleanEnv(
       {
         ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-        ADDROID_META_ADS_CLI_MOCK: "1",
       },
       async () => {
         const { code, out } = await capture(() => runDoctor([]));
@@ -106,8 +100,6 @@ describe("addroid doctor", () => {
         for (const name of [
           "platform",
           "uv",
-          "python3.12",
-          "meta-ads-cli",
           "github-cli",
           "DATABASE_URL",
           "ENCRYPTION_KEY",
@@ -123,9 +115,6 @@ describe("addroid doctor", () => {
         }
         assert.match(out.stdout, /overall:\s+\[/);
 
-        // ADDROID_META_ADS_CLI_MOCK=1 のとき meta-ads-cli は ok を返す。
-        assert.match(out.stdout, /meta-ads-cli\s+ADDROID_META_ADS_CLI_MOCK=1/);
-
         // ENCRYPTION_KEY も ok を返す。
         assert.match(out.stdout, /ENCRYPTION_KEY\s+set \(32 bytes/);
       }
@@ -136,7 +125,6 @@ describe("addroid doctor", () => {
     await withCleanEnv(
       {
         ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-        ADDROID_META_ADS_CLI_MOCK: "1",
       },
       async () => {
         const { code, out } = await capture(() => runDoctor([]));
@@ -154,7 +142,6 @@ describe("addroid doctor", () => {
     // (real DB に到達しようとしてテストを 10 秒以上ブロックさせない)。
     await withCleanEnv(
       {
-        ADDROID_META_ADS_CLI_MOCK: "1",
         // ENCRYPTION_KEY は intentionally undefined
       },
       async () => {
@@ -166,19 +153,17 @@ describe("addroid doctor", () => {
     );
   });
 
-  it("ADDROID_META_ADS_CLI_MOCK 未設定で実バイナリが見つからない場合 actionable hint を出す", async () => {
+  it("Meta Ads CLI が無くても doctor の必須診断には含めない", async () => {
     await withCleanEnv(
       {
         ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-        // PATH を一時的に空にすることで meta-ads / meta_ads / metaads の検出を確実に外す。
+        // PATH を一時的に空にしても Meta Ads CLI は標準必須診断に含まれない。
         PATH: "/nonexistent-empty-path-9999",
       },
       async () => {
         const { code, out } = await capture(() => runDoctor([]));
-        // Meta Ads CLI が見つからない場合 error。
         assert.equal(code, 1);
-        assert.match(out.stdout, /\[error\]\s+meta-ads-cli/);
-        assert.match(out.stdout, /ADDROID_META_ADS_CLI_MOCK=1/);
+        assert.doesNotMatch(out.stdout, /meta-ads-cli/i);
       }
     );
   });
@@ -187,7 +172,6 @@ describe("addroid doctor", () => {
     await withCleanEnv(
       {
         ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-        ADDROID_META_ADS_CLI_MOCK: "1",
       },
       async (home) => {
         // config.yaml は存在しないことを保証 (withCleanEnv が一時 home を作るだけ)。

@@ -214,9 +214,9 @@ async function fetchGraphRows(
 ): Promise<GraphRow[]> {
   const fields =
     edge === "campaigns"
-      ? "id,name,status,effective_status,configured_status,updated_time"
+      ? "id,name,status,effective_status,configured_status,objective,buying_type,daily_budget,lifetime_budget,budget_remaining,bid_strategy,spend_cap,start_time,stop_time,special_ad_categories,special_ad_category_country,is_adset_budget_sharing_enabled,updated_time"
       : edge === "adsets"
-        ? "id,name,status,effective_status,configured_status,campaign_id,updated_time,targeting,optimization_goal,billing_event,destination_type,promoted_object"
+        ? "id,name,status,effective_status,configured_status,campaign_id,daily_budget,lifetime_budget,budget_remaining,bid_amount,bid_strategy,bid_constraints,start_time,end_time,updated_time,targeting,optimization_goal,billing_event,attribution_spec,destination_type,frequency_control_specs,pacing_type,promoted_object,daily_spend_cap,lifetime_spend_cap,daily_min_spend_target,lifetime_min_spend_target,is_dynamic_creative"
         : [
             "id",
             "name",

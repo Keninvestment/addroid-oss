@@ -1,24 +1,15 @@
 // AdDroid OSS — operation action → MetaActionExecutor adapter (apps/worker side).
 //
-// `runExecuteApply` から渡される 1 つの action を Meta CLI runner の
-// invocation に翻訳して実行し、`ExecuteActionResult` (sanitized) に再構成する。
+// `runExecuteApply` から渡される 1 つの action を Graph API request に翻訳して実行し、
+// `ExecuteActionResult` (sanitized) に再構成する。
 //
 // 動作モード:
-//   - cli         : `ADDROID_META_CLI_BIN` が設定されている本番経路。
-//                   `MetaCliRunner.run` が token を環境変数経由で注入し、
-//                   stdout/stderr は token-redacted で返す。token 未連携 / 期限切れは
-//                   CliApplyExecutor 内部で auth_error + reauth notify に変換される。
+//   - graph       : 既定の本番経路。Meta Graph API を正規ルートとして使う。
 //   - mock        : `ADDROID_META_CLI_BIN` 未設定 + `ADDROID_META_ADS_CLI_MOCK=1`
 //                   の場合に限り選ばれる、明示的なローカルテストシミュレーション経路。
 //                   Meta API には一切リクエストせず即 success を返す (the current implementation の
 //                   "mocked equivalent in local tests" 受入要件に対応)。
-//   - fail_closed : `ADDROID_META_CLI_BIN` 未設定かつ `ADDROID_META_ADS_CLI_MOCK`
-//                   も立っていない場合の既定フェイルクローズド経路。Apply は
-//                   PAUSED 作成であっても Meta API に副作用を出す可能性があり、
-//                   CLI 未設定状態で「mock success」を装うと PR がマージされた
-//                   だけで `apply.executed` が記録されてしまうため、CLI 不在は
-//                   常に unknown_error + meta.cli_unknown_error notify として
-//                   失敗扱いにする (regression fix)。
+//   - cli         : 将来 Meta Ads CLI の対応範囲が十分になった場合の内部 backend。
 //
 // 本ファイルは Prisma を import しない。token は MetaAdapter から都度復号して
 // 取得し、メソッドスコープでのみ保持する。
@@ -28,6 +19,7 @@ import path from "node:path";
 import { spawn as nodeSpawn } from "node:child_process";
 import { LocalDiskStorage } from "@addroid/config";
 import {
+  META_GRAPH_API_VERSION,
   MetaAdapterUnauthenticatedError,
   MetaCliMissingTokenError,
   MetaCliRunner,
@@ -46,11 +38,11 @@ import type {
   ApplyAction,
   ExecuteActionInput,
   ExecuteActionResult,
+  GraphOperationAction,
   JsonValue,
   MetaActionExecutor,
 } from "@addroid/queue";
 
-const META_GRAPH_API_VERSION = "v25.0";
 type CreateCreativeApplyAction = ApplyAction & { kind: "create_creative" };
 
 // ---------------------------------------------------------------------
@@ -502,9 +494,15 @@ function graphEndpoint(pathname: string): string {
 async function postGraphJson(
   pathname: string,
   accessToken: string,
-  body: Record<string, string>
+  body: Record<string, unknown>
 ): Promise<{ status: number; json: unknown }> {
-  const form = new URLSearchParams(body);
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "object") form.set(key, JSON.stringify(value));
+    else if (typeof value === "boolean") form.set(key, value ? "true" : "false");
+    else form.set(key, String(value));
+  }
   const res = await fetch(graphEndpoint(pathname), {
     method: "POST",
     headers: {
@@ -587,6 +585,8 @@ function extractImageHash(json: unknown): string | null {
 function graphLogPayload(input: {
   accountKey: string;
   action: ApplyAction;
+  resource: string;
+  verb: string;
   sanitizedCommand: string;
   sanitizedArgs: string[];
   refs: GraphApplyRefs;
@@ -617,8 +617,8 @@ function graphLogPayload(input: {
     stderr: input.stderr ?? "",
     throttleHeaders: null,
     mode: "graph",
-    resource: "creatives",
-    verb: "create",
+    resource: input.resource,
+    verb: input.verb,
     action: JSON.parse(JSON.stringify(input.action)) as JsonValue,
     response: input.response ?? null,
     preflight: input.preflight ?? null,
@@ -679,6 +679,10 @@ function isCreateRequiringExternalId(kind: ApplyAction["kind"]): boolean {
     kind === "create_campaign" ||
     kind === "create_adset" ||
     kind === "create_ad" ||
+    kind === "campaign.create" ||
+    kind === "adset.create" ||
+    kind === "ad.create" ||
+    kind === "creative.create" ||
     kind === "meta_cli_operation"
   );
 }
@@ -1274,6 +1278,8 @@ export class CliApplyExecutor implements MetaActionExecutor {
         logPayload: graphLogPayload({
           accountKey,
           action: input.action,
+          resource: input.args.resource,
+          verb: input.args.verb,
           sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
           sanitizedArgs: input.args.args,
           refs: input.refs,
@@ -1300,6 +1306,8 @@ export class CliApplyExecutor implements MetaActionExecutor {
           logPayload: graphLogPayload({
             accountKey,
             action: input.action,
+            resource: input.args.resource,
+            verb: input.args.verb,
             sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
             sanitizedArgs: input.args.args,
             refs: input.refs,
@@ -1328,6 +1336,8 @@ export class CliApplyExecutor implements MetaActionExecutor {
           logPayload: graphLogPayload({
             accountKey,
             action: input.action,
+            resource: input.args.resource,
+            verb: input.args.verb,
             sanitizedCommand: input.sanitizedCommand.replace(/^meta-ads-cli /, "meta-graph-api "),
             sanitizedArgs: input.args.args,
             refs: input.refs,
@@ -1377,6 +1387,692 @@ export class CliApplyExecutor implements MetaActionExecutor {
 }
 
 // ---------------------------------------------------------------------
+// GraphApplyExecutor — canonical Meta Graph API route
+// ---------------------------------------------------------------------
+
+export interface GraphApplyExecutorOptions {
+  metaAdapter: MetaAdapter;
+  resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
+  resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
+}
+
+export class GraphApplyExecutor implements MetaActionExecutor {
+  private readonly metaAdapter: MetaAdapter;
+  private readonly resolveAdAccountId?: (accountKey: string) => Promise<string | null>;
+  private readonly resolveAdAccountCurrency?: (accountKey: string) => Promise<string | null>;
+  private readonly refs = new Map<string, string>();
+
+  constructor(opts: GraphApplyExecutorOptions) {
+    this.metaAdapter = opts.metaAdapter;
+    this.resolveAdAccountId = opts.resolveAdAccountId;
+    this.resolveAdAccountCurrency = opts.resolveAdAccountCurrency;
+  }
+
+  async executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult> {
+    const action = this.toGraphAction(input.action);
+    if (!action) {
+      return {
+        status: "skipped",
+        message: `unsupported action kind ${input.action.kind} skipped by Graph executor`,
+        logPayload: { reason: "unsupported_action", actionKind: input.action.kind },
+      };
+    }
+    const startedAt = new Date();
+    const accountKey = action.account;
+    const [resource, verb] = action.kind.split(".") as [string, string];
+    const refs: GraphApplyRefs = {
+      refType: "apply_job",
+      refId: input.context.applyJobId,
+      pullRequestNumber: input.context.prNumber,
+      ...(typeof input.context.approvalRecordId === "string" && input.context.approvalRecordId.length > 0
+        ? { approvalRecordId: input.context.approvalRecordId }
+        : {}),
+    };
+    const sanitizedCommand = `meta-graph-api ${action.kind}`;
+    const finish = () => new Date();
+    const duration = (finishedAt: Date) => finishedAt.getTime() - startedAt.getTime();
+    try {
+      const lease = await this.metaAdapter.loadAccessTokenPlaintext();
+      if (!lease) throw new MetaCliMissingTokenError(accountKey);
+      const adAccountId =
+        (this.resolveAdAccountId ? await this.resolveAdAccountId(accountKey) : null) ?? accountKey;
+      const currency =
+        (this.resolveAdAccountCurrency ? await this.resolveAdAccountCurrency(accountKey) : null) ?? "USD";
+      const result = await this.executeGraphAction({
+        action,
+        accessToken: lease.accessToken,
+        adAccountId,
+        accountCurrency: currency,
+      });
+      if (result.externalId) this.rememberRef(action, result.externalId);
+      const finishedAt = finish();
+      return {
+        status: "success",
+        message: `meta graph ${action.kind} succeeded${result.externalId ? ` (${result.externalId})` : ""}`,
+        ...(result.externalId ? { externalId: result.externalId } : {}),
+        logPayload: graphLogPayload({
+          accountKey,
+          action,
+          resource,
+          verb,
+          sanitizedCommand,
+          sanitizedArgs: [action.kind],
+          refs,
+          startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(),
+          durationMs: duration(finishedAt),
+          exitClass: "success",
+          stdout: result.externalId ? JSON.stringify({ id: result.externalId }) : "",
+          response: result.response,
+          preflight: result.preflight,
+        }),
+      };
+    } catch (err) {
+      const finishedAt = finish();
+      if (
+        err instanceof MetaCliMissingTokenError ||
+        err instanceof MetaTokenExpiredError ||
+        err instanceof MetaAdapterUnauthenticatedError
+      ) {
+        const detail = err.message;
+        return {
+          status: "auth_error",
+          message: `meta graph ${action.kind} aborted before request: ${detail}`,
+          logPayload: graphLogPayload({
+            accountKey,
+            action,
+            resource,
+            verb,
+            sanitizedCommand,
+            sanitizedArgs: [action.kind],
+            refs,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: duration(finishedAt),
+            exitClass: "auth_error",
+            stderr: detail,
+          }),
+          notify: { auditAction: "oauth.meta.reauth_required", detail },
+        };
+      }
+      if (err instanceof MetaGraphApplyError) {
+        const rec = recommendActionForExit(err.exitClass);
+        const status: ExecuteActionResult["status"] =
+          err.exitClass === "auth_error"
+            ? "auth_error"
+            : err.exitClass === "rate_limit_error"
+              ? "rate_limit_error"
+              : err.exitClass === "api_error"
+                ? "api_error"
+                : "unknown_error";
+        const out: ExecuteActionResult = {
+          status,
+          message: `meta graph ${action.kind} failed: ${err.message}`,
+          logPayload: graphLogPayload({
+            accountKey,
+            action,
+            resource,
+            verb,
+            sanitizedCommand,
+            sanitizedArgs: [action.kind],
+            refs,
+            startedAt: startedAt.toISOString(),
+            finishedAt: finishedAt.toISOString(),
+            durationMs: duration(finishedAt),
+            exitClass: err.exitClass,
+            stderr: err.message,
+            statusCode: err.status,
+            response: err.payload,
+          }),
+        };
+        if (rec.kind === "retry_with_backoff") {
+          out.retry = {
+            delayMs: Math.min(rec.maxBackoffMs, rec.initialBackoffMs * Math.pow(2, input.attempt)),
+            maxAttempts: rec.maxAttempts,
+          };
+        } else if (
+          rec.kind === "notify_reauth" ||
+          rec.kind === "notify_api_error" ||
+          rec.kind === "fail_fast_notify"
+        ) {
+          out.notify = { auditAction: rec.auditAction, detail: rec.reason };
+        }
+        return out;
+      }
+      throw err;
+    }
+  }
+
+  private async executeGraphAction(input: {
+    action: GraphOperationAction;
+    accessToken: string;
+    adAccountId: string;
+    accountCurrency: string;
+  }): Promise<{ externalId?: string; response: JsonValue; preflight?: JsonValue }> {
+    const { action, accessToken, adAccountId, accountCurrency } = input;
+    const payload = resolvePayloadRefs(action.payload, this.refs);
+    switch (action.kind) {
+      case "campaign.create": {
+        const created = await postGraphJson(`${adAccountId}/campaigns`, accessToken, graphCampaignCreatePayload(payload, accountCurrency));
+        return requireGraphId(created.json, "campaign.create");
+      }
+      case "campaign.update":
+      case "campaign.status": {
+        const id = requireTargetId(payload, "campaignId", action);
+        const updated = await postGraphJson(id, accessToken, graphUpdatePayload(payload, accountCurrency));
+        return { externalId: id, response: updated.json as JsonValue };
+      }
+      case "campaign.delete": {
+        const id = requireTargetId(payload, "campaignId", action);
+        const deleted = await postGraphJson(id, accessToken, { status: "DELETED" });
+        return { externalId: id, response: deleted.json as JsonValue };
+      }
+      case "adset.create": {
+        const created = await postGraphJson(`${adAccountId}/adsets`, accessToken, graphAdsetCreatePayload(payload, accountCurrency));
+        return requireGraphId(created.json, "adset.create");
+      }
+      case "adset.update":
+      case "adset.status": {
+        const id = requireTargetId(payload, "adsetId", action);
+        const updated = await postGraphJson(id, accessToken, graphUpdatePayload(payload, accountCurrency));
+        return { externalId: id, response: updated.json as JsonValue };
+      }
+      case "adset.delete": {
+        const id = requireTargetId(payload, "adsetId", action);
+        const deleted = await postGraphJson(id, accessToken, { status: "DELETED" });
+        return { externalId: id, response: deleted.json as JsonValue };
+      }
+      case "creative.create":
+        return this.executeCreativeCreate({ action, payload, accessToken, adAccountId });
+      case "creative.update": {
+        const id = requireTargetId(payload, "creativeId", action);
+        const updated = await postGraphJson(id, accessToken, graphCreativeUpdatePayload(payload));
+        return { externalId: id, response: updated.json as JsonValue };
+      }
+      case "creative.delete": {
+        const id = requireTargetId(payload, "creativeId", action);
+        const deleted = await postGraphJson(id, accessToken, { status: "DELETED" });
+        return { externalId: id, response: deleted.json as JsonValue };
+      }
+      case "ad.create": {
+        const created = await postGraphJson(`${adAccountId}/ads`, accessToken, graphAdCreatePayload(payload));
+        return requireGraphId(created.json, "ad.create");
+      }
+      case "ad.update":
+      case "ad.status": {
+        const id = requireTargetId(payload, "adId", action);
+        const updated = await postGraphJson(id, accessToken, graphUpdatePayload(payload, accountCurrency));
+        return { externalId: id, response: updated.json as JsonValue };
+      }
+      case "ad.delete": {
+        const id = requireTargetId(payload, "adId", action);
+        const deleted = await postGraphJson(id, accessToken, { status: "DELETED" });
+        return { externalId: id, response: deleted.json as JsonValue };
+      }
+      default:
+        throw new MetaGraphApplyError({
+          message: `unsupported Graph operation kind: ${action.kind}`,
+          exitClass: "api_error",
+        });
+    }
+  }
+
+  private async executeCreativeCreate(input: {
+    action: GraphOperationAction;
+    payload: Record<string, unknown>;
+    accessToken: string;
+    adAccountId: string;
+  }): Promise<{ externalId?: string; response: JsonValue; preflight?: JsonValue }> {
+    const { action, payload, accessToken, adAccountId } = input;
+    const pageId = readGraphString(payload, "pageId");
+    const instagramUserId = readGraphString(payload, "instagramUserId");
+    const preflight = await fetchMetaAssetReadiness({
+      accessToken,
+      adAccountId,
+      pageId: pageId ?? undefined,
+      instagramUserId: instagramUserId ?? undefined,
+      limit: 100,
+    });
+    let imageHash = readGraphString(payload, "imageHash");
+    const storageKey = readGraphString(payload, "storageKey");
+    if (!imageHash && storageKey) {
+      const uploaded = await postGraphMultipart(
+        `${adAccountId}/adimages`,
+        accessToken,
+        {},
+        { field: "source", path: fileArg(storageKey) }
+      );
+      imageHash = extractImageHash(uploaded.json) ?? undefined;
+    }
+    const graphPayload = sanitizeGraphPayload(payload.graphPayload);
+    const hasExplicitCreativeGraphShape =
+      isRecord(payload.objectStorySpec) ||
+      isRecord(graphPayload.object_story_spec) ||
+      isRecord(payload.assetFeedSpec) ||
+      isRecord(graphPayload.asset_feed_spec) ||
+      Boolean(readGraphString(payload, "videoId") ?? (typeof graphPayload.video_id === "string" ? graphPayload.video_id : null));
+    const objectStorySpec =
+      isRecord(payload.objectStorySpec)
+        ? payload.objectStorySpec
+        : isRecord(graphPayload.object_story_spec)
+          ? undefined
+          : hasExplicitCreativeGraphShape
+            ? removeUndefinedGraph({ page_id: readGraphString(payload, "pageId") })
+            : buildGraphImageObjectStorySpec(payload, imageHash);
+    const created = await postGraphJson(`${adAccountId}/adcreatives`, accessToken, graphCreativeCreatePayload(payload, {
+      name: readGraphString(payload, "name") ?? action.entity?.nodeKey ?? action.ref ?? "AdDroid Creative",
+      object_story_spec: objectStorySpec,
+    }));
+    return { ...requireGraphId(created.json, "creative.create"), preflight: preflight as unknown as JsonValue };
+  }
+
+  private toGraphAction(action: ApplyAction): GraphOperationAction | null {
+    if (action.kind.includes(".")) return action as GraphOperationAction;
+    return legacyActionToGraph(action);
+  }
+
+  private rememberRef(action: GraphOperationAction, externalId: string): void {
+    if (action.ref) this.refs.set(action.ref, externalId);
+    if (action.entity?.nodeType && action.entity.nodeKey) {
+      this.refs.set(`${action.entity.nodeType}:${action.entity.nodeKey}`, externalId);
+      this.refs.set(`{{${action.entity.nodeType}:${action.entity.nodeKey}}}`, externalId);
+    }
+  }
+}
+
+function legacyActionToGraph(action: ApplyAction): GraphOperationAction | null {
+  if (action.kind === "meta_cli_operation") return null;
+  const account = action.account;
+  switch (action.kind) {
+    case "create_campaign":
+      return {
+        kind: "campaign.create",
+        account,
+        ref: `campaign:${action.campaignId}`,
+        payload: {
+          campaignId: action.campaignId,
+          name: action.name,
+          objective: action.objective,
+          status: action.initialState ?? "PAUSED",
+          specialAdCategories: ["NONE"],
+          ...(action.budget ?? {}),
+        },
+        entity: { nodeType: "campaign", nodeKey: String(action.campaignId), displayName: String(action.name ?? action.campaignId), status: normalizeGraphEntityStatus(action.initialState) },
+        externalIdRequired: true,
+      };
+    case "update_campaign":
+      return { kind: "campaign.update", account, payload: { campaignId: action.campaignId, ...changesToPayload(action.changes) }, entity: { nodeType: "campaign", nodeKey: String(action.campaignId) } };
+    case "delete_campaign":
+      return { kind: "campaign.delete", account, payload: { campaignId: action.campaignId }, entity: { nodeType: "campaign", nodeKey: String(action.campaignId), status: "archived" } };
+    case "create_adset":
+      return {
+        kind: "adset.create",
+        account,
+        ref: `adset:${action.adsetId}`,
+        payload: {
+          adsetId: action.adsetId,
+          campaignId: action.campaignId,
+          name: action.name,
+          status: action.initialState ?? "PAUSED",
+          optimizationGoal: action.optimizationGoal,
+          billingEvent: action.billingEvent,
+          ...(action.budget ?? {}),
+          bidAmount: action.bidAmount,
+          startTime: action.startTime,
+          endTime: action.endTime,
+          targeting: action.targeting,
+          pixelId: action.pixelId,
+          customEventType: action.customEventType,
+        },
+        entity: { nodeType: "adset", nodeKey: String(action.adsetId), displayName: String(action.name ?? action.adsetId), parentNodeType: "campaign", parentNodeKey: String(action.campaignId), status: normalizeGraphEntityStatus(action.initialState) },
+        externalIdRequired: true,
+      };
+    case "update_adset":
+      return { kind: "adset.update", account, payload: { adsetId: action.adsetId, ...changesToPayload(action.changes) }, entity: { nodeType: "adset", nodeKey: String(action.adsetId), parentNodeType: "campaign", parentNodeKey: String(action.campaignId) } };
+    case "delete_adset":
+      return { kind: "adset.delete", account, payload: { adsetId: action.adsetId }, entity: { nodeType: "adset", nodeKey: String(action.adsetId), status: "archived" } };
+    case "create_creative":
+      return {
+        kind: "creative.create",
+        account,
+        ref: `creative:${action.creativeId}`,
+        payload: { ...action, creativeId: action.creativeId },
+        entity: { nodeType: "creative", nodeKey: String(action.creativeId), displayName: String(action.name ?? action.creativeId) },
+        externalIdRequired: true,
+      };
+    case "update_creative":
+      return { kind: "creative.update", account, payload: { creativeId: action.creativeId, ...changesToPayload(action.changes) }, entity: { nodeType: "creative", nodeKey: String(action.creativeId) } };
+    case "delete_creative":
+      return { kind: "creative.delete", account, payload: { creativeId: action.creativeId }, entity: { nodeType: "creative", nodeKey: String(action.creativeId) } };
+    case "create_ad":
+      return {
+        kind: "ad.create",
+        account,
+        ref: `ad:${action.adId}`,
+        payload: {
+          adId: action.adId,
+          adsetId: action.adsetId,
+          name: action.name,
+          creativeRef: action.creativeRef,
+          status: action.initialState ?? "PAUSED",
+          trackingSpecs: action.trackingSpecs,
+          pixelId: action.pixelId,
+        },
+        entity: { nodeType: "ad", nodeKey: String(action.adId), displayName: String(action.name ?? action.adId), parentNodeType: "adset", parentNodeKey: String(action.adsetId), status: normalizeGraphEntityStatus(action.initialState) },
+        externalIdRequired: true,
+      };
+    case "update_ad":
+      return { kind: "ad.update", account, payload: { adId: action.adId, ...changesToPayload(action.changes) }, entity: { nodeType: "ad", nodeKey: String(action.adId), parentNodeType: "adset", parentNodeKey: String(action.adsetId) } };
+    case "delete_ad":
+      return { kind: "ad.delete", account, payload: { adId: action.adId }, entity: { nodeType: "ad", nodeKey: String(action.adId), status: "archived" } };
+    default:
+      return null;
+  }
+}
+
+function changesToPayload(changes: unknown): Record<string, unknown> {
+  if (!isRecord(changes)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(changes)) {
+    if (isRecord(value) && "to" in value) out[key] = value.to;
+    else out[key] = value;
+  }
+  return out;
+}
+
+function resolvePayloadRefs(payload: Record<string, unknown>, refs: Map<string, string>): Record<string, unknown> {
+  return resolveGraphRefsDeep(payload, refs) as Record<string, unknown>;
+}
+
+function resolveGraphRefsDeep(value: unknown, refs: Map<string, string>): unknown {
+  if (typeof value === "string") {
+    return refs.get(value) ?? refs.get(stripOperationRef(value)) ?? value;
+  }
+  if (Array.isArray(value)) return value.map((item) => resolveGraphRefsDeep(item, refs));
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[key] = resolveGraphRefsDeep(item, refs);
+    return out;
+  }
+  return value;
+}
+
+function stripOperationRef(value: string): string {
+  const match = /^\{\{([^}]+)\}\}$/.exec(value);
+  return match?.[1] ?? value;
+}
+
+function graphCampaignCreatePayload(payload: Record<string, unknown>, accountCurrency: string): Record<string, unknown> {
+  return mergeGraphPayload(payload, {
+    name: readGraphString(payload, "name"),
+    objective: readGraphString(payload, "objective"),
+    status: readGraphString(payload, "status") ?? "PAUSED",
+    buying_type: readGraphString(payload, "buyingType"),
+    special_ad_categories: payload.specialAdCategories,
+    special_ad_category_country: payload.specialAdCategoryCountry ?? payload.specialAdCategoryCountries,
+    daily_budget: moneyField(payload.dailyBudget, accountCurrency),
+    lifetime_budget: moneyField(payload.lifetimeBudget, accountCurrency),
+    bid_strategy: readGraphString(payload, "bidStrategy"),
+    spend_cap: moneyField(payload.spendCap, accountCurrency),
+    start_time: readGraphString(payload, "startTime"),
+    stop_time: readGraphString(payload, "stopTime"),
+    is_adset_budget_sharing_enabled: payload.isAdsetBudgetSharingEnabled ?? payload.adsetBudgetSharing,
+    pacing_type: payload.pacingType,
+    smart_promotion_type: readGraphString(payload, "smartPromotionType"),
+    promoted_object: payload.promotedObject,
+  });
+}
+
+function graphAdsetCreatePayload(payload: Record<string, unknown>, accountCurrency: string): Record<string, unknown> {
+  const countries = readCountriesFromPayload(payload);
+  const targeting = isRecord(payload.targeting)
+    ? payload.targeting
+    : countries.length > 0
+      ? { geo_locations: { countries } }
+      : undefined;
+  const promotedObject = isRecord(payload.promotedObject)
+    ? payload.promotedObject
+    : buildPromotedObject(payload);
+  return mergeGraphPayload(payload, {
+    campaign_id: readGraphString(payload, "campaignId") ?? readGraphString(payload, "campaignRef"),
+    name: readGraphString(payload, "name"),
+    status: readGraphString(payload, "status") ?? "PAUSED",
+    optimization_goal: readGraphString(payload, "optimizationGoal"),
+    optimization_sub_event: readGraphString(payload, "optimizationSubEvent"),
+    billing_event: readGraphString(payload, "billingEvent"),
+    daily_budget: moneyField(payload.dailyBudget, accountCurrency),
+    lifetime_budget: moneyField(payload.lifetimeBudget, accountCurrency),
+    bid_amount: moneyField(payload.bidAmount, accountCurrency),
+    bid_strategy: readGraphString(payload, "bidStrategy"),
+    bid_constraints: payload.bidConstraints,
+    start_time: readGraphString(payload, "startTime"),
+    end_time: readGraphString(payload, "endTime"),
+    targeting,
+    promoted_object: Object.keys(promotedObject).length > 0 ? promotedObject : undefined,
+    destination_type: readGraphString(payload, "destinationType"),
+    attribution_spec: payload.attributionSpec,
+    frequency_control_specs: payload.frequencyControlSpecs,
+    adset_schedule: payload.adsetSchedule,
+    pacing_type: payload.pacingType,
+    daily_spend_cap: moneyField(payload.dailySpendCap, accountCurrency),
+    lifetime_spend_cap: moneyField(payload.lifetimeSpendCap, accountCurrency),
+    daily_min_spend_target: moneyField(payload.dailyMinSpendTarget, accountCurrency),
+    lifetime_min_spend_target: moneyField(payload.lifetimeMinSpendTarget, accountCurrency),
+    is_dynamic_creative: payload.isDynamicCreative,
+    asset_feed_id: readGraphString(payload, "assetFeedId"),
+    dsa_beneficiary: readGraphString(payload, "dsaBeneficiary"),
+    dsa_payor: readGraphString(payload, "dsaPayor"),
+    regional_regulated_categories: payload.regionalRegulatedCategories,
+  });
+}
+
+function graphAdCreatePayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const creativeId = readGraphString(payload, "creativeId") ?? readGraphString(payload, "creativeRef");
+  return mergeGraphPayload(payload, {
+    adset_id: readGraphString(payload, "adsetId") ?? readGraphString(payload, "adsetRef"),
+    name: readGraphString(payload, "name"),
+    creative: creativeId ? { creative_id: creativeId } : undefined,
+    status: readGraphString(payload, "status") ?? "PAUSED",
+    tracking_specs: payload.trackingSpecs,
+    conversion_specs: payload.conversionSpecs,
+    conversion_domain: readGraphString(payload, "conversionDomain"),
+    creative_asset_groups_spec: payload.creativeAssetGroupsSpec,
+    engagement_audience: payload.engagementAudience,
+    priority: payload.priority,
+    display_sequence: payload.displaySequence,
+    ad_schedule_start_time: readGraphString(payload, "adScheduleStartTime"),
+    ad_schedule_end_time: readGraphString(payload, "adScheduleEndTime"),
+  });
+}
+
+function graphUpdatePayload(payload: Record<string, unknown>, accountCurrency: string): Record<string, unknown> {
+  return mergeGraphPayload(payload, {
+    name: readGraphString(payload, "name"),
+    status: readGraphString(payload, "status"),
+    daily_budget: moneyField(payload.dailyBudget, accountCurrency),
+    lifetime_budget: moneyField(payload.lifetimeBudget, accountCurrency),
+    bid_amount: moneyField(payload.bidAmount, accountCurrency),
+    bid_strategy: readGraphString(payload, "bidStrategy"),
+    end_time: readGraphString(payload, "endTime"),
+    tracking_specs: payload.trackingSpecs,
+    conversion_specs: payload.conversionSpecs,
+    conversion_domain: readGraphString(payload, "conversionDomain"),
+    targeting: payload.targeting,
+    promoted_object: payload.promotedObject,
+    attribution_spec: payload.attributionSpec,
+    optimization_sub_event: readGraphString(payload, "optimizationSubEvent"),
+    destination_type: readGraphString(payload, "destinationType"),
+  });
+}
+
+function graphCreativeUpdatePayload(payload: Record<string, unknown>): Record<string, unknown> {
+  return mergeGraphPayload(payload, {
+    name: readGraphString(payload, "name"),
+    title: readGraphString(payload, "title"),
+    body: readGraphString(payload, "body") ?? readGraphString(payload, "primaryText"),
+    url_tags: readGraphString(payload, "urlTags"),
+  });
+}
+
+function graphCreativeCreatePayload(
+  payload: Record<string, unknown>,
+  base: Record<string, unknown>
+): Record<string, unknown> {
+  return mergeGraphPayload(payload, {
+    ...base,
+    object_story_spec: payload.objectStorySpec ?? base.object_story_spec,
+    asset_feed_spec: payload.assetFeedSpec,
+    degrees_of_freedom_spec: payload.degreesOfFreedomSpec,
+    url_tags: readGraphString(payload, "urlTags"),
+    image_crops: payload.imageCrops,
+    platform_customizations: payload.platformCustomizations,
+    video_id: readGraphString(payload, "videoId"),
+    thumbnail_id: readGraphString(payload, "thumbnailId"),
+    template_url_spec: payload.templateUrlSpec,
+    product_set_id: readGraphString(payload, "productSetId"),
+    destination_set_id: readGraphString(payload, "destinationSetId"),
+    authorization_category: readGraphString(payload, "authorizationCategory"),
+    ad_disclaimer_spec: payload.adDisclaimerSpec,
+    branded_content_sponsor_page_id: readGraphString(payload, "brandedContentSponsorPageId"),
+  });
+}
+
+const TOP_LEVEL_GRAPH_PAYLOAD_DENYLIST = new Set([
+  "access_token",
+  "account_id",
+  "id",
+  "created_time",
+  "updated_time",
+  "effective_status",
+  "configured_status",
+  "issues_info",
+  "recommendations",
+]);
+
+function mergeGraphPayload(
+  payload: Record<string, unknown>,
+  typedPayload: Record<string, unknown>
+): Record<string, unknown> {
+  return removeUndefinedGraph({
+    ...typedPayload,
+    ...sanitizeGraphPayload(payload.graphPayload),
+  });
+}
+
+function sanitizeGraphPayload(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (TOP_LEVEL_GRAPH_PAYLOAD_DENYLIST.has(key)) continue;
+    out[key] = sanitizeGraphPayloadValue(raw, key);
+  }
+  return out;
+}
+
+function sanitizeGraphPayloadValue(value: unknown, key: string): unknown {
+  if (key === "access_token") return undefined;
+  if (Array.isArray(value)) return value.map((item) => sanitizeGraphPayloadValue(item, ""));
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      const sanitized = sanitizeGraphPayloadValue(childValue, childKey);
+      if (sanitized !== undefined) out[childKey] = sanitized;
+    }
+    return out;
+  }
+  return value;
+}
+
+function buildPromotedObject(payload: Record<string, unknown>): Record<string, unknown> {
+  return removeUndefinedGraph({
+    pixel_id: readGraphString(payload, "pixelId"),
+    custom_event_type: readGraphString(payload, "customEventType"),
+    page_id: readGraphString(payload, "pageId"),
+  });
+}
+
+function readCountriesFromPayload(payload: Record<string, unknown>): string[] {
+  const targeting = payload.targeting;
+  if (isRecord(targeting) && isRecord(targeting.geo_locations) && Array.isArray(targeting.geo_locations.countries)) {
+    return targeting.geo_locations.countries.filter((v): v is string => typeof v === "string");
+  }
+  const countries = payload.countries;
+  return Array.isArray(countries) ? countries.filter((v): v is string => typeof v === "string") : [];
+}
+
+function buildGraphImageObjectStorySpec(payload: Record<string, unknown>, imageHash: string | undefined): Record<string, unknown> {
+  const pageId = readGraphString(payload, "pageId");
+  const linkUrl = readGraphString(payload, "linkUrl");
+  if (!pageId) throw new MetaGraphApplyError({ message: "creative.create requires pageId", exitClass: "api_error" });
+  if (!linkUrl) throw new MetaGraphApplyError({ message: "creative.create image link ad requires linkUrl", exitClass: "api_error" });
+  if (!imageHash) throw new MetaGraphApplyError({ message: "creative.create requires imageHash or storageKey", exitClass: "api_error" });
+  const cta = readGraphString(payload, "callToAction");
+  const linkData: Record<string, unknown> = removeUndefinedGraph({
+    image_hash: imageHash,
+    link: linkUrl,
+    message: readGraphString(payload, "body") ?? readGraphString(payload, "primaryText") ?? "",
+    name: readGraphString(payload, "title") ?? readGraphString(payload, "headline"),
+    description: readGraphString(payload, "description"),
+    call_to_action: cta && cta !== "NO_BUTTON"
+      ? { type: cta, value: removeUndefinedGraph({ link: linkUrl, app_link: readGraphString(payload, "instagramAppLink") }) }
+      : undefined,
+  });
+  return removeUndefinedGraph({
+    page_id: pageId,
+    instagram_user_id: readGraphString(payload, "instagramUserId") ?? readGraphString(payload, "instagramActorId"),
+    link_data: linkData,
+  });
+}
+
+function requireTargetId(payload: Record<string, unknown>, key: string, action: GraphOperationAction): string {
+  const id = readGraphString(payload, key) ?? readGraphString(payload, "id") ?? action.entity?.nodeKey ?? null;
+  if (!id) {
+    throw new MetaGraphApplyError({ message: `${action.kind} requires ${key}`, exitClass: "api_error" });
+  }
+  return id;
+}
+
+function requireGraphId(json: unknown, origin: string): { externalId: string; response: JsonValue } {
+  const id = extractId(json);
+  if (!id) {
+    throw new MetaGraphApplyError({
+      message: `${origin} response did not include id`,
+      exitClass: "unknown_error",
+      payload: json as JsonValue,
+    });
+  }
+  return { externalId: id, response: json as JsonValue };
+}
+
+function readGraphString(payload: Record<string, unknown>, key: string): string | undefined {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function moneyField(value: unknown, accountCurrency: string): string | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? amountToMinorUnits(value, accountCurrency)
+    : typeof value === "string" && value.trim()
+      ? value.trim()
+      : undefined;
+}
+
+function removeUndefinedGraph(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (value !== undefined && value !== null) out[key] = value;
+  }
+  return out;
+}
+
+function normalizeGraphEntityStatus(value: unknown): string | undefined {
+  const status = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (status === "active" || status === "paused" || status === "archived") return status;
+  if (status === "deleted") return "archived";
+  return undefined;
+}
+
+// ---------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------
 
@@ -1409,7 +2105,7 @@ export interface ResolveApplyExecutorOptions {
 
 export interface ApplyExecutorSelection {
   executor: MetaActionExecutor;
-  mode: "cli" | "mock" | "fail_closed";
+  mode: "graph" | "cli" | "mock" | "fail_closed";
   reason: string;
   /**
    * regression fix: cli モードで実施した version verification の結果。
@@ -1423,34 +2119,44 @@ export interface ApplyExecutorSelection {
 /**
  * env と Meta token 状態から、apply に使う executor を決定する。
  *
- * - `ADDROID_META_CLI_BIN` 設定 → CliApplyExecutor。token が現時点で読めるか
- *   どうかでは分岐しない:
- *     - token は per-invocation で `metaAdapter.loadAccessTokenPlaintext()`
- *       から再取得するので、reauth/refresh の結果が次の execute_apply に反映される
- *       (worker 起動時の lease に固定されない)。
- *     - token が無い / 期限切れ / 復号失敗の場合、`CliApplyExecutor.executeAction`
- *       が auth_error + `oauth.meta.reauth_required` notify として返し、
- *       `runExecuteApply` が reauth audit を残して中断する (regression fix)。
- *       Mock fallback は使わない。
+ * - 既定 → GraphApplyExecutor。Meta Ads CLI の有無やバージョンでは分岐しない。
+ *   token は per-invocation で `metaAdapter.loadAccessTokenPlaintext()` から再取得する。
  * - `ADDROID_META_CLI_BIN` 未設定 + `ADDROID_META_ADS_CLI_MOCK=1` → MockApplyExecutor
  *   (the current implementation 「mocked equivalent in local tests」経路。ローカル / browser
  *    test を成立させるための明示的シミュレーション)。
- * - `ADDROID_META_CLI_BIN` 未設定 + `ADDROID_META_ADS_CLI_MOCK` 未設定 →
- *   FailClosedApplyExecutor (regression fix)。CLI 未設定なのに `apply.executed`
- *   が audit に積まれる「mock サイレント成功」状態を防ぐため、unknown_error +
- *   `meta.cli_unknown_error` notify として失敗扱いにする。
- *
- * regression fix: CLI モードの runner には `minVersion` と
- * `requireVerifiedVersion: true` を必ず渡し、ここで `verifyVersion()` を 1 回
- * 呼んでバイナリの存在と minVersion 充足を検査する。検査に失敗した場合も
- * mode は "cli" のままで、後続の executeAction が
- * `MetaCliVersionUnverifiedError` を unknown_error + `meta.cli_unknown_error`
- * notify として返す (mock fallback で実 Meta API 操作を装わない)。
+ * - Meta Ads CLI backend は将来復帰用の内部コードとして残すが、この factory からは
+ *   現時点では選択しない。
  */
 export async function resolveApplyExecutor(
   opts: ResolveApplyExecutorOptions
 ): Promise<ApplyExecutorSelection> {
   const env = opts.env ?? process.env;
+  if (env.ADDROID_META_ADS_CLI_MOCK === "1") {
+    return {
+      executor: new MockApplyExecutor(),
+      mode: "mock",
+      reason:
+        "ADDROID_META_ADS_CLI_MOCK=1 selects the explicit local-test mock executor",
+    };
+  }
+  const graphExecutor = new GraphApplyExecutor({
+    metaAdapter: opts.metaAdapter,
+    ...(opts.resolveAdAccountId ? { resolveAdAccountId: opts.resolveAdAccountId } : {}),
+    ...(opts.resolveAdAccountCurrency ? { resolveAdAccountCurrency: opts.resolveAdAccountCurrency } : {}),
+  });
+  return {
+    executor: graphExecutor,
+    mode: "graph",
+    reason:
+      "using Meta Graph API as canonical apply route; Meta Ads CLI is optional diagnostic/future backend only",
+  };
+
+  /*
+   * Internal future path:
+   * Keep the CLI backend code below as a verified capability candidate, but do
+   * not expose an environment variable switch. When the CLI catches up, wire it
+   * through a code-owned capability registry and tests, not operator config.
+   */
   const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
   if (!binaryPath) {
     // regression fix: CLI 未設定時に明示的な local-test simulation を要求された
@@ -1474,7 +2180,7 @@ export async function resolveApplyExecutor(
   }
   const adapter = opts.metaAdapter;
   const runnerOpts: MetaCliRunnerOptions = {
-    binaryPath,
+    binaryPath: binaryPath!,
     spawnImpl: opts.spawnImpl ?? nodeSpawn,
     minVersion: META_CLI_MIN_VERSION,
     requireVerifiedVersion: true,

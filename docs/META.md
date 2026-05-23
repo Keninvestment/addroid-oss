@@ -57,8 +57,8 @@ HTTPS callback URL、public domain、ngrok 等を用意する必要はありま�
 ### 2.2 Token の保存
 
 `addroid connect meta` で貼り付けた Access Token は、`ENCRYPTION_KEY` で暗号化して
-`oauth_tokens(provider="meta")` に保存します。Meta Ads CLI 実行時は公式 CLI 互換の
-`ACCESS_TOKEN` / `AD_ACCOUNT_ID` だけを短命な子プロセス環境に注入します。
+`oauth_tokens(provider="meta")` に保存します。入稿・レポート・クリエイティブ文脈取得は
+Graph API を正規経路にし、token はサーバー側で短命に読み出してリクエストへ注入します。
 
 ### 2.3 Token 入力フロー
 

@@ -1,7 +1,7 @@
-// AdDroid OSS — Meta Ads CLI backed daily-report insights provider.
+// AdDroid OSS — Meta Graph API backed daily-report insights provider.
 //
 // This provider keeps the current DailyReportInsightsProvider contract intact
-// while using the official CLI command surface as the primary read path.
+// while using Graph API as the canonical read path.
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { CiphertextFormatError } from "@addroid/config";
@@ -404,6 +404,19 @@ export async function resolveMetaCliInsightsProvider(
   opts: ResolveMetaCliInsightsProviderOptions
 ): Promise<MetaCliInsightsProviderSelection> {
   const env = opts.env ?? process.env;
+  return {
+    provider: new GraphApiDailyReportInsightsProvider({
+      metaAdapter: opts.metaAdapter,
+      ...(opts.resolveAdAccountId ? { resolveAdAccountId: opts.resolveAdAccountId } : {}),
+    }),
+    mode: "graph_api",
+    reason: "using Meta Graph API as canonical insights provider; Meta Ads CLI is optional diagnostic only",
+  };
+
+  /*
+   * Internal future/diagnostic CLI path. Kept for reuse, but not selected by
+   * operator-facing environment variables while Graph API is the canonical route.
+   */
   const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
   if (!binaryPath) {
     if (env.ADDROID_META_GRAPH_INSIGHTS_FALLBACK === "1") {
@@ -424,7 +437,7 @@ export async function resolveMetaCliInsightsProvider(
     };
   }
   const runner = new MetaCliRunner({
-    binaryPath,
+    binaryPath: binaryPath!,
     spawnImpl: opts.spawnImpl ?? nodeSpawn,
     minVersion: META_CLI_MIN_VERSION,
     requireVerifiedVersion: true,

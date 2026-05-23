@@ -3,24 +3,6 @@ import { META_GRAPH_API_VERSION } from "@addroid/meta-adapter";
 import { runMetaAdsReadOnlyQuery } from "./meta-ads-readonly-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 
-const SUPPORTED_CTA = new Set([
-  "APPLY_NOW",
-  "BOOK_TRAVEL",
-  "BUY_NOW",
-  "CONTACT_US",
-  "DOWNLOAD",
-  "GET_OFFER",
-  "GET_QUOTE",
-  "LEARN_MORE",
-  "NO_BUTTON",
-  "OPEN_LINK",
-  "SHOP_NOW",
-  "SIGN_UP",
-  "SUBSCRIBE",
-  "VIEW_INSTAGRAM_PROFILE",
-  "WATCH_MORE",
-]);
-
 export interface CreativeSubmissionContextResolverInput {
   creativeId: string;
   accountKey?: string;
@@ -62,6 +44,7 @@ interface MetaObjectSummary {
   name: string | null;
   status: string | null;
   effectiveStatus: string | null;
+  raw: Record<string, unknown>;
 }
 
 export function normalizeCreativeSubmissionContextResolverInput(
@@ -133,9 +116,11 @@ export async function resolveCreativeSubmissionContext(opts: {
 
   const suggestedPromotionArgs: Record<string, unknown> = {
     creativeId: opts.input.creativeId,
+    placementMode: "existing_adset",
     ...(accountKey ? { accountKey } : {}),
     ...(campaign ? { campaignId: campaign.id } : {}),
     ...(adset ? { adsetId: adset.id } : {}),
+    ...(existingAd ? { inheritFromAdId: existingAd.id, sourceAdId: existingAd.id } : {}),
     ...(pageId ? { pageId } : {}),
     ...(instagramUserId ? { instagramUserId } : {}),
     ...(instagramActorId ? { instagramActorId } : {}),
@@ -335,6 +320,7 @@ async function resolveAdsetFromLocalMirror(
     name: candidates[0].displayName,
     status: candidates[0].status,
     effectiveStatus: candidates[0].status,
+    raw: {},
   };
 }
 
@@ -388,6 +374,7 @@ async function resolveExistingAdFromLocalMirror(
     name: candidate.displayName,
     status: candidate.status,
     effectiveStatus: candidate.status,
+    raw: {},
   };
 }
 
@@ -509,14 +496,16 @@ function isRateLimitLikeError(value: unknown): boolean {
 }
 
 function summarizeMetaObject(value: unknown): MetaObjectSummary | null {
-  if (!isRecord(value)) return null;
-  const id = readString(value.id);
+  const root = parseMetaCliObjectRecord(value);
+  if (!root) return null;
+  const id = readString(root.id);
   if (!id) return null;
   return {
     id,
-    name: readString(value.name),
-    status: readString(value.status),
-    effectiveStatus: readString(value.effective_status ?? value.effectiveStatus),
+    name: readString(root.name),
+    status: readString(root.status),
+    effectiveStatus: readString(root.effective_status ?? root.effectiveStatus),
+    raw: root,
   };
 }
 
@@ -582,11 +571,9 @@ export function summarizeCreativeForSubmission(
 function normalizeSupportedCta(value: string | null | undefined, warnings: string[]): string | null {
   const normalized = value?.trim().toUpperCase() ?? "";
   if (!normalized) return null;
-  if (SUPPORTED_CTA.has(normalized)) return normalized;
-  warnings.push(
-    `既存広告のCTA ${normalized} は現在の入稿PR反映範囲では使えないため、LEARN_MORE を候補にします。`
-  );
-  return "LEARN_MORE";
+  if (/^[A-Z][A-Z0-9_]*$/.test(normalized)) return normalized;
+  warnings.push(`既存広告のCTA ${normalized} は Meta enum として安全に解釈できないため、候補から除外しました。`);
+  return null;
 }
 
 export function extractCreativeIdFromMetaAd(value: unknown): string | null {
@@ -617,6 +604,11 @@ function formatResolverMessage(input: {
   if (input.campaign) lines.push(`キャンペーン: ${input.campaign.id}`);
   if (input.adset) lines.push(`広告セット: ${input.adset.id}`);
   if (input.existingAd) lines.push(`参照した既存広告: ${input.existingAd.id}`);
+  if (input.campaign) lines.push(...formatCampaignInheritanceSummary(input.campaign));
+  if (input.adset) lines.push(...formatAdsetInheritanceSummary(input.adset));
+  if (input.campaign || input.adset) {
+    lines.push("確認表示は主要項目の要約です。継承されるGraph詳細フィールドは入稿PRのoperation JSONとdry-runで確認できます。");
+  }
   if (input.existingCreative) {
     lines.push(
       `既存広告と同様のページ: ${input.existingCreative.pageId ?? "未確認"}`,
@@ -636,6 +628,192 @@ function formatResolverMessage(input: {
     );
   }
   return lines.join("\n");
+}
+
+function formatCampaignInheritanceSummary(campaign: MetaObjectSummary): string[] {
+  const raw = campaign.raw;
+  const lines = ["継承予定のキャンペーン設定:"];
+  lines.push(`- 名前: ${campaign.name ?? "未確認"}`);
+  lines.push(
+    `- 状態: ${campaign.effectiveStatus ?? campaign.status ?? "未確認"} / 作成時は PAUSED`
+  );
+  lines.push(
+    `- 目的: ${readString(raw.objective) ?? "未確認"} / buying_type: ${
+      readString(raw.buying_type) ?? "未確認"
+    }`
+  );
+  lines.push(`- 予算: ${formatBudgetSummary(raw, "キャンペーン")}`);
+  lines.push(
+    `- 入札戦略: ${readString(raw.bid_strategy) ?? "未確認"}${
+      readString(raw.spend_cap) ? ` / spend_cap=${readString(raw.spend_cap)}` : ""
+    }`
+  );
+  lines.push(`- 特別広告カテゴリ: ${formatStringList(raw.special_ad_categories) ?? "未確認"}`);
+  const schedule = formatSchedule(raw);
+  if (schedule) lines.push(`- 期間: ${schedule}`);
+  const budgetSharing = readString(raw.is_adset_budget_sharing_enabled);
+  if (budgetSharing) lines.push(`- 広告セット予算共有: ${budgetSharing}`);
+  return lines;
+}
+
+function formatAdsetInheritanceSummary(adset: MetaObjectSummary): string[] {
+  const raw = adset.raw;
+  const lines = ["継承予定の広告セット設定:"];
+  lines.push(`- 名前: ${adset.name ?? "未確認"}`);
+  lines.push(`- 状態: ${adset.effectiveStatus ?? adset.status ?? "未確認"} / 作成時は PAUSED`);
+  lines.push(
+    `- 最適化/課金: ${readString(raw.optimization_goal) ?? "未確認"} / ${
+      readString(raw.billing_event) ?? "未確認"
+    }`
+  );
+  lines.push(`- 遷移先種別: ${readString(raw.destination_type) ?? "未確認"}`);
+  lines.push(`- 予算: ${formatBudgetSummary(raw, "広告セット")}`);
+  lines.push(
+    `- 入札: strategy=${readString(raw.bid_strategy) ?? "未確認"}${
+      readString(raw.bid_amount) ? ` / amount=${readString(raw.bid_amount)}` : ""
+    }`
+  );
+  const attribution = formatAttributionSpec(raw.attribution_spec);
+  if (attribution) lines.push(`- アトリビューション: ${attribution}`);
+  const promotedObject = formatRecordPreview(raw.promoted_object);
+  if (promotedObject) lines.push(`- promoted_object: ${promotedObject}`);
+  lines.push(`- ターゲティング: ${formatTargetingSummary(raw.targeting)}`);
+  const schedule = formatSchedule(raw);
+  if (schedule) lines.push(`- 期間: ${schedule}`);
+  return lines;
+}
+
+function formatBudgetSummary(raw: Record<string, unknown>, label: string): string {
+  const daily = readString(raw.daily_budget);
+  const lifetime = readString(raw.lifetime_budget);
+  const source = readString(raw.budget_source);
+  const parts = [];
+  if (daily) parts.push(`daily_budget=${daily}`);
+  if (lifetime) parts.push(`lifetime_budget=${lifetime}`);
+  if (source) parts.push(`budget_source=${source}`);
+  return parts.length > 0 ? `${label} ${parts.join(" / ")}` : `${label}予算なし`;
+}
+
+function formatSchedule(raw: Record<string, unknown>): string | null {
+  const start = readString(raw.start_time);
+  const end = readString(raw.end_time ?? raw.stop_time);
+  if (!start && !end) return null;
+  return `start=${start ?? "未設定"} / end=${end ?? "未設定"}`;
+}
+
+function formatAttributionSpec(value: unknown): string | null {
+  const specs = normalizeRecordArray(value);
+  if (specs.length === 0) return null;
+  return specs
+    .map((spec) => {
+      const eventType = readString(spec.event_type) ?? "event未確認";
+      const days = readString(spec.window_days) ?? "日数未確認";
+      return `${eventType} ${days}日`;
+    })
+    .join(", ");
+}
+
+function formatTargetingSummary(value: unknown): string {
+  const targeting = parseMetaCliObjectRecord(value);
+  if (!targeting) return "未確認";
+  const parts: string[] = [];
+  const ageMin = readString(targeting.age_min);
+  const ageMax = readString(targeting.age_max);
+  if (ageMin || ageMax) parts.push(`年齢: ${ageMin ?? "下限なし"}-${ageMax ?? "上限なし"}`);
+  const geo = recordAt(targeting, "geo_locations");
+  const geoSummary = formatGeoTargeting(geo);
+  if (geoSummary) parts.push(`地域: ${geoSummary}`);
+  const placements = formatPlacementSummary(targeting);
+  if (placements) parts.push(`配置: ${placements}`);
+  const audiences = formatAudienceSummary(targeting);
+  if (audiences) parts.push(`オーディエンス: ${audiences}`);
+  const automation = formatRecordPreview(targeting.targeting_automation);
+  if (automation) parts.push(`Advantage/自動化: ${automation}`);
+  return parts.length > 0 ? parts.join("、") : "詳細項目なし";
+}
+
+function formatGeoTargeting(geo: Record<string, unknown> | null): string | null {
+  if (!geo) return null;
+  const parts: string[] = [];
+  for (const key of ["countries", "regions", "cities", "zips"] as const) {
+    const rows = normalizeRecordArray(geo[key]);
+    if (rows.length > 0) {
+      parts.push(
+        `${key}=${rows
+          .map((row) => {
+            const name = readString(row.name) ?? readString(row.key) ?? readString(row.country);
+            const radius = readString(row.radius);
+            const unit = readString(row.distance_unit);
+            return radius ? `${name} ${radius}${unit ? ` ${unit}` : ""}` : name;
+          })
+          .filter(Boolean)
+          .join("/")}`
+      );
+    } else {
+      const scalar = formatStringList(geo[key]);
+      if (scalar) parts.push(`${key}=${scalar}`);
+    }
+  }
+  const locationTypes = formatStringList(geo.location_types);
+  if (locationTypes) parts.push(`location_types=${locationTypes}`);
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function formatPlacementSummary(targeting: Record<string, unknown>): string | null {
+  const keys = [
+    "publisher_platforms",
+    "facebook_positions",
+    "instagram_positions",
+    "device_platforms",
+    "user_os",
+  ];
+  const parts = keys
+    .map((key) => {
+      const value = formatStringList(targeting[key]);
+      return value ? `${key}=${value}` : null;
+    })
+    .filter((value): value is string => Boolean(value));
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function formatAudienceSummary(targeting: Record<string, unknown>): string | null {
+  const parts = [];
+  const custom = normalizeRecordArray(targeting.custom_audiences);
+  const excludedCustom = normalizeRecordArray(targeting.excluded_custom_audiences);
+  const flexible = normalizeRecordArray(targeting.flexible_spec);
+  if (custom.length > 0) parts.push(`custom_audiences=${custom.length}件`);
+  if (excludedCustom.length > 0) parts.push(`excluded_custom_audiences=${excludedCustom.length}件`);
+  if (flexible.length > 0) parts.push(`flexible_spec=${flexible.length}件`);
+  const locales = formatStringList(targeting.locales);
+  if (locales) parts.push(`locales=${locales}`);
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+function formatRecordPreview(value: unknown): string | null {
+  const record = parseMetaCliObjectRecord(value);
+  if (!record) return null;
+  const pairs = Object.entries(record)
+    .map(([key, item]) => {
+      const scalar = readString(item);
+      return scalar ? `${key}=${scalar}` : null;
+    })
+    .filter((item): item is string => Boolean(item));
+  return pairs.length > 0 ? pairs.slice(0, 6).join(", ") : `${Object.keys(record).length}項目`;
+}
+
+function formatStringList(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    const items = value.map(readString).filter((item): item is string => Boolean(item));
+    return items.length > 0 ? items.join("/") : null;
+  }
+  return readString(value);
+}
+
+function normalizeRecordArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(parseMetaCliObjectRecord).filter((item): item is Record<string, unknown> =>
+    Boolean(item)
+  );
 }
 
 function readNestedString(value: unknown, path: string[]): string | null {
@@ -672,6 +850,7 @@ function recordAt(value: unknown, key: string): Record<string, unknown> | null {
 function readString(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
   if (Array.isArray(value)) {
     for (const item of value) {
       const text = readString(item);

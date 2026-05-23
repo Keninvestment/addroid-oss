@@ -25,7 +25,7 @@ function exitWith(status) {
   process.exit(typeof status === "number" ? status : 1);
 }
 
-if (fs.existsSync(bundlePath)) {
+if (process.env.ADDROID_CLI_FORCE_SOURCE !== "1" && fs.existsSync(bundlePath)) {
   // Production: 事前ビルド済みバンドルを Node でそのまま実行。
   const result = spawnSync(
     process.execPath,

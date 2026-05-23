@@ -239,6 +239,93 @@ test("runAgentTurn keeps nested proposal args and rejects direct activation on c
   assert.equal(result.toolResults[1]?.status, "unsupported");
 });
 
+test("runAgentTurn preserves deep Graph payloads for proposal operations", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "Graph API 入稿PRを作成します。",
+      tools: [
+        {
+          name: "propose_ops_change",
+          args: {
+            intent: "other",
+            accountKey: "act_123",
+            operations: [
+              {
+                kind: "creative.create",
+                ref: "creative:deep",
+                payload: {
+                  name: "Deep creative",
+                  graphPayload: {
+                    object_story_spec: {
+                      page_id: "page_1",
+                      link_data: {
+                        link: "https://example.com",
+                        message: "hello",
+                        call_to_action: {
+                          type: "LEARN_MORE",
+                          value: {
+                            link: "https://example.com/lp",
+                          },
+                        },
+                      },
+                    },
+                    degrees_of_freedom_spec: {
+                      creative_features_spec: {
+                        standard_enhancements: {
+                          enroll_status: "OPT_OUT",
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "Graph API の raw payload でクリエイティブを入稿PRにして",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "scheduled-agent",
+  });
+
+  const tool = result.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "propose_ops_change");
+  const operation = (tool.toolArgs.operations as Array<Record<string, unknown>>)[0]!;
+  const payload = operation.payload as Record<string, unknown>;
+  const graphPayload = payload.graphPayload as Record<string, unknown>;
+  assert.deepEqual(graphPayload.object_story_spec, {
+    page_id: "page_1",
+    link_data: {
+      link: "https://example.com",
+      message: "hello",
+      call_to_action: {
+        type: "LEARN_MORE",
+        value: {
+          link: "https://example.com/lp",
+        },
+      },
+    },
+  });
+  assert.deepEqual(graphPayload.degrees_of_freedom_spec, {
+    creative_features_spec: {
+      standard_enhancements: {
+        enroll_status: "OPT_OUT",
+      },
+    },
+  });
+});
+
 test("runAgentTurn resolves creative submission as a GitOps PR tool", async () => {
   const provider = new StaticProvider(
     JSON.stringify({
@@ -277,6 +364,83 @@ test("runAgentTurn resolves creative submission as a GitOps PR tool", async () =
   assert.equal(tool.tool, "propose_creative_submission");
   assert.equal(tool.command, null);
   assert.deepEqual(tool.toolArgs.localMediaPaths, ["/tmp/spring.png"]);
+});
+
+test("runAgentTurn preserves level-specific Graph payloads for creative submission", async () => {
+  const provider = new StaticProvider(
+    JSON.stringify({
+      message: "入稿PRを作成します。",
+      tools: [
+        {
+          name: "propose_creative_submission",
+          args: {
+            accountKey: "act_123",
+            creativeName: "graph-creative",
+            adName: "Graph ad",
+            campaignId: "cmp_1",
+            adsetId: "as_1",
+            creativeGraphPayload: {
+              object_story_spec: {
+                page_id: "page_1",
+                link_data: {
+                  link: "https://example.com",
+                  call_to_action: {
+                    type: "SIGN_UP",
+                    value: { link: "https://example.com/signup" },
+                  },
+                },
+              },
+            },
+            adGraphPayload: {
+              conversion_domain: "example.com",
+              tracking_specs: [
+                {
+                  action_type: ["offsite_conversion"],
+                  fb_pixel: ["pixel_1"],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    })
+  );
+  const result = await runAgentTurn({
+    input: "raw Graph payload も含めて広告を作成して",
+    provider,
+    agentContext: {
+      content: "test agent context",
+      webUrl: "http://127.0.0.1:3000",
+      loadedDocs: ["test"],
+    },
+    purpose: "test",
+    surface: "slack-chat",
+  });
+  const tool = result.toolResults[0];
+  assert.equal(tool?.status, "ready");
+  if (tool?.status !== "ready") throw new Error("expected ready tool");
+  assert.equal(tool.tool, "propose_creative_submission");
+  assert.deepEqual(tool.toolArgs.creativeGraphPayload, {
+    object_story_spec: {
+      page_id: "page_1",
+      link_data: {
+        link: "https://example.com",
+        call_to_action: {
+          type: "SIGN_UP",
+          value: { link: "https://example.com/signup" },
+        },
+      },
+    },
+  });
+  assert.deepEqual(tool.toolArgs.adGraphPayload, {
+    conversion_domain: "example.com",
+    tracking_specs: [
+      {
+        action_type: ["offsite_conversion"],
+        fb_pixel: ["pixel_1"],
+      },
+    ],
+  });
 });
 
 test("runAgentTurn resolves creative generation as a library-only tool on chat surfaces", async () => {
@@ -401,7 +565,7 @@ test("runAgentTurn keeps creative submission args for new adset placement", asyn
 test("buildAgentLoopInput includes prior tool results for multi-step reasoning", () => {
   const input = buildAgentLoopInput("CV0を確認して必要なら止めて", [
     {
-      display: "Meta Ads CLI read-only query",
+      display: "Meta Graph read-only query",
       status: "success",
       message: "2件取得しました",
       data: { rows: [{ campaign_id: "cmp_1", conversions: 0 }] },

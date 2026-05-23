@@ -102,8 +102,8 @@ export default async function CreativeSubmitPage({
                 "添付画像を参考にして新しい画像を生成する依頼では referenceImagePaths を使い、添付画像そのものを最終広告素材にする依頼でのみ localMediaPaths を使ってください。",
                 "遷移先URLが依頼文にある場合は linkUrl に入れてください。",
                 "予算は広告アカウント通貨の金額として扱い、dailyBudget / lifetimeBudget に入れてください。JPY アカウントで 500 円/日なら dailyBudget: 500 です。",
-                "Meta Ads CLI 2026/04/29 で反映できる範囲だけPR化します。ターゲティングは countries のみ対応です。年齢、地域半径、配信面、デバイス、Advantage audience、カスタムオーディエンス、PROFILE_VISIT は新規作成PRに含めず、ユーザーに反映できない旨を説明してください。既存のプロフィール訪問広告セットへ入稿する場合は、既存広告から確認した VIEW_INSTAGRAM_PROFILE を維持してください。",
-                "不足している placement、campaignId/adsetId、campaignName/adsetName、objective、予算、pageId、対応済み optimizationGoal、billingEvent、コピー、対応済みCTA、国ターゲティングはツール実行前に短く質問してください。",
+                "入稿PRはGraph API payloadを正準形として作ります。年齢、地域、配信面、デバイス、Advantage audience、カスタムオーディエンス、PROFILE_VISIT、入札戦略、attribution、DSA、asset_feed_spec、degrees_of_freedom_spec、url_tags、conversion_domain なども、ユーザーが指定した値を typed alias または campaignGraphPayload/adsetGraphPayload/creativeGraphPayload/adGraphPayload に保持してください。graphPayload は公式 snake_case を使い、access_token や read-only field は入れないでください。",
+                "不足している placement、campaignId/adsetId、campaignName/adsetName、objective、予算、pageId、optimizationGoal、billingEvent、コピー、CTA、ターゲティングはツール実行前に短く質問してください。",
                 "Meta へ直接変更せず、必ず GitOps PR と dry-run の経路を使ってください。",
               ].filter(Boolean).join("\n")}
               initialInput={selectedInitialInput}

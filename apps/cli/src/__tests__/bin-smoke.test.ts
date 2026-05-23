@@ -33,6 +33,7 @@ function runBin(
   // 親プロセスの環境変数をコピーして必要な上書きを適用する。
   // undefined は明示的に削除する (= clean smoke env を再現)。
   const env: NodeJS.ProcessEnv = { ...process.env };
+  env.ADDROID_CLI_FORCE_SOURCE = "1";
   for (const [k, v] of Object.entries(envOverrides)) {
     if (v === undefined) delete env[k];
     else env[k] = v;
@@ -83,13 +84,12 @@ test("bin/addroid.cjs doctor は clean smoke env で check と overall: を出�
   // 依存として許容する。重要なのは:
   //   - bin が exit 0 / 1 のいずれかを返す (= プロセスがクラッシュしない)
   //   - doctor の check と overall: 行がすべて出力される
-  //   - meta-ads-cli は ADDROID_META_ADS_CLI_MOCK=1 で ok 経路に入る
+  //   - Meta Ads CLI は標準必須診断に含まれない
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-bin-smoke-"));
   try {
     const { code, stdout } = runBin(["doctor"], {
       ADDROID_HOME: tmpHome,
       ENCRYPTION_KEY: ENCRYPTION_KEY_B64,
-      ADDROID_META_ADS_CLI_MOCK: "1",
     });
     // bin が走り切って 0 / 1 のどちらかで終わること (5xx 級のクラッシュではない)。
     assert.ok(
@@ -100,8 +100,6 @@ test("bin/addroid.cjs doctor は clean smoke env で check と overall: を出�
     // doctor が出す check 名が並ぶこと (state は環境依存)。
     for (const name of [
       "uv",
-      "python3.12",
-      "meta-ads-cli",
       "github-cli",
       "DATABASE_URL",
       "ENCRYPTION_KEY",
@@ -116,8 +114,7 @@ test("bin/addroid.cjs doctor は clean smoke env で check と overall: を出�
       );
     }
     assert.match(stdout, /overall:\s+\[(ok|warn|error)\s*\]/);
-    // ADDROID_META_ADS_CLI_MOCK=1 のときは meta-ads-cli は ok を返す。
-    assert.match(stdout, /meta-ads-cli\s+ADDROID_META_ADS_CLI_MOCK=1/);
+    assert.doesNotMatch(stdout, /meta-ads-cli/i);
     // ENCRYPTION_KEY を渡したので ok 行に出ているはず。
     assert.match(stdout, /\[\s*ok\s*\]\s+ENCRYPTION_KEY/);
   } finally {

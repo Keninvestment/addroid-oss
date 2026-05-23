@@ -1,13 +1,16 @@
-// AdDroid OSS — Automation planned action to Meta Ads CLI mutation boundary.
+// AdDroid OSS — Automation planned action to Meta Graph API mutation boundary.
 //
 // The rule engine only returns planned actions. This module is the narrow
 // worker-side adapter that can turn an approved action into a CLI invocation.
 
 import {
+  META_GRAPH_API_VERSION,
+  MetaAdapterUnauthenticatedError,
   MetaCliMissingTokenError,
   MetaCliRunner,
   MetaCliUnsupportedOperationError,
   MetaCliVersionUnverifiedError,
+  MetaTokenExpiredError,
   type MetaAdapter,
   type MetaCliExecutionResult,
   type MetaCliRunnerOptions,
@@ -29,6 +32,10 @@ export interface AutomationCliMutationResult {
   result?: MetaCliExecutionResult;
 }
 
+export interface AutomationMutationExecutor {
+  execute(action: AutomationPlannedAction): Promise<AutomationCliMutationResult>;
+}
+
 export interface AutomationTargetResolver {
   resolveExternalId(input: {
     accountId: string;
@@ -44,9 +51,85 @@ export interface AutomationCliMutationExecutorOptions {
 }
 
 export interface AutomationMutationExecutorSelection {
-  executor: AutomationCliMutationExecutor | null;
-  mode: "cli" | "mock" | "fail_closed";
+  executor: AutomationMutationExecutor | null;
+  mode: "graph" | "cli" | "mock" | "fail_closed";
   reason: string;
+}
+
+class MetaGraphAutomationError extends Error {
+  readonly status: AutomationCliMutationStatus;
+  readonly httpStatus: number | null;
+  constructor(message: string, opts?: { status?: AutomationCliMutationStatus; httpStatus?: number | null }) {
+    super(message);
+    this.name = "MetaGraphAutomationError";
+    this.status = opts?.status ?? "unknown_error";
+    this.httpStatus = opts?.httpStatus ?? null;
+  }
+}
+
+export class AutomationGraphMutationExecutor implements AutomationMutationExecutor {
+  private readonly metaAdapter: MetaAdapter;
+  private readonly resolver: AutomationTargetResolver;
+
+  constructor(opts: { metaAdapter: MetaAdapter; resolver: AutomationTargetResolver }) {
+    this.metaAdapter = opts.metaAdapter;
+    this.resolver = opts.resolver;
+  }
+
+  async execute(action: AutomationPlannedAction): Promise<AutomationCliMutationResult> {
+    const externalId = await this.resolver.resolveExternalId({
+      accountId: action.accountId,
+      hierarchyId: action.hierarchyId,
+      level: action.level,
+      targetKey: action.targetKey,
+    });
+    if (!externalId) {
+      return {
+        status: "api_error",
+        message: `automation ${action.actionType} rejected: no external id for ${action.level}:${action.targetKey}`,
+      };
+    }
+    const payload = buildAutomationGraphPayload(action);
+    if (!payload) {
+      return {
+        status: "unsupported",
+        message: `automation action is not supported by Graph executor: ${action.actionType}`,
+      };
+    }
+    let lease;
+    try {
+      lease = await this.metaAdapter.loadAccessTokenPlaintext();
+    } catch (err) {
+      if (
+        err instanceof MetaTokenExpiredError ||
+        err instanceof MetaAdapterUnauthenticatedError
+      ) {
+        return { status: "auth_error", message: "Meta token is missing or expired; reconnect Meta." };
+      }
+      throw err;
+    }
+    if (!lease) {
+      return { status: "auth_error", message: "Meta token is missing; reconnect Meta." };
+    }
+    try {
+      await postAutomationGraphJson(externalId, lease.accessToken, payload);
+      return {
+        status: "success",
+        message: `automation ${action.actionType} ${action.level}:${externalId} -> graph success`,
+      };
+    } catch (err) {
+      if (err instanceof MetaGraphAutomationError) {
+        return {
+          status: err.status,
+          message: `automation ${action.actionType} ${action.level}:${externalId} -> ${err.message}`,
+        };
+      }
+      return {
+        status: "unknown_error",
+        message: err instanceof Error ? err.message : "automation mutation failed",
+      };
+    }
+  }
 }
 
 export class AutomationCliMutationExecutor {
@@ -155,6 +238,81 @@ export function buildAutomationCliArgs(
   return null;
 }
 
+export function buildAutomationGraphPayload(
+  action: AutomationPlannedAction
+): Record<string, unknown> | null {
+  if (action.actionType === "set_status") {
+    const status = typeof action.payload.status === "string" ? action.payload.status : "";
+    if (status !== "PAUSED" && status !== "ACTIVE") return null;
+    return { status };
+  }
+
+  if (action.actionType === "adjust_budget") {
+    const proposed = action.payload.proposedDailyBudget;
+    if (typeof proposed !== "number" || !Number.isFinite(proposed) || proposed <= 0) {
+      return null;
+    }
+    return { daily_budget: Math.round(proposed) };
+  }
+
+  return null;
+}
+
+async function postAutomationGraphJson(
+  externalId: string,
+  accessToken: string,
+  body: Record<string, unknown>
+): Promise<void> {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === "object") form.set(key, JSON.stringify(value));
+    else if (typeof value === "boolean") form.set(key, value ? "true" : "false");
+    else form.set(key, String(value));
+  }
+  const res = await fetch(
+    `https://graph.facebook.com/${META_GRAPH_API_VERSION}/${externalId}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    }
+  );
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw automationGraphError(res.status, json);
+}
+
+function automationGraphError(status: number, json: unknown): MetaGraphAutomationError {
+  const error =
+    typeof json === "object" &&
+    json !== null &&
+    !Array.isArray(json) &&
+    typeof (json as { error?: unknown }).error === "object" &&
+    (json as { error?: unknown }).error !== null
+      ? ((json as { error: Record<string, unknown> }).error)
+      : null;
+  const code = typeof error?.code === "number" ? error.code : null;
+  const message =
+    typeof error?.message === "string"
+      ? error.message
+      : `Meta Graph API returned HTTP ${status}`;
+  return new MetaGraphAutomationError(message, {
+    status: classifyAutomationGraphError(status, code),
+    httpStatus: status,
+  });
+}
+
+function classifyAutomationGraphError(status: number, code: number | null): AutomationCliMutationStatus {
+  if (status === 401 || code === 190 || code === 102 || code === 104 || code === 463 || code === 467) {
+    return "auth_error";
+  }
+  if (status >= 400 && status < 500) return "api_error";
+  return "unknown_error";
+}
+
 export async function resolveAutomationMutationExecutor(opts: {
   env?: NodeJS.ProcessEnv;
   metaAdapter: MetaAdapter;
@@ -163,6 +321,17 @@ export async function resolveAutomationMutationExecutor(opts: {
   versionResolver?: MetaCliRunnerOptions["versionResolver"];
 }): Promise<AutomationMutationExecutorSelection> {
   const env = opts.env ?? process.env;
+  if (env.ADDROID_META_ADS_CLI_MOCK !== "1") {
+    return {
+      executor: new AutomationGraphMutationExecutor({
+        metaAdapter: opts.metaAdapter,
+        resolver: opts.resolver,
+      }),
+      mode: "graph",
+      reason:
+        "using Meta Graph API as canonical automation mutation route; Meta Ads CLI is optional diagnostic/future backend only",
+    };
+  }
   const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
   if (!binaryPath) {
     if (env.ADDROID_META_ADS_CLI_MOCK === "1") {

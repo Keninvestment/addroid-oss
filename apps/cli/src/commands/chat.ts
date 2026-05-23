@@ -13,7 +13,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   defaultAddroidConfig,
   ensureAddroidPaths,
-  getCryptoBoundary,
   readAddroidConfig,
   resolveWebBinding,
 } from "@addroid/config";
@@ -88,6 +87,7 @@ import {
 } from "../../../worker/src/lib/approval-decision-runtime.js";
 import { runMetaMirrorSync } from "../../../worker/src/lib/meta-mirror-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "../../../worker/src/lib/meta-runtime.js";
+import { runMetaAdsReadOnlyQuery } from "../../../worker/src/lib/meta-ads-readonly-runtime.js";
 
 type ChatCommandName =
   | "doctor"
@@ -2439,34 +2439,18 @@ async function runMetaAdsReadOnlyForChat(
   }
 ): Promise<{ handled: true; code: number; message: string; data?: unknown }> {
   try {
-    const plan = buildMetaAdsReadOnlyInvocation(tool.toolArgs);
-    const runtime = await prepareMetaAdsCliRuntime(opts.env, plan.accountKey, plan.requiresAdAccount);
-    const childEnv: NodeJS.ProcessEnv = {
-      ...opts.env,
-      ACCESS_TOKEN: runtime.accessToken,
-      META_ACCESS_TOKEN: runtime.accessToken,
-    };
-    if (runtime.adAccountId) childEnv.AD_ACCOUNT_ID = runtime.adAccountId;
-    if (plan.businessId) childEnv.BUSINESS_ID = plan.businessId;
-    const result = await spawnMetaAdsCli({
-      binaryPath: runtime.binaryPath,
-      args: plan.args,
-      env: childEnv,
+    const { prisma, workspaceId } = await resolveCliChatDb(opts.env);
+    const data = await runMetaGraphReadOnlyQueryForChat({
+      prisma,
+      workspaceId,
+      env: opts.env,
+      args: tool.toolArgs,
     });
-    if (result.code !== 0) {
-      const message = [
-        "Meta Ads の読み取りに失敗しました。",
-        sanitizeMetaCliText(result.stderr || result.stdout, runtime.accessToken),
-      ].join("\n");
-      opts.out.write(`${message}\n`);
-      return { handled: true, code: 1, message };
-    }
-    const rows = extractUnknownRows(parseUnknownJson(result.stdout));
     return {
       handled: true,
       code: 0,
-      message: formatMetaAdsReadOnlyExecutionSummary(plan.label, rows.length),
-      data: { label: plan.label, rows, rowCount: rows.length },
+      message: formatMetaAdsReadOnlyExecutionSummary(data.label, data.rows.length),
+      data: { label: data.label, rows: data.rows, rowCount: data.rows.length },
     };
   } catch (err) {
     const message = `Meta Ads の読み取りを実行できませんでした: ${(err as Error).message}`;
@@ -2479,250 +2463,19 @@ function formatMetaAdsReadOnlyExecutionSummary(label: string, rowCount: number):
   return `Meta Ads の ${label} を確認しました (${rowCount}件)。`;
 }
 
-function buildMetaAdsReadOnlyInvocation(args: Record<string, unknown>): {
-  accountKey: string | null;
-  businessId: string | null;
-  requiresAdAccount: boolean;
-  args: string[];
-  label: string;
-} {
-  const resource = normalizeMetaResource(requireMetaString(args, "resource"));
-  const action = optionalMetaEnum(args, "action", ["get", "list", "current"]) ?? (resource === "insights" ? "get" : "list");
-  if (action !== "get" && action !== "list" && action !== "current") throw new Error("read-only action only supports get/list/current");
-  if (action === "current" && resource !== "adaccount") throw new Error("current は adaccount のみ対応しています");
-  const accountKey = readMetaStringArg(args, "accountKey", "account_key");
-  const businessId = readMetaStringArg(args, "businessId", "business_id");
-  const out = ["--output", "json", "ads"];
-  if (businessId) out.push("--business-id", businessId);
-  if (resource === "insights") {
-    if (action !== "get") throw new Error("insights は get のみ対応しています");
-    out.push("insights", "get");
-    const fields = readStringArray(args.fields);
-    out.push("--fields", (fields.length ? fields : ["spend", "impressions", "clicks", "ctr", "cpc", "reach", "frequency", "cpm", "cpp", "actions"]).join(","));
-    const datePreset = optionalMetaEnumValue(readMetaStringArg(args, "datePreset", "date_preset"), "datePreset", [
-      "today",
-      "yesterday",
-      "last_3d",
-      "last_7d",
-      "last_14d",
-      "last_30d",
-      "last_90d",
-      "this_month",
-      "last_month",
-    ]);
-    if (datePreset) out.push("--date-preset", datePreset);
-    const since = readMetaStringArg(args, "since");
-    const until = readMetaStringArg(args, "until");
-    if (since) out.push("--since", since);
-    if (until) out.push("--until", until);
-    const timeIncrement = optionalMetaEnumValue(
-      readMetaStringArg(args, "timeIncrement", "time_increment"),
-      "timeIncrement",
-      ["daily", "weekly", "monthly", "all_days"]
-    );
-    if (timeIncrement) out.push("--time-increment", timeIncrement);
-    const breakdowns = readStringArray(args.breakdowns).concat(readStringArray(args.breakdown));
-    for (const breakdown of breakdowns) out.push("--breakdown", breakdown);
-    pushMetaOptional(out, "--campaign-id", readMetaStringArg(args, "campaignId", "campaign_id"));
-    pushMetaOptional(out, "--adset-id", readMetaStringArg(args, "adsetId", "adset_id"));
-    pushMetaOptional(out, "--ad-id", readMetaStringArg(args, "adId", "ad_id"));
-    pushMetaOptional(out, "--sort", args.sort);
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-    return { accountKey, businessId, requiresAdAccount: true, args: out, label: "insights" };
-  }
-
-  out.push(metaResourceCommand(resource), action);
-  if (action === "current") {
-    return { accountKey, businessId, requiresAdAccount: false, args: out, label: "adaccount current" };
-  }
-  if (action === "get") {
-    const id = readMetaResourceId(resource, args);
-    if (!id && resource !== "adaccount") throw new Error(`${metaResourceCommand(resource)} get には id が必要です`);
-    if (id) out.push(id);
-  } else {
-    const parentId =
-      resource === "adset"
-        ? readMetaStringArg(args, "campaignId", "campaign_id")
-        : resource === "ad"
-          ? readMetaStringArg(args, "adsetId", "adset_id")
-          : null;
-    if (parentId) out.push(parentId);
-    if (resource === "product_feed" || resource === "product_item" || resource === "product_set") {
-      const catalogId = readMetaStringArg(args, "catalogId", "catalog_id");
-      if (!catalogId) throw new Error(`${metaResourceCommand(resource)} list には catalogId が必要です`);
-      out.push("--catalog-id", catalogId);
-    }
-    const limit = readPositiveInt(args.limit);
-    if (limit) out.push("--limit", String(Math.min(limit, 100)));
-  }
-  return {
-    accountKey,
-    businessId,
-    requiresAdAccount: resourceRequiresAdAccount(resource, businessId),
-    args: out,
-    label: `${metaResourceCommand(resource)} ${action}`,
-  };
-}
-
-async function prepareMetaAdsCliRuntime(
-  env: NodeJS.ProcessEnv,
-  accountKey: string | null,
-  requiresAdAccount: boolean
-): Promise<{ binaryPath: string; accessToken: string; adAccountId: string | null }> {
-  const binaryPath = env.ADDROID_META_CLI_BIN?.trim();
-  if (!binaryPath) throw new Error("ADDROID_META_CLI_BIN が未設定です");
-  if (!env.DATABASE_URL) throw new Error("DATABASE_URL が未設定です");
-  const [{ prisma }] = await Promise.all([import("@addroid/db")]);
-  try {
-    const crypto = getCryptoBoundary(env);
-    const token = await prisma.oAuthToken.findFirst({
-      where: { provider: "meta" },
-      orderBy: { connectedAt: "desc" },
-      select: { accessTokenCiphertext: true },
-    });
-    if (!token) throw new Error("Meta token が未接続です。`addroid connect meta` を実行してください。");
-    const account = accountKey
-      ? await prisma.adAccount.findFirst({
-          where: { OR: [{ key: accountKey }, { metaAccountId: accountKey }] },
-          orderBy: { updatedAt: "desc" },
-          select: { key: true, metaAccountId: true },
-        })
-      : await prisma.adAccount.findFirst({
-          where: { active: true },
-          orderBy: { updatedAt: "desc" },
-          select: { key: true, metaAccountId: true },
-        });
-    const adAccountId = account?.metaAccountId ?? account?.key ?? accountKey;
-    if (!adAccountId && requiresAdAccount) {
-      throw new Error("広告アカウントが選択されていません。`addroid account` で選択してください。");
-    }
-    return {
-      binaryPath,
-      accessToken: crypto.decrypt(token.accessTokenCiphertext),
-      adAccountId: adAccountId ?? null,
-    };
-  } finally {
-    await prisma.$disconnect().catch(() => undefined);
-  }
-}
-
-async function spawnMetaAdsCli(input: {
-  binaryPath: string;
-  args: string[];
+async function runMetaGraphReadOnlyQueryForChat(input: {
+  prisma: any;
+  workspaceId: string;
   env: NodeJS.ProcessEnv;
-}): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(input.binaryPath, input.args, {
-      env: input.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout?.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  args: Record<string, unknown>;
+}): Promise<{ label: string; rows: unknown[] }> {
+  const result = await runMetaAdsReadOnlyQuery({
+    prisma: input.prisma,
+    workspaceId: input.workspaceId,
+    args: input.args,
+    env: input.env,
   });
-}
-
-function sanitizeMetaCliText(text: string, token: string): string {
-  return text.split(token).join("[REDACTED]").trim().slice(0, 1200);
-}
-
-function parseUnknownJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function extractUnknownRows(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload;
-  if (isRecord(payload)) {
-    if (Array.isArray(payload.data)) return payload.data;
-    if (Array.isArray(payload.rows)) return payload.rows;
-    if (Array.isArray(payload.results)) return payload.results;
-    if (Object.keys(payload).length > 0) return [payload];
-  }
-  return [];
-}
-
-type MetaReadOnlyResource =
-  | "insights"
-  | "adaccount"
-  | "campaign"
-  | "adset"
-  | "ad"
-  | "creative"
-  | "catalog"
-  | "dataset"
-  | "page"
-  | "product_feed"
-  | "product_item"
-  | "product_set";
-
-function requireMetaString(args: Record<string, unknown>, key: string): string {
-  const value = readOptionalString(args[key]);
-  if (!value) throw new Error(`${key} を指定してください`);
-  return value;
-}
-
-function normalizeMetaResource(value: string): MetaReadOnlyResource {
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  const allowed: MetaReadOnlyResource[] = [
-    "insights",
-    "adaccount",
-    "campaign",
-    "adset",
-    "ad",
-    "creative",
-    "catalog",
-    "dataset",
-    "page",
-    "product_feed",
-    "product_item",
-    "product_set",
-  ];
-  if (allowed.includes(normalized as MetaReadOnlyResource)) return normalized as MetaReadOnlyResource;
-  throw new Error(`resource は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
-function metaResourceCommand(resource: MetaReadOnlyResource): string {
-  return resource.replace(/_/g, "-");
-}
-
-function resourceRequiresAdAccount(resource: MetaReadOnlyResource, businessId: string | null): boolean {
-  if (resource === "adaccount" || resource === "page") return false;
-  if ((resource === "catalog" || resource === "dataset") && businessId) return false;
-  if (resource === "product_feed" || resource === "product_item" || resource === "product_set") return false;
-  return true;
-}
-
-function readMetaResourceId(resource: MetaReadOnlyResource, args: Record<string, unknown>): string | null {
-  const specificKeys: Partial<Record<MetaReadOnlyResource, string[]>> = {
-    adaccount: ["accountId", "account_id", "adAccountId", "ad_account_id"],
-    campaign: ["campaignId", "campaign_id"],
-    adset: ["adsetId", "adset_id"],
-    ad: ["adId", "ad_id"],
-    creative: ["creativeId", "creative_id"],
-    catalog: ["catalogId", "catalog_id"],
-    dataset: ["datasetId", "dataset_id", "pixelId", "pixel_id"],
-    page: ["pageId", "page_id"],
-    product_feed: ["productFeedId", "product_feed_id"],
-    product_item: ["productItemId", "product_item_id"],
-    product_set: ["productSetId", "product_set_id"],
-  };
-  for (const key of specificKeys[resource] ?? []) {
-    const value = readOptionalString(args[key]);
-    if (value) return value;
-  }
-  return readOptionalString(args.id);
+  return { label: result.label, rows: result.rows };
 }
 
 function readMetaStringArg(args: Record<string, unknown>, ...keys: string[]): string | null {
@@ -3025,29 +2778,6 @@ function dateStringInRuntimeTimeZone(offsetDays: number): string {
   return new Date(Date.UTC(y, m - 1, d + offsetDays)).toISOString().slice(0, 10);
 }
 
-function optionalMetaEnum<T extends string>(
-  args: Record<string, unknown>,
-  key: string,
-  allowed: readonly T[]
-): T | null {
-  const value = readOptionalString(args[key]);
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if ((allowed as readonly string[]).includes(normalized)) return normalized as T;
-  throw new Error(`${key} は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
-function optionalMetaEnumValue<T extends string>(
-  value: string | null,
-  key: string,
-  allowed: readonly T[]
-): T | null {
-  if (!value) return null;
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if ((allowed as readonly string[]).includes(normalized)) return normalized as T;
-  throw new Error(`${key} は ${allowed.join(" / ")} のいずれかで指定してください`);
-}
-
 function readStringArray(value: unknown): string[] {
   if (typeof value === "string" && value.trim()) return value.split(",").map((item) => item.trim()).filter(Boolean);
   return Array.isArray(value)
@@ -3057,11 +2787,6 @@ function readStringArray(value: unknown): string[] {
 
 function readPositiveInt(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function pushMetaOptional(out: string[], flag: string, value: unknown): void {
-  const text = readOptionalString(value);
-  if (text) out.push(flag, text);
 }
 
 function resolveOptionalOpsPath(raw: unknown, envValue: string | undefined): string | null {

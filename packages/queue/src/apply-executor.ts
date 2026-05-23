@@ -52,6 +52,34 @@ export interface MetaCliOperationAction {
   externalIdRequired?: boolean;
 }
 
+export type GraphOperationKind =
+  | "campaign.create"
+  | "campaign.update"
+  | "campaign.delete"
+  | "campaign.status"
+  | "adset.create"
+  | "adset.update"
+  | "adset.delete"
+  | "adset.status"
+  | "creative.create"
+  | "creative.update"
+  | "creative.delete"
+  | "ad.create"
+  | "ad.update"
+  | "ad.delete"
+  | "ad.status";
+
+export interface GraphOperationAction {
+  kind: GraphOperationKind;
+  account: string;
+  /** Manifest-local reference, e.g. "campaign:spring_sale". */
+  ref?: string;
+  dependsOn?: string[];
+  payload: Record<string, unknown>;
+  entity?: MetaCliOperationAction["entity"];
+  externalIdRequired?: boolean;
+}
+
 type LegacyApplyActionKind =
   | "create_campaign"
   | "update_campaign"
@@ -112,7 +140,7 @@ export interface LegacyApplyAction {
   callToActions?: any;
 }
 
-export type ApplyAction = MetaCliOperationAction | LegacyApplyAction;
+export type ApplyAction = GraphOperationAction | MetaCliOperationAction | LegacyApplyAction;
 
 // ---------------------------------------------------------------------
 // AdsLoader — apply_job が指す PR から operation manifest を返す境界。
@@ -231,6 +259,7 @@ export function prepareApprovedApplyAction(action: ApplyAction): {
 /** 中身のない update_* (changes={}) は実行不要としてスキップ判定する。 */
 export function isNoopAction(action: ApplyAction): boolean {
   if (action.kind === "meta_cli_operation") return action.args.length === 0;
+  if (action.kind.includes(".")) return false;
   return false;
 }
 
@@ -864,7 +893,7 @@ export async function runExecuteApply(
         if (actionRequiresExternalId(action) && !nonEmptyString(finalResult.externalId)) {
           failed += 1;
           const message =
-            `${action.kind} reported success but Meta CLI returned no externalId; ` +
+            `${action.kind} reported success but the Meta executor returned no externalId; ` +
             `refusing to persist ads_hierarchy row without an activatable identifier`;
           outcomes.push({
             action,
@@ -1186,7 +1215,14 @@ function actionForLog(action: ApplyAction): JsonValue {
 export function isCreateActionRequiringExternalId(
   kind: ApplyAction["kind"]
 ): boolean {
-  return kind === "create_campaign" || kind === "create_adset" || kind === "create_ad";
+  return (
+    kind === "create_campaign" ||
+    kind === "create_adset" ||
+    kind === "create_ad" ||
+    kind === "campaign.create" ||
+    kind === "adset.create" ||
+    kind === "ad.create"
+  );
 }
 
 function actionRequiresExternalId(action: ApplyAction): boolean {
@@ -1213,6 +1249,36 @@ function deriveAppliedAdsNodeInput(args: {
   }
   const externalIdMaybe = nonEmptyString(externalId) ? { externalId } : {};
   const spec = actionForLog(action);
+  if (isGraphOperationAction(action)) {
+    const entity = action.entity ?? graphEntityForAction(action);
+    if (!entity?.nodeType || !entity.nodeKey) return null;
+    const nodeType =
+      entity.nodeType === "campaign" || entity.nodeType === "adset" || entity.nodeType === "ad"
+        ? entity.nodeType
+        : null;
+    if (!nodeType) return null;
+    const parentNodeType =
+      entity.parentNodeType === "campaign" || entity.parentNodeType === "adset"
+        ? entity.parentNodeType
+        : undefined;
+    const status =
+      entity.status === "active" || entity.status === "paused" || entity.status === "archived"
+        ? entity.status
+        : statusFromGraphPayload(action.payload);
+    return {
+      workspaceId,
+      accountKey: action.account,
+      nodeType,
+      nodeKey: entity.nodeKey,
+      ...(entity.displayName ? { displayName: entity.displayName } : displayNameFromGraphPayload(action.payload)),
+      ...(parentNodeType ? { parentNodeType } : {}),
+      ...(entity.parentNodeKey ? { parentNodeKey: entity.parentNodeKey } : parentNodeFromGraphPayload(action)),
+      ...externalIdMaybe,
+      lastCommitSha,
+      spec,
+      ...(status ? { status } : {}),
+    };
+  }
   if (action.kind === "meta_cli_operation") {
     const entity = action.entity;
     if (!entity?.nodeType || !entity.nodeKey) return null;
@@ -1287,6 +1353,72 @@ function deriveAppliedAdsNodeInput(args: {
     };
   }
   return null;
+}
+
+function graphEntityForAction(action: GraphOperationAction): NonNullable<GraphOperationAction["entity"]> | null {
+  const [nodeType, verb] = action.kind.split(".") as [string, string];
+  if (nodeType !== "campaign" && nodeType !== "adset" && nodeType !== "ad" && nodeType !== "creative") return null;
+  const key =
+    readPayloadString(action.payload, `${nodeType}Id`) ??
+    readPayloadString(action.payload, "id") ??
+    action.ref?.split(":").slice(1).join(":") ??
+    null;
+  if (!key) return null;
+  return {
+    nodeType,
+    nodeKey: key,
+    displayName: readPayloadString(action.payload, "name") ?? undefined,
+    ...(nodeType === "adset"
+      ? {
+          parentNodeType: "campaign",
+          parentNodeKey:
+            readPayloadString(action.payload, "campaignRef") ??
+            readPayloadString(action.payload, "campaignId") ??
+            undefined,
+        }
+      : {}),
+    ...(nodeType === "ad"
+      ? {
+          parentNodeType: "adset",
+          parentNodeKey:
+            readPayloadString(action.payload, "adsetRef") ??
+            readPayloadString(action.payload, "adsetId") ??
+            undefined,
+        }
+      : {}),
+    status: statusFromGraphPayload(action.payload),
+  };
+}
+
+function readPayloadString(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function displayNameFromGraphPayload(payload: Record<string, unknown>): { displayName: string } | {} {
+  const name = readPayloadString(payload, "name");
+  return name ? { displayName: name } : {};
+}
+
+function parentNodeFromGraphPayload(action: GraphOperationAction): { parentNodeType: "campaign" | "adset"; parentNodeKey: string } | {} {
+  if (action.kind.startsWith("adset.")) {
+    const parent = readPayloadString(action.payload, "campaignRef") ?? readPayloadString(action.payload, "campaignId");
+    return parent ? { parentNodeType: "campaign", parentNodeKey: parent } : {};
+  }
+  if (action.kind.startsWith("ad.")) {
+    const parent = readPayloadString(action.payload, "adsetRef") ?? readPayloadString(action.payload, "adsetId");
+    return parent ? { parentNodeType: "adset", parentNodeKey: parent } : {};
+  }
+  return {};
+}
+
+function statusFromGraphPayload(payload: Record<string, unknown>): "active" | "paused" | "archived" | undefined {
+  const status = readPayloadString(payload, "status");
+  return status ? normalizeNodeStatus(status) : undefined;
+}
+
+function isGraphOperationAction(action: ApplyAction): action is GraphOperationAction {
+  return "payload" in action && typeof action.kind === "string" && action.kind.includes(".");
 }
 
 function normalizeNodeStatus(value: string): "active" | "paused" | "archived" | undefined {
@@ -1376,16 +1508,25 @@ interface FailingActionRecord extends NodeIdent {
 }
 
 function nodeIdentForAction(action: ApplyAction): NodeIdent {
+  if (isGraphOperationAction(action)) {
+    const [nodeType] = action.kind.split(".");
+    const entity = action.entity ?? graphEntityForAction(action);
+    return {
+      nodeType: (entity?.nodeType as NodeIdent["nodeType"] | undefined) ?? (nodeType as NodeIdent["nodeType"]) ?? "campaign",
+      nodeKey: entity?.nodeKey ?? action.ref ?? action.kind,
+    };
+  }
   if (action.kind === "meta_cli_operation") {
     return {
       nodeType: (action.entity?.nodeType as NodeIdent["nodeType"] | undefined) ?? "campaign",
       nodeKey: action.entity?.nodeKey ?? `${action.resource}:${action.verb}`,
     };
   }
-  if (action.kind.endsWith("_campaign")) return { nodeType: "campaign", nodeKey: String(action.campaignId) };
-  if (action.kind.endsWith("_adset")) return { nodeType: "adset", nodeKey: String(action.adsetId) };
-  if (action.kind.endsWith("_ad")) return { nodeType: "ad", nodeKey: String(action.adId) };
-  if (action.kind.endsWith("_creative")) return { nodeType: "creative", nodeKey: String(action.creativeId) };
+  const legacy = action as LegacyApplyAction;
+  if (action.kind.endsWith("_campaign")) return { nodeType: "campaign", nodeKey: String(legacy.campaignId) };
+  if (action.kind.endsWith("_adset")) return { nodeType: "adset", nodeKey: String(legacy.adsetId) };
+  if (action.kind.endsWith("_ad")) return { nodeType: "ad", nodeKey: String(legacy.adId) };
+  if (action.kind.endsWith("_creative")) return { nodeType: "creative", nodeKey: String(legacy.creativeId) };
   return { nodeType: "campaign", nodeKey: action.kind };
 }
 

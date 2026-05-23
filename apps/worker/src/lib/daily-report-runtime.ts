@@ -1,12 +1,9 @@
 // AdDroid OSS — apps/worker daily_report wiring (Implementation item).
 //
 // `runDailyReportOnce` (queue) が要求する 3 境界 (insights provider / snapshot
-// store / analyst runner) を、Prisma + LLM Provider + simulated insights で
-// 組み立てる。real Meta CLI insights サブコマンドは現時点で
-// `META_CLI_SUPPORTED_OPERATIONS` に含まれないため、当面は決定論的
-// `MockDailyReportInsightsProvider` で 4 階層 (account/campaign/adset/ad) の
-// 値を生成する (acceptance 「fetches **or** simulates insights」を満たす)。
-// 将来 real insights が CLI に追加された時点で本ファイルだけ差し替える。
+// store / analyst runner) を、Prisma + LLM Provider + Graph API insights で
+// 組み立てる。Meta token が無いテスト/初期状態では決定論的 mock provider を
+// fallback として使う。
 
 import { Prisma, type PrismaClient } from "@addroid/db";
 import {
@@ -248,10 +245,8 @@ export function createAnalystRunner(
 /**
  * 決定論的な daily_report 用 mock insights provider。
  *
- * - ネットワーク / Meta CLI を呼ばず、accountKey + metricDate から再現可能な
+ * - ネットワーク / Meta Graph API を呼ばず、accountKey + metricDate から再現可能な
  *   account / campaign / adset / ad の 4 階層メトリクスを生成する。
- * - real Meta CLI insights サブコマンドが
- *   `META_CLI_SUPPORTED_OPERATIONS` に追加されたら本 provider を差し替える。
  * - 値は KPI 計算 (CTR / CPC / CPA / CPM / frequency / Δ%) を演習できる
  *   範囲で micros 単位 (BigInt) を返す。
  */
@@ -272,7 +267,7 @@ export class MockDailyReportInsightsProvider implements DailyReportInsightsProvi
       current,
       prior,
       source: "mock",
-      detail: "simulated insights (real Meta CLI insights subcommand not yet supported)",
+      detail: "simulated insights (Meta Graph API insights unavailable in this runtime)",
     };
   }
 }

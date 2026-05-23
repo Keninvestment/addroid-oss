@@ -33,10 +33,8 @@ import {
 import {
   checkCodexCli,
   checkGithubCli,
-  checkMetaAdsCli,
   checkPlatform,
   checkPostgresVersion,
-  checkPython312,
   checkUv,
   type CheckResult,
 } from "../lib/checks.js";
@@ -57,7 +55,6 @@ const DEFAULT_DATABASE_USER = "addroid";
 const DEFAULT_DATABASE_NAME = "addroid";
 const DEFAULT_DATABASE_HOST = "localhost";
 const DEFAULT_DATABASE_PORT = "5432";
-const META_ADS_CLI_PYTHON_VERSION = "3.13";
 const DEFAULT_OPENAI_MODEL = "gpt-5.5";
 const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
 const UV_SH = [
@@ -205,11 +202,7 @@ export async function runInit(
         confirm: overrides.confirm ?? defaultConfirm,
         skip: opts.skipLinkCli,
       });
-      const metaCliSetupLines = await maybeRepairMetaCliBin({
-        env,
-        runner: overrides.runCommand ?? defaultRunCommand,
-        envFile: opts.envFile,
-      });
+      const metaCliSetupLines: string[] = [];
       const serviceSetupLines = await maybeInstallServiceAfterInit(opts, overrides);
       await printAlreadyInitializedResult(result, auth, cliLinkLines, metaCliSetupLines, serviceSetupLines);
       return 0;
@@ -313,11 +306,6 @@ async function runNonInteractiveSetup(
       return 1;
     }
   }
-  if (!env.ADDROID_META_CLI_BIN) {
-    const detected = detectMetaCliBin(runner, env);
-    if (detected) env.ADDROID_META_CLI_BIN = detected;
-  }
-
   const databaseUrl = resolveInitDatabaseUrl(opts, env, overrides);
   const key = env.ENCRYPTION_KEY ?? generateEncryptionKey(overrides);
   const envResult = await ensureEnvFile({
@@ -451,8 +439,6 @@ async function runInteractiveInit(
     const checks = [
       checkPlatform(),
       checkUv(),
-      checkPython312(),
-      checkMetaAdsCli(env),
       checkGithubCli(),
       checkPostgresVersion(),
     ];
@@ -523,10 +509,6 @@ async function runInteractiveInit(
   if (cliLinkLines.length > 0) {
     process.stdout.write(cliLinkLines.join("\n") + "\n");
   }
-  const metaCliSetupLines = await maybeRepairMetaCliBin({ env, runner, envFile: opts.envFile });
-  if (metaCliSetupLines.length > 0) {
-    process.stdout.write(metaCliSetupLines.join("\n") + "\n");
-  }
 
   const projectName =
     opts.projectName ??
@@ -538,11 +520,6 @@ async function runInteractiveInit(
     opts.databaseUrl ??
     (await prompt("DATABASE_URL", resolveInitDatabaseUrl(opts, env, overrides)));
   const encryptionKey = env.ENCRYPTION_KEY ?? generateEncryptionKey(overrides);
-  if (!env.ADDROID_META_CLI_BIN) {
-    const detected = detectMetaCliBin(runner, env);
-    if (detected) env.ADDROID_META_CLI_BIN = detected;
-  }
-
   const envResult = await ensureEnvFile({
     env,
     envFile: opts.envFile,
@@ -853,46 +830,6 @@ async function maybeEnsureCliCommand(opts: {
     "CLI command setup:",
     `  addroid       : link failed - ${summarizeCommandFailure(linked)}`,
     "                  セットアップは続行します。後で `npm run link:cli` を再実行してください。",
-    "",
-  ];
-}
-
-async function maybeRepairMetaCliBin(opts: {
-  env: NodeJS.ProcessEnv;
-  runner: CommandRunner;
-  envFile?: string;
-}): Promise<string[]> {
-  if (opts.env.ADDROID_META_ADS_CLI_MOCK === "1") return [];
-  const configured = opts.env.ADDROID_META_CLI_BIN?.trim() || "";
-  if (configured && isMetaCliBinUsable(configured, opts.runner, opts.env)) return [];
-
-  const lookupEnv = { ...opts.env };
-  prependUvBinToPath(lookupEnv);
-  const detected = detectMetaCliBin(opts.runner, lookupEnv);
-  if (!detected || !isMetaCliBinUsable(detected, opts.runner, lookupEnv)) {
-    if (!configured) return [];
-    return [
-      "Meta Ads CLI setup:",
-      `  meta cli      : not runnable (${configured})`,
-      "                  `addroid init --install-deps` を実行して Meta Ads CLI を入れ直してください。",
-      "",
-    ];
-  }
-
-  opts.env.PATH = lookupEnv.PATH;
-  opts.env.ADDROID_META_CLI_BIN = detected;
-  const envResult = await forceUpdateEnvValues({
-    env: opts.env,
-    envFile: opts.envFile,
-    updates: { ADDROID_META_CLI_BIN: detected },
-  });
-  return [
-    "Meta Ads CLI setup:",
-    configured
-      ? `  previous      : not runnable (${configured})`
-      : "  previous      : not configured",
-    `  meta cli      : detected (${detected})`,
-    `  env           : ${envResult.path} ${envResult.wrote ? "(updated)" : "(unchanged)"}`,
     "",
   ];
 }
@@ -1217,12 +1154,8 @@ async function ensureEnvFile(opts: EnvEnsureOptions): Promise<EnvEnsureResult> {
     ENCRYPTION_KEY: opts.encryptionKey,
   };
   if (opts.mockIntegrations) {
-    updates.ADDROID_META_ADS_CLI_MOCK = "1";
     updates.ADDROID_GITHUB_OAUTH_MOCK = "1";
     updates.ADDROID_LLM_MOCK = "1";
-  }
-  if (opts.env.ADDROID_META_CLI_BIN?.trim()) {
-    updates.ADDROID_META_CLI_BIN = opts.env.ADDROID_META_CLI_BIN.trim();
   }
 
   let text = "";
@@ -1673,68 +1606,6 @@ async function installMissingDependencies(
       out.push({ label: "uv", outcome });
       if (!outcome.ok) return out;
     }
-    if (check.name === "python3.12") {
-      const command = `uv python install ${META_ADS_CLI_PYTHON_VERSION}`;
-      const approval = await confirmInstallCommand(opts, "Python 3.12+", command, true);
-      if (!approval.ok) {
-        out.push({ label: "Python 3.12+", outcome: approval.outcome });
-        return out;
-      }
-      const r = runVisibleCommand(
-        "Python 3.12+",
-        command,
-        runner,
-        "sh",
-        [
-          "-c",
-          `${UV_SH}; "$uv_bin" python install ${META_ADS_CLI_PYTHON_VERSION}`,
-        ],
-        {
-          env,
-          timeoutMs: 180_000,
-        }
-      );
-      out.push({
-        label: "Python 3.12+",
-        outcome: commandOutcome(r, `Python ${META_ADS_CLI_PYTHON_VERSION} installed`),
-      });
-      if (!out[out.length - 1]!.outcome.ok) return out;
-    }
-    if (check.name === "meta-ads-cli") {
-      const command = `uv tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION}`;
-      const approval = await confirmInstallCommand(opts, "Meta Ads CLI", command, true);
-      if (!approval.ok) {
-        out.push({ label: "Meta Ads CLI", outcome: approval.outcome });
-        return out;
-      }
-      const r = runVisibleCommand(
-        "Meta Ads CLI",
-        command,
-        runner,
-        "sh",
-        [
-          "-c",
-          `${UV_SH}; "$uv_bin" python install ${META_ADS_CLI_PYTHON_VERSION} && "$uv_bin" tool install meta-ads --python ${META_ADS_CLI_PYTHON_VERSION}`,
-        ],
-        {
-          env,
-          timeoutMs: 180_000,
-        }
-      );
-      const outcome = commandOutcome(r, "Meta Ads CLI installed");
-      if (outcome.ok) {
-        prependUvBinToPath(env);
-        const detected = detectMetaCliBin(runner, env);
-        if (detected) {
-          env.ADDROID_META_CLI_BIN = detected;
-        } else if (!env.ADDROID_META_CLI_BIN) {
-          outcome.ok = false;
-          outcome.detail = "Meta Ads CLI install command succeeded, but `meta` was not found on PATH.";
-        }
-      }
-      out.push({ label: "Meta Ads CLI", outcome });
-      if (!outcome.ok) return out;
-    }
     if (check.name === "github-cli") {
       const command =
         process.platform === "darwin"
@@ -1808,10 +1679,8 @@ async function setupDependencies(opts: {
   const checks = [
     checkPlatform(),
     checkUv(),
-      checkPython312(),
-      checkMetaAdsCli(opts.env),
-      checkGithubCli(),
-      checkPostgresVersion(),
+    checkGithubCli(),
+    checkPostgresVersion(),
   ];
   const lines = ["", "Dependency setup:"];
   for (const c of checks) lines.push(formatCheck(c));
@@ -1829,23 +1698,6 @@ async function setupDependencies(opts: {
     }
   }
   return { ok: true, lines };
-}
-
-function detectMetaCliBin(runner: CommandRunner, env: NodeJS.ProcessEnv): string | null {
-  const r = runner("sh", ["-c", "command -v meta || command -v meta-ads || command -v meta_ads || command -v metaads"], {
-    env,
-    timeoutMs: 10_000,
-  });
-  if (r.status !== 0) return null;
-  const first = (r.stdout || "").trim().split(/\r?\n/)[0]?.trim();
-  return first || null;
-}
-
-function isMetaCliBinUsable(binaryPath: string, runner: CommandRunner, env: NodeJS.ProcessEnv): boolean {
-  const help = runner(binaryPath, ["ads", "--help"], { env, timeoutMs: 10_000 });
-  if (help.status === 0) return true;
-  const version = runner(binaryPath, ["--version"], { env, timeoutMs: 10_000 });
-  return version.status === 0;
 }
 
 function prependUvBinToPath(env: NodeJS.ProcessEnv): void {
@@ -2493,7 +2345,7 @@ function printInitHelp(): void {
       "  --project-name NAME    workspace 名を設定",
       "  --database-url URL     .env に保存する DATABASE_URL",
       "  --env-file PATH        書き込み先 env file (既定: repo root の .env)",
-      "  --install-deps         uv / Python / Meta Ads CLI / PostgreSQL の不足分を明示的にインストール",
+      "  --install-deps         uv / GitHub CLI / PostgreSQL の不足分を明示的にインストール",
       "  --skip-deps            依存診断をスキップ",
       "  --skip-db-create       ローカル DB / role 作成をスキップ",
       "  --db-push              npm run db:generate && npm run db:push を実行",
