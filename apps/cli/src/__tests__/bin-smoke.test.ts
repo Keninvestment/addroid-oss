@@ -99,7 +99,6 @@ test("bin/addroid.cjs doctor は clean smoke env で check と overall: を出�
     assert.match(stdout, /\[addroid doctor\]/);
     // doctor が出す check 名が並ぶこと (state は環境依存)。
     for (const name of [
-      "uv",
       "github-cli",
       "DATABASE_URL",
       "ENCRYPTION_KEY",

@@ -57,6 +57,7 @@ export function RunCronButton({
     try {
       const res = await fetch(`/api/cron/${encodeURIComponent(presetName)}/run`, {
         method: "POST",
+        headers: { "X-AdDroid-Web-Action": "1" },
       });
       const body = (await res.json().catch(() => ({}))) as RunCronResponse;
       if (!res.ok || body.ok === false) {

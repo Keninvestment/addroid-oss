@@ -8,8 +8,8 @@ GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取
 > **Status:** Initial OSS release candidate. `npm install` / `addroid init` で
 > セットアップと常駐サービス登録が完結します。必要に応じて `addroid start` で
 > 常駐サービスを起動・修復できます。セットアップ後の通常操作は
-> `addroid chat` に自然文で依頼します。`addroid init` は uv /
-> Python / Meta Ads CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
+> `addroid chat` に自然文で依頼します。`addroid init` は
+> GitHub CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
 > Meta 広告アカウントを実際に利用するには Meta Access Token が必須です。未設定でも core
 > ヘルスチェックは通りますが、Apply / Activate / レポート取得はできません。
 
@@ -50,35 +50,33 @@ Node.js 22.11 以上を使ってください。
 | 先に用意 | Node.js / npm | `npm install` と AdDroid CLI の実行 | ユーザー |
 | 先に用意 | Git | リポジトリ clone と GitOps / PR 管理 | ユーザー |
 | `npm install` | JavaScript / TypeScript 依存 | Web UI、worker、CLI、Prisma など | npm が repo 内の `node_modules` に入れる |
-| `addroid init` | uv | Python と Meta Ads CLI の導入補助 | 実行前に確認してから導入 |
-| `addroid init` | Python 3.12+ | Meta Ads CLI の実行環境 | uv-managed Python 3.13 を導入 |
-| `addroid init` | Meta Ads CLI | Meta 広告への insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
 | `addroid init` | GitHub CLI (`gh`) | client id 不要のGitHubブラウザ認証 / ops repo 作成 | macOS は `brew install gh`、Linux は OS package manager で導入 |
 | `addroid init` | PostgreSQL 16+ | AdDroid DB、queue、監査ログ | Homebrew / apt / dnf 等を実行前に確認 |
-| Meta 側で発行 | Meta Access Token | Meta 広告アカウント接続、Apply / Activate、レポート取得 | ユーザーが Meta Business Suite / Graph API Explorer 等で発行 |
+| Meta 側で発行 | Meta Access Token | Graph API 経由の Meta 広告アカウント接続、Apply / Activate、レポート取得 | ユーザーが Meta Business Suite / Graph API Explorer 等で発行 |
 
 `addroid init` は初回セットアップ中に次の依存を診断します。不足している場合は、
-実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う可能性がある
-system 変更は既定で no です。
+実行するコマンドを表示してから確認します。`brew` や `sudo` を伴う可能性がある
+system 変更は個別に確認します。
 
 | 依存 | 用途 | `addroid init` の動作 |
 |---|---|---|
-| uv | Python / Meta Ads CLI の導入 | 無ければ公式 installer を実行前に確認 |
-| Python 3.12+ | Meta Ads CLI の実行 | uv-managed Python 3.13 を導入 |
-| Meta Ads CLI | Meta insights / Apply / Activate | `uv tool install meta-ads --python 3.13` で導入 |
 | GitHub CLI (`gh`) | GitHub ブラウザ認証 / ops repo 作成 | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
 | PostgreSQL 16+ | DB / pg-boss queue | macOS は Homebrew、Linux は apt / dnf 実行前に確認 |
+
+Meta 連携の正規経路は Graph API です。Meta Ads CLI / Python / uv は標準必須依存では
+ありません。CLI backend の検証や将来互換を試す場合だけ、別途 `meta-ads` CLI を導入し
+`ADDROID_META_CLI_BIN` を設定してください。
 
 PostgreSQL の OS パッケージ導入には Homebrew または `sudo` が必要になる場合があります。
 セットアップに失敗した場合でも、表示されたコマンドを実行してから `addroid init`
 を再実行すれば途中から続行できます。
 
-`npm install` だけでは Meta Ads CLI や PostgreSQL は入りません。OS やユーザー環境を
+`npm install` だけでは PostgreSQL などの OS 依存は入りません。OS やユーザー環境を
 変更するものは `addroid init` の中で確認してから実行します。
 
 `addroid init` が作成する主なローカルファイル:
 
-- `.env`: `DATABASE_URL`、`ENCRYPTION_KEY`、Meta Ads CLI のパス
+- `.env`: `DATABASE_URL`、`ENCRYPTION_KEY`、任意の mock / provider 設定
 - `~/.addroid/config.yaml`: AdDroid のローカル設定
 - `~/.addroid/secrets.local.yaml`: provider 固有の暗号化済み secret stub
 - `~/.addroid/storage` / `~/.addroid/logs` / `~/.addroid/run`: 実行時データ、ログ、pid file
@@ -94,7 +92,7 @@ shell で起動する worker / web プロセス) で動作するため、以下�
 
 | OS | 状態 | 備考 |
 |---|---|---|
-| macOS 13+ (darwin x86_64 / arm64) | **対応** | 主開発環境。Homebrew 経由で PostgreSQL / Python 3.12+ を導入する想定 |
+| macOS 13+ (darwin x86_64 / arm64) | **対応** | 主開発環境。Homebrew 経由で PostgreSQL を導入する想定 |
 | Linux (x86_64 / arm64, glibc) | **対応** | Ubuntu 22.04+ / Debian 12+ / Fedora 39+ で動作 |
 | Windows + WSL2 (Ubuntu 22.04+) | **対応 (推奨)** | WSL2 内の Linux として扱う。Windows native との混在不可 |
 | Windows native (PowerShell / cmd.exe) | **非対応** | `0600` パーミッション、`pg_dump` の dynamic-link、常駐サービスの POSIX 前提が成立しないため対応しません。WSL2 を使用してください |
@@ -127,8 +125,8 @@ Access Token が必要です。AdDroid の標準セットアップは OAuth call
 `addroid connect meta` で token を貼り付ける方式です。ローカル利用のために HTTPS
 callback URL やトンネルサービスを用意する必要はありません。
 
-App ID / App Secret だけでは広告アカウントの読み書きはできません。Meta Ads CLI と
-AdDroid が実行時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。AdDroid は token
+App ID / App Secret だけでは広告アカウントの読み書きはできません。AdDroid が
+Graph API 呼び出し時に使うのは `ACCESS_TOKEN` と `AD_ACCOUNT_ID` です。AdDroid は token
 入力後に取得できる Ad Account を表示し、利用するアカウントを選択します。
 
 本番の広告入稿まで行う場合は、token 発行元の Meta App も本番利用できる状態にしておく
@@ -175,8 +173,9 @@ addroid connect meta
 
 Access Token はパスワード相当です。README、Issue、Slack、スクリーンショット、`.env.example`
 などには貼らず、`addroid connect meta` の入力欄にだけ貼ってください。AdDroid は token を
-`ENCRYPTION_KEY` で暗号化して `oauth_tokens` に保存し、Meta Ads CLI 実行時だけ
-`ACCESS_TOKEN` / `AD_ACCOUNT_ID` として子プロセスに渡します。
+`ENCRYPTION_KEY` で暗号化して `oauth_tokens` に保存し、Graph API 呼び出しの直前だけ
+サーバー側で復号してリクエストに注入します。任意の CLI backend を検証する場合も、
+token は実行直前に読み出し、argv やログには載せません。
 
 OAuth callback を使いたい上級者は詳細コマンド `addroid auth meta --oauth` を利用できます。
 この場合は HTTPS の callback URL を Meta App に登録できる環境が必要です。通常のローカル
@@ -191,7 +190,7 @@ OSS 利用では token 入力方式を使ってください。
 npm install
 
 # 2. 初回セットアップ
-#    uv / Python / Meta Ads CLI / PostgreSQL と、Meta / GitHub / LLM Provider の接続を案内します。
+#    PostgreSQL と、Meta / GitHub / LLM Provider の接続を案内します。
 #    初回は local bin 経由で起動し、init 中に `addroid` コマンドをリンクします。
 npx --no-install addroid init
 
@@ -245,12 +244,11 @@ Codex app-server / OpenAI / Anthropic API key の選択まで案内します。
 
 初回セットアップで作成・設定されるもの:
 
-- `.env`: password 付き `DATABASE_URL` / `ENCRYPTION_KEY` / Meta Ads CLI のパス
+- `.env`: password 付き `DATABASE_URL` / `ENCRYPTION_KEY` / 任意の mock / provider 設定
 - `~/.addroid/config.yaml`: ローカル設定
 - `~/.addroid/secrets.local.yaml`: OAuth secret 置き場の stub
 - PostgreSQL の `addroid` DB / role (ローカル既定ではランダム password を生成)
 - Prisma schema
-- uv-managed Python 3.13 と Meta Ads CLI
 - Meta Access Token: 実利用では必須。入力された値は暗号化して `oauth_tokens` に保存し、
   取得できる Ad Account から既定アカウントを選択
 - GitHub OAuth: 実際の入稿には必須。CLI は GitHub CLI のブラウザ認証または Device Flow、
@@ -301,17 +299,11 @@ addroid init --non-interactive --yes --skip-deps --mock-integrations --skip-db-p
 addroid status
 ```
 
-`doctor` で `meta-ads-cli` が error になった場合は、通常は再度 `init` を実行すれば
-Meta Ads CLI の導入を試行します。
+`doctor` は標準必須診断に Meta Ads CLI / Python / uv を含めません。標準の
+Apply / Activate / レポート取得は Graph API 経路を使います。CLI backend の検証が必要な
+場合だけ、`meta-ads` CLI を別途導入し、`ADDROID_META_CLI_BIN` を設定してください。
 
-```bash
-addroid init --install-deps
-```
-
-日次レポートは Meta Ads CLI の `ads insights get` を優先して使います。
-`ADDROID_META_CLI_BIN` が未設定の開発環境では mock insights に戻ります。CLI で取得できない
-柔軟な breakdown / attribution window が必要な場合は、Meta Access Token 登録済みの状態で
-`ADDROID_META_GRAPH_INSIGHTS_FALLBACK=1` を設定すると Graph API の read-only fallback を使えます。
+日次レポートは Meta Graph API の insights を正規経路として使います。
 取得日の timezone は Meta ad account の `timezone_name` を優先し、取得できない場合は
 `ADDROID_USER_TIMEZONE` / 実行環境 timezone / UTC の順にフォールバックします。
 標準 cron の実行時刻は `ADDROID_USER_TIMEZONE` / `TZ` / 実行環境 timezone / UTC の順で解決し、

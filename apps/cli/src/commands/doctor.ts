@@ -1,7 +1,7 @@
 // `addroid doctor` — 環境診断 (read-only)。
 //
 // 検証対象 (acceptance):
-//   uv / GitHub CLI / PostgreSQL 16+ / DATABASE_URL / config / secrets / ENCRYPTION_KEY
+//   GitHub CLI / PostgreSQL 16+ / DATABASE_URL / config / secrets / ENCRYPTION_KEY
 // 結果は stdout に並べると同時に、DB が利用可能であれば doctor_results テーブルに 1 行追記する
 // (UI の /setup ページから直近結果を読むため)。
 // DB 未到達でも CLI 自体は失敗扱いにしないが、いずれかの check が error なら exit code 1。
@@ -16,7 +16,6 @@ import {
   checkPostgresVersion,
   checkPrismaConnect,
   checkSecretsLocal,
-  checkUv,
   summarizeOverall,
   type CheckResult,
 } from "../lib/checks.js";
@@ -25,7 +24,6 @@ export async function runDoctor(_args: string[]): Promise<number> {
   const paths = resolveAddroidPaths();
   const checks: CheckResult[] = [];
   checks.push(checkPlatform());
-  checks.push(checkUv());
   checks.push(checkGithubCli());
   checks.push(checkPostgresVersion());
   checks.push(checkDatabaseUrl());

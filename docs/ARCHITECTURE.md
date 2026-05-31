@@ -10,8 +10,8 @@ AdDroid OSS の既定モデルは、OS の常駐サービス内で **1 プロセ
 +----------------------------------------------------+
 | addroid CLI                                        |
 |  ├── init   ── ~/.addroid/{config.yaml, storage}   |
-|  ├── doctor ── env checks (uv / github-cli /       |
-|  │             postgres / DB / config)             |
+|  ├── doctor ── env checks (github-cli / postgres / |
+|  │             DB / config / secrets)              |
 |  ├── up     ── web + worker を 1 プロセスで起動     |
 |  ├── down / status / logs                          |
 |  ├── validate / plan / activate                    |

@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { runAgentTaskNow } from "../../../../../lib/agent-tasks";
+import { requireTrustedWebAction } from "../../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = requireTrustedWebAction(request);
+  if (denied) return denied;
+
   const { id } = await params;
   try {
     const result = await runAgentTaskNow(id);

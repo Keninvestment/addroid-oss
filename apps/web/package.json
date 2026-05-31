@@ -8,6 +8,7 @@
     "start": "next start --hostname 127.0.0.1 --port 3000",
     "typecheck": "tsc --noEmit",
     "lint": "eslint app components lib",
+    "test": "node --import tsx --test --test-reporter=spec \"lib/__tests__/**/*.test.ts\"",
     "test:browser": "node scripts/browser-test.mjs"
   },
   "dependencies": {
@@ -19,7 +20,7 @@
     "@addroid/meta-adapter": "*",
     "@addroid/queue": "*",
     "cron-parser": "^4.9.0",
-    "next": "^16.2.6",
+    "next": "16.3.0-canary.36",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
@@ -27,7 +28,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^16.2.6",
+    "eslint-config-next": "16.3.0-canary.36",
     "typescript": "^5.5.4"
   }
 }

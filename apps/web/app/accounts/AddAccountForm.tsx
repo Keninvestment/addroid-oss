@@ -50,7 +50,7 @@ export function AddAccountForm() {
     try {
       const res = await fetch("/api/oauth/meta/refresh-businesses", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "X-AdDroid-Web-Action": "1" },
       });
       const body = (await res.json().catch(() => ({}))) as SyncResponse;
       if (!res.ok || !body.ok) {
@@ -79,7 +79,7 @@ export function AddAccountForm() {
     try {
       const res = await fetch("/api/accounts/default", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ adAccountId: id }),
       });
       const body = (await res.json().catch(() => ({}))) as DefaultResponse;

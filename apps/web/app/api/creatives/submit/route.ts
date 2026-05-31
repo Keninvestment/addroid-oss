@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import { ensureWebWorkspace, getActiveGithubAdapter } from "../../../../lib/github-runtime";
+import { requireTrustedWebAction } from "../../../../lib/request-guard";
 import {
   createCreativeSubmissionProposal,
   normalizeCreativeSubmissionInput,
@@ -11,6 +12,9 @@ import { selectLLMProviderForWorker } from "../../../../../worker/src/lib/llm-ru
 export const runtime = "nodejs";
 
 export async function POST(req: Request) {
+  const denied = requireTrustedWebAction(req, { allowedMediaTypes: ["multipart/form-data"] });
+  if (denied) return denied;
+
   try {
     const workspace = await ensureWebWorkspace();
     const form = await req.formData();

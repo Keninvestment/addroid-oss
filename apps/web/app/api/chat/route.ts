@@ -6,6 +6,7 @@ import {
   loadWebChatSessionMessages,
   runWebAgentChat,
 } from "../../../lib/agent-chat";
+import { requireTrustedWebAction } from "../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,11 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const denied = requireTrustedWebAction(request, {
+    allowedMediaTypes: ["application/json", "multipart/form-data"],
+  });
+  if (denied) return denied;
+
   const parsed = await parseChatRequest(request).catch((err) => ({
     error: (err as Error).message,
   }));

@@ -35,7 +35,7 @@ export function SetDefaultAccountForm({ accounts, defaultAdAccountId }: Props) {
       try {
         const res = await fetch("/api/accounts/default", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
           body: JSON.stringify({ adAccountId: id }),
         });
         const body = (await res.json().catch(() => ({}))) as {

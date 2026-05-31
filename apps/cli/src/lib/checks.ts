@@ -109,9 +109,9 @@ export function checkUv(): CheckResult {
   if (!r.found) {
     return {
       name: "uv",
-      state: "error",
-      message: "uv コマンドが見つかりません。",
-      hint: "https://docs.astral.sh/uv/getting-started/installation/ を参照してインストール。",
+      state: "warn",
+      message: "uv コマンドが見つかりません (標準の初期設定では任意)。",
+      hint: "Meta Ads CLI backend の検証が必要な場合だけ https://docs.astral.sh/uv/getting-started/installation/ を参照してインストールしてください。",
     };
   }
   return {
@@ -136,7 +136,7 @@ export function checkPython312(): CheckResult {
       name: "python3.12",
       state: "error",
       message: "python3 コマンドが見つかりません。",
-      hint: "Python 3.12 以上をインストールしてください。自動セットアップでは Meta CLI 互換の安定版 3.13 を使います (例: uv python install 3.13)。",
+      hint: "標準の Meta 連携は Graph API 経路のため Python は不要です。任意の Meta Ads CLI 検証を行う場合だけ Python 3.12+ を用意してください (例: uv python install 3.13)。",
     };
   }
   const out = r.stdout || r.stderr;
@@ -164,7 +164,7 @@ export function checkPython312(): CheckResult {
       name: "python3.12",
       state: "error",
       message: `Python ${major}.${minor} を検出 (3.12+ 必須)。`,
-      hint: "Meta Ads CLI は Python 3.12+ を要求します。uv 等で 3.12 以上を有効化してください (例: uv python install 3.13)。",
+      hint: "任意の Meta Ads CLI 検証を行う場合だけ Python 3.12+ が必要です。uv 等で 3.12 以上を有効化してください (例: uv python install 3.13)。",
     };
   }
   return { name: "python3.12", state: "ok", message: out };
@@ -211,9 +211,9 @@ export function checkMetaAdsCli(env: NodeJS.ProcessEnv = process.env): CheckResu
   }
   return {
     name: "meta-ads-cli",
-    state: "error",
-    message: "Meta Ads CLI が見つかりません。",
-    hint: "`addroid init --install-deps` を実行してください。手動の場合は `uv tool install meta-ads --python 3.13`。テスト中は ADDROID_META_ADS_CLI_MOCK=1 を設定してください。",
+    state: "warn",
+    message: "Meta Ads CLI が見つかりません (標準の Meta 操作は Graph API 経路を使うため任意)。",
+    hint: "CLI backend の検証が必要な場合だけ `uv tool install meta-ads --python 3.13` 後に ADDROID_META_CLI_BIN を設定してください。通常の初期設定では不要です。",
   };
 }
 

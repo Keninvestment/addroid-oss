@@ -415,6 +415,13 @@ async function runInteractions() {
       if (interaction.headers !== undefined) {
         init.headers = { ...interaction.headers };
       }
+      if (interaction.method !== "GET") {
+        init.headers = {
+          "X-AdDroid-Web-Action": "1",
+          Origin: BASE_URL,
+          ...(init.headers ?? {}),
+        };
+      }
       if (interaction.body !== undefined) {
         init.headers = { ...(init.headers ?? {}), "Content-Type": "application/json" };
         init.body = JSON.stringify(interaction.body);

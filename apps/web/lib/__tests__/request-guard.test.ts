@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { requireTrustedJsonWebAction, TRUSTED_WEB_ACTION_HEADER } from "../request-guard";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  requireTrustedJsonWebAction,
+  requireTrustedWebAction,
+  TRUSTED_WEB_ACTION_HEADER,
+} from "../request-guard";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function makeRequest(headers: HeadersInit): Request {
   return new Request("http://127.0.0.1:3000/api/github/bootstrap-ops-repo", {
@@ -74,3 +83,58 @@ test("requireTrustedJsonWebAction accepts same-origin JSON Web UI actions", () =
 
   assert.equal(response, null);
 });
+
+test("requireTrustedWebAction accepts same-origin actions without a body content-type", () => {
+  const response = requireTrustedWebAction(
+    makeRequest({
+      [TRUSTED_WEB_ACTION_HEADER]: "1",
+      origin: "http://127.0.0.1:3000",
+      "sec-fetch-site": "same-origin",
+    })
+  );
+
+  assert.equal(response, null);
+});
+
+test("requireTrustedWebAction accepts configured multipart actions", () => {
+  const response = requireTrustedWebAction(
+    makeRequest({
+      [TRUSTED_WEB_ACTION_HEADER]: "1",
+      "content-type": "multipart/form-data; boundary=abc",
+      origin: "http://127.0.0.1:3000",
+      "sec-fetch-site": "same-origin",
+    }),
+    { allowedMediaTypes: ["multipart/form-data"] }
+  );
+
+  assert.equal(response, null);
+});
+
+test("all mutating app api routes require a trusted Web action guard", () => {
+  const apiDir = path.resolve(__dirname, "../../app/api");
+  const files = listRouteFiles(apiDir);
+  const unguarded = files
+    .filter((file) => /export\s+async\s+function\s+(?:POST|PUT|PATCH|DELETE)\b/.test(
+      fs.readFileSync(file, "utf8")
+    ))
+    .filter((file) => {
+      const source = fs.readFileSync(file, "utf8");
+      return !/requireTrusted(?:Json)?WebAction/.test(source);
+    })
+    .map((file) => path.relative(path.resolve(__dirname, "../.."), file));
+
+  assert.deepEqual(unguarded, []);
+});
+
+function listRouteFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...listRouteFiles(abs));
+    } else if (entry.isFile() && entry.name === "route.ts") {
+      out.push(abs);
+    }
+  }
+  return out;
+}

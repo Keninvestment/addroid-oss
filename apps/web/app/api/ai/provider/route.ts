@@ -7,6 +7,7 @@ import {
 import { getCryptoBoundary } from "@addroid/config";
 import { prisma } from "../../../../lib/prisma";
 import { ensureWebWorkspace } from "../../../../lib/github-runtime";
+import { requireTrustedJsonWebAction } from "../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,9 @@ const DEFAULT_OPENAI_MODEL = "gpt-5.5";
 const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
 
 export async function POST(request: Request) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   let payload: Body;
   try {
     payload = (await request.json()) as Body;
@@ -135,6 +139,9 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   let payload: Body;
   try {
     payload = (await request.json()) as Body;

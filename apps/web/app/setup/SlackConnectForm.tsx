@@ -27,7 +27,7 @@ export function SlackConnectForm() {
     try {
       const res = await fetch("/api/slack/connect", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ botToken, appToken, channelId, sendTestMessage }),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
@@ -55,7 +55,10 @@ export function SlackConnectForm() {
     if (busy) return;
     setBusy(true);
     try {
-      const res = await fetch("/api/slack/connect", { method: "DELETE" });
+      const res = await fetch("/api/slack/connect", {
+        method: "DELETE",
+        headers: { "X-AdDroid-Web-Action": "1" },
+      });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
       if (!res.ok || body.ok === false) throw new Error(body.error ?? `HTTP ${res.status}`);
       toast.push({

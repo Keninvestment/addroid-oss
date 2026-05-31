@@ -12,6 +12,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "../../../../../lib/prisma";
 import { ensureWebWorkspace } from "../../../../../lib/meta-runtime";
 import { getActiveGithubAdapter } from "../../../../../lib/github-runtime";
+import { requireTrustedJsonWebAction } from "../../../../../lib/request-guard";
 import { createOpsChangeProposal } from "../../../../../../worker/src/lib/ops-proposal-runtime";
 
 export const dynamic = "force-dynamic";
@@ -32,6 +33,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   const { id: hierarchyId } = await params;
   if (!hierarchyId || !HIERARCHY_ID_PATTERN.test(hierarchyId)) {
     return NextResponse.json(

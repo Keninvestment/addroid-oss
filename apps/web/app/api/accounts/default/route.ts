@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import { ensureWebWorkspace } from "../../../../lib/meta-runtime";
+import { requireTrustedJsonWebAction } from "../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +15,9 @@ interface Body {
 }
 
 export async function POST(request: Request) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   let payload: Body;
   try {
     payload = (await request.json()) as Body;

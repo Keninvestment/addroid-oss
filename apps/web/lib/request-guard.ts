@@ -5,6 +5,10 @@ export const TRUSTED_WEB_ACTION_HEADER = "X-AdDroid-Web-Action";
 const TRUSTED_WEB_ACTION_HEADER_NAME = TRUSTED_WEB_ACTION_HEADER.toLowerCase();
 const TRUSTED_WEB_ACTION_VALUE = "1";
 
+interface TrustedWebActionOptions {
+  allowedMediaTypes?: readonly string[];
+}
+
 function normalizeOrigin(value: string): string | null {
   try {
     return new URL(value).origin;
@@ -39,6 +43,13 @@ function requestSourceOrigin(request: Request): string | null {
 }
 
 export function requireTrustedJsonWebAction(request: Request): NextResponse | null {
+  return requireTrustedWebAction(request, { allowedMediaTypes: ["application/json"] });
+}
+
+export function requireTrustedWebAction(
+  request: Request,
+  opts: TrustedWebActionOptions = {}
+): NextResponse | null {
   if (request.headers.get(TRUSTED_WEB_ACTION_HEADER_NAME) !== TRUSTED_WEB_ACTION_VALUE) {
     return NextResponse.json(
       { ok: false, error: "This action must be submitted from the AdDroid Web UI." },
@@ -46,14 +57,20 @@ export function requireTrustedJsonWebAction(request: Request): NextResponse | nu
     );
   }
 
-  const mediaType = ((request.headers.get("content-type") ?? "").split(";")[0] ?? "")
-    .trim()
-    .toLowerCase();
-  if (mediaType !== "application/json") {
-    return NextResponse.json(
-      { ok: false, error: "This action must use application/json." },
-      { status: 415 }
-    );
+  if (opts.allowedMediaTypes && opts.allowedMediaTypes.length > 0) {
+    const mediaType = ((request.headers.get("content-type") ?? "").split(";")[0] ?? "")
+      .trim()
+      .toLowerCase();
+    const allowed = opts.allowedMediaTypes.map((s) => s.toLowerCase());
+    if (!allowed.includes(mediaType)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `This action must use ${allowed.join(" or ")}.`,
+        },
+        { status: 415 }
+      );
+    }
   }
 
   const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();

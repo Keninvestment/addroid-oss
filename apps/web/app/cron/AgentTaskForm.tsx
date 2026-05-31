@@ -33,7 +33,7 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
     try {
       const res = await fetch("/api/agent-tasks", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ prompt, cron }),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
@@ -64,7 +64,7 @@ export function AgentTaskForm({ tasks }: { tasks: AgentTaskRow[] }) {
     try {
       const res = await fetch(`/api/agent-tasks/${encodeURIComponent(id)}/${action}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify(action === "toggle" ? { enabled } : {}),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;

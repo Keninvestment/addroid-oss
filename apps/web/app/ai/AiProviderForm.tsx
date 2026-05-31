@@ -40,7 +40,7 @@ export function AiProviderForm() {
     try {
       const res = await fetch("/api/ai/provider", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ provider, apiKey, model, baseUrl }),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;
@@ -69,7 +69,7 @@ export function AiProviderForm() {
     try {
       const res = await fetch("/api/ai/provider", {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ provider }),
       });
       const body = (await res.json().catch(() => ({}))) as ApiResponse;

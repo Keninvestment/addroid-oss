@@ -428,11 +428,15 @@ async function sendChatRequest(input: {
     form.set("surface", input.surface);
     if (input.contextPrefix) form.set("contextPrefix", input.contextPrefix);
     for (const file of input.files) form.append("files", file);
-    return fetch("/api/chat", { method: "POST", body: form });
+    return fetch("/api/chat", {
+      method: "POST",
+      headers: { "X-AdDroid-Web-Action": "1" },
+      body: form,
+    });
   }
   return fetch("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
     body: JSON.stringify({
       input: input.input,
       sessionId: input.sessionId,

@@ -15,7 +15,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import * as readlineControl from "node:readline";
 import readline from "node:readline/promises";
@@ -35,7 +34,6 @@ import {
   checkGithubCli,
   checkPlatform,
   checkPostgresVersion,
-  checkUv,
   type CheckResult,
 } from "../lib/checks.js";
 import { resolveRepoRoot } from "../lib/paths.js";
@@ -57,12 +55,6 @@ const DEFAULT_DATABASE_HOST = "localhost";
 const DEFAULT_DATABASE_PORT = "5432";
 const DEFAULT_OPENAI_MODEL = "gpt-5.5";
 const DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-7";
-const UV_SH = [
-  'uv_bin="$(command -v uv || true)"',
-  'if [ -z "$uv_bin" ]; then uv_bin="$HOME/.local/bin/uv"; fi',
-  'if [ ! -x "$uv_bin" ]; then echo "uv が見つかりません。先に uv のインストールを完了してください。" >&2; exit 127; fi',
-].join("; ");
-
 type PromptFn = (question: string, defaultValue?: string) => Promise<string>;
 type ConfirmFn = (question: string, defaultYes?: boolean) => Promise<boolean>;
 interface SelectOption {
@@ -438,7 +430,6 @@ async function runInteractiveInit(
   if (!opts.skipDeps) {
     const checks = [
       checkPlatform(),
-      checkUv(),
       checkGithubCli(),
       checkPostgresVersion(),
     ];
@@ -1590,22 +1581,6 @@ async function installMissingDependencies(
 ): Promise<Array<{ label: string; outcome: { ok: boolean; detail: string } }>> {
   const out: Array<{ label: string; outcome: { ok: boolean; detail: string } }> = [];
   for (const check of checks) {
-    if (check.name === "uv") {
-      const command = "curl -LsSf https://astral.sh/uv/install.sh | sh";
-      const approval = await confirmInstallCommand(opts, "uv", command, false);
-      if (!approval.ok) {
-        out.push({ label: "uv", outcome: approval.outcome });
-        return out;
-      }
-      const r = runVisibleCommand("uv", command, runner, "sh", ["-c", command], {
-        env,
-        timeoutMs: 180_000,
-      });
-      const outcome = commandOutcome(r, "uv installed");
-      if (outcome.ok) prependUvBinToPath(env);
-      out.push({ label: "uv", outcome });
-      if (!outcome.ok) return out;
-    }
     if (check.name === "github-cli") {
       const command =
         process.platform === "darwin"
@@ -1678,7 +1653,6 @@ async function setupDependencies(opts: {
 }): Promise<{ ok: boolean; lines: string[] }> {
   const checks = [
     checkPlatform(),
-    checkUv(),
     checkGithubCli(),
     checkPostgresVersion(),
   ];
@@ -1698,16 +1672,6 @@ async function setupDependencies(opts: {
     }
   }
   return { ok: true, lines };
-}
-
-function prependUvBinToPath(env: NodeJS.ProcessEnv): void {
-  const binDir =
-    env.UV_TOOL_BIN_DIR?.trim() ||
-    path.join(env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir(), ".local", "bin");
-  const pathValue = env.PATH ?? "";
-  if (!pathValue.split(path.delimiter).includes(binDir)) {
-    env.PATH = pathValue ? `${binDir}${path.delimiter}${pathValue}` : binDir;
-  }
 }
 
 function installGithubCli(
@@ -2345,7 +2309,7 @@ function printInitHelp(): void {
       "  --project-name NAME    workspace 名を設定",
       "  --database-url URL     .env に保存する DATABASE_URL",
       "  --env-file PATH        書き込み先 env file (既定: repo root の .env)",
-      "  --install-deps         uv / GitHub CLI / PostgreSQL の不足分を明示的にインストール",
+      "  --install-deps         GitHub CLI / PostgreSQL の不足分を明示的にインストール",
       "  --skip-deps            依存診断をスキップ",
       "  --skip-db-create       ローカル DB / role 作成をスキップ",
       "  --db-push              npm run db:generate && npm run db:push を実行",

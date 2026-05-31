@@ -60,7 +60,7 @@ export function AdhocPlanForm({
     try {
       const res = await fetch("/api/plan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({
           accountId: state.accountId || undefined,
         }),

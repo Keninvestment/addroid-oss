@@ -8,6 +8,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@addroid/db";
 import { prisma } from "../../../lib/prisma";
 import { ensureWebWorkspace } from "../../../lib/meta-runtime";
+import { requireTrustedJsonWebAction } from "../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,9 @@ const KEY_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 const META_ID_PATTERN = /^act_\d{1,32}$/;
 
 export async function POST(request: Request) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   let payload: Body;
   try {
     payload = (await request.json()) as Body;

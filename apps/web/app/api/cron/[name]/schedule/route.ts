@@ -7,6 +7,7 @@
 
 import { NextResponse } from "next/server";
 import { isCronPresetName, setCronSchedule } from "../../../../../lib/cron-actions";
+import { requireTrustedJsonWebAction } from "../../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ name: string }> }
 ) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   const { name } = await params;
   if (!isCronPresetName(name)) {
     return NextResponse.json(

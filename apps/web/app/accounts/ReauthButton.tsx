@@ -28,7 +28,7 @@ export function ReauthButton({ expired, expiringSoon, oauthRefreshAvailable = tr
     try {
       const res = await fetch("/api/oauth/meta/refresh", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "X-AdDroid-Web-Action": "1" },
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;

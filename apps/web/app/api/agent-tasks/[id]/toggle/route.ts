@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { setAgentTaskEnabled } from "../../../../../lib/agent-tasks";
+import { requireTrustedJsonWebAction } from "../../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const denied = requireTrustedJsonWebAction(request);
+  if (denied) return denied;
+
   const { id } = await params;
   let payload: Body;
   try {

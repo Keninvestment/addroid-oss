@@ -6,7 +6,7 @@
 //
 // 本テストでは DATABASE_URL を外し、ADDROID_HOME を一時ディレクトリに切り替え、
 // ENCRYPTION_KEY を 32 バイトに固定することで本物の依存関係に触れない範囲を確認する。
-// uv / psql は実環境を見るため、見つからなくても doctor 自身は actionable
+// psql は実環境を見るため、見つからなくても doctor 自身は actionable
 // hint を出して終了することを assert する。
 
 import { describe, it } from "node:test";
@@ -99,7 +99,6 @@ describe("addroid doctor", () => {
         // check 名が並ぶことを assert (state が ok か error かは環境依存)。
         for (const name of [
           "platform",
-          "uv",
           "github-cli",
           "DATABASE_URL",
           "ENCRYPTION_KEY",

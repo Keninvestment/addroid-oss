@@ -101,7 +101,7 @@ export function CronControls({
         `/api/cron/${encodeURIComponent(presetName)}/toggle`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
           body: JSON.stringify({ enabled: nextEnabled }),
         }
       );
@@ -166,7 +166,7 @@ export function CronControls({
         `/api/cron/${encodeURIComponent(presetName)}/schedule`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
           body: JSON.stringify({ cron: next }),
         }
       );
@@ -220,7 +220,7 @@ export function CronControls({
         `/api/cron/${encodeURIComponent(presetName)}/run`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
           body: JSON.stringify({}),
         }
       );

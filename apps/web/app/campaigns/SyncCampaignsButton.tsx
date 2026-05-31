@@ -35,7 +35,7 @@ export function SyncCampaignsButton({ accountId }: SyncCampaignsButtonProps) {
     try {
       const res = await fetch("/api/campaigns/sync", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({ accountId }),
       });
       const body = (await res.json().catch(() => ({}))) as SyncResponse;

@@ -48,9 +48,6 @@ nvm install 22
 # PostgreSQL 16
 sudo apt update && sudo apt install -y postgresql-16 postgresql-client-16
 
-# uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
 # AdDroid を WSL2 のホーム配下に clone
 cd ~ && git clone <repo-url> addroid && cd addroid
 npm install
@@ -208,13 +205,14 @@ chmod 600 ~/.addroid/secrets.local.yaml
 
 ---
 
-## 5. uv / Meta Graph API
+## 5. Meta Graph API / 任意 CLI backend
 
-### 5.1 `uv: error`
-[uv 公式インストール手順](https://docs.astral.sh/uv/getting-started/installation/)
-の通りに `uv` を導入してください。`uv` は周辺ツール用の推奨依存ですが、
+### 5.1 Meta Ads CLI / Python / uv が見つからない
 Meta 入稿・レポート・クリエイティブ文脈取得は Graph API を正規経路にするため、
-Python 3.12+ / Meta Ads CLI は標準必須依存ではありません。
+Python 3.12+ / Meta Ads CLI / uv は標準必須依存ではありません。CLI backend の
+検証が必要な場合だけ、[uv 公式インストール手順](https://docs.astral.sh/uv/getting-started/installation/)
+の通りに `uv` を導入し、`uv tool install meta-ads --python 3.13` 後に
+`ADDROID_META_CLI_BIN` を設定してください。
 
 ### 5.2 Meta Graph API の認証エラー
 `oauth.meta.reauth_required` や Graph API の token error が出る場合は、次の安全経路で

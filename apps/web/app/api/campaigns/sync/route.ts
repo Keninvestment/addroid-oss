@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import { ensureWebWorkspace, getActiveMetaAdapter } from "../../../../lib/meta-runtime";
+import { requireTrustedWebAction } from "../../../../lib/request-guard";
 import { runMetaMirrorSync } from "../../../../../worker/src/lib/meta-mirror-runtime";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,9 @@ interface Body {
 }
 
 export async function POST(request: Request) {
+  const denied = requireTrustedWebAction(request);
+  if (denied) return denied;
+
   let payload: Body = {};
   try {
     payload = (await request.json()) as Body;

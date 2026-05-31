@@ -25,7 +25,7 @@ export function RefreshBusinessesButton({ disabled }: Props) {
     try {
       const res = await fetch("/api/oauth/meta/refresh-businesses", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "X-AdDroid-Web-Action": "1" },
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;

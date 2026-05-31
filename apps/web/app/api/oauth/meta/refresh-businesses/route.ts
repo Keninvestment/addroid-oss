@@ -15,10 +15,14 @@ import {
   getActiveMetaAdapter,
   setMetaBusinessCache,
 } from "../../../../../lib/meta-runtime";
+import { requireTrustedWebAction } from "../../../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
 
-export async function POST() {
+export async function POST(request: Request) {
+  const denied = requireTrustedWebAction(request);
+  if (denied) return denied;
+
   try {
     const { adapter, choice } = await getActiveMetaAdapter();
     if (choice === "stub") {

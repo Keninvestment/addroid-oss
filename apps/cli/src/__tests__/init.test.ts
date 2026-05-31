@@ -875,15 +875,6 @@ test("init --non-interactive --yes は --install-deps なしでは依存イン�
           runCommand: (cmd, args) => {
             const line = [cmd, ...args].join(" ");
             calls.push(line);
-            if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
-              return { status: 0, stdout: "", stderr: "" };
-            }
-            if (line.includes("python install 3.13")) {
-              return { status: 0, stdout: "", stderr: "" };
-            }
-            if (line.includes("tool install meta-ads --python 3.13")) {
-              return { status: 0, stdout: "", stderr: "" };
-            }
             if (line.includes("command -v meta")) {
               return { status: 1, stdout: "", stderr: "" };
             }
@@ -936,7 +927,19 @@ test("init --non-interactive --install-deps は Meta Ads CLI を標準セット�
           runCommand: (cmd, args) => {
             const line = [cmd, ...args].join(" ");
             calls.push(line);
-            if (line.includes("curl -LsSf https://astral.sh/uv/install.sh")) {
+            if (cmd === "brew") {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (cmd === "sh" && line.includes("command -v apt-get")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (cmd === "sh" && line.includes("sudo apt-get")) {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (cmd === "sh" && line.includes("command -v dnf")) {
+              return { status: 1, stdout: "", stderr: "" };
+            }
+            if (cmd === "psql") {
               return { status: 0, stdout: "", stderr: "" };
             }
             return { status: 1, stdout: "", stderr: "not found" };

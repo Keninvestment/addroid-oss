@@ -55,7 +55,7 @@ export function ActivateButton({
       // ここでは送らない (誤読防止)。note は任意で送れる (将来の理由文 UI 用)。
       const res = await fetch(`/api/campaigns/${encodeURIComponent(nodeId)}/activate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-AdDroid-Web-Action": "1" },
         body: JSON.stringify({}),
       });
       const body = (await res.json().catch(() => ({}))) as {

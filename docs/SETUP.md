@@ -29,7 +29,7 @@ AdDroid OSS は POSIX 前提 (`0600` パーミッション、`pg_dump` / `pg_res
 - それ以外 → `[warn]` (未検証であることを示唆)
 
 > **WSL2 を使う場合の注意**:
-> - PostgreSQL / Node.js / Python / uv はすべて **WSL2 内のディストリビューション**
+> - PostgreSQL / Node.js はすべて **WSL2 内のディストリビューション**
 >   (例: Ubuntu) に install してください。Windows 側の同名ツールと混在させると、
 >   path 解決 / パーミッション / `localhost` 解決の整合性が崩れます。
 > - リポジトリは WSL2 のホームディレクトリ (例: `~/dev/addroid`) に clone してください。
@@ -46,16 +46,15 @@ AdDroid OSS は POSIX 前提 (`0600` パーミッション、`pg_dump` / `pg_res
 | Node.js | 22.11 以上 (Slack Socket Mode 検証で `globalThis.WebSocket` を使う) | `node --version` |
 | npm | 10 以上 (Node 22 同梱) | `npm --version` |
 | PostgreSQL | 16 以上 | `psql --version` |
-| uv | 最新 | `uv --version` |
 | GitHub CLI | 推奨 (`connect github` のブラウザ認証で使用) | `gh --version` |
 
 Node.js / npm 以外は `addroid init` が初回セットアップ中に診断します。不足分が
-ある場合は実行するコマンドを表示してから確認します。`curl | sh` や `sudo` を伴う
-system 変更は既定で no です。セットアップに失敗した場合は表示されたコマンドを
+ある場合は実行するコマンドを表示してから確認します。`brew` や `sudo` を伴う
+system 変更は個別に確認します。セットアップに失敗した場合は表示されたコマンドを
 手動で実行し、再度 `npm run addroid -- init` を実行してください。
 
 `addroid doctor` は上記を 1 コマンドで検証します (実装済み)。Meta 入稿・レポートは
-Graph API を正規経路にするため、Meta Ads CLI / Python は標準必須依存ではありません。
+Graph API を正規経路にするため、Meta Ads CLI / Python / uv は標準必須依存ではありません。
 
 ---
 
@@ -169,7 +168,7 @@ npm run addroid -- init
 実行するコマンドを見せた上で個別に確認します。
 主な処理は次の通りです。
 
-- `uv` / GitHub CLI / PostgreSQL 16+ の診断と不足依存のインストール
+- GitHub CLI / PostgreSQL 16+ の診断と不足依存のインストール
 - `.env` の作成、password 付き `DATABASE_URL` と `ENCRYPTION_KEY` の保存
 - `~/.addroid/config.yaml`、`secrets.local.yaml`、`storage` / `logs` / `run` の作成
 - ローカル PostgreSQL の `addroid` role/database 作成 (既定ではランダム password を生成)
@@ -282,7 +281,6 @@ Meta Access Token が必須です。Meta 未接続のままでは Apply / Activa
 | check | 内容 |
 |---|---|
 | `platform` | macOS / Linux / WSL2 のいずれかか (Windows native は error、それ以外は warn) |
-| `uv` | uv コマンドが PATH にあるか |
 | `github-cli` | GitHub CLI (`gh --version`) が呼び出せるか。client id 不要のブラウザ認証に使用 |
 | `postgres-16` | PostgreSQL 16+ が `psql --version` から判別できるか (`psql` が無ければ warn) |
 | `DATABASE_URL` | 設定済みで Prisma 経由で `SELECT 1` できるか |
