@@ -205,12 +205,11 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo and commits t
   assert.equal(result.owner, "octo-test-user");
   assert.equal(result.name, "addroid-ops");
   assert.equal(result.defaultBranch, "main");
-  assert.equal(result.filesCommitted, 7);
+  assert.equal(result.filesCommitted, 8);
   const api = getLastApi();
   assert.ok(api);
   assert.equal(api?.calls.createdRepo?.isPrivate, true);
-  // Template should include the required files plus the
-  // this implementation budget_guard policy.
+  // Template should include the required files plus the managed policy files.
   const paths = api?.calls.templateCommits[0]?.files.map((f) => f.path).sort() ?? [];
   assert.deepEqual(paths.sort(), [
     ".addroid/project.yaml",
@@ -220,6 +219,7 @@ test("OctokitGithubAdapter.bootstrapOpsRepo creates a private repo and commits t
     "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
+    "workflows/guards.yaml",
   ].sort());
 });
 
@@ -235,7 +235,7 @@ test("OctokitGithubAdapter.bootstrapOpsRepo keeps template account-independent",
       { key: "act_333", displayName: "Third Account" },
     ],
   });
-  assert.equal(result.filesCommitted, 7);
+  assert.equal(result.filesCommitted, 8);
   const paths = getLastApi()?.calls.templateCommits[0]?.files.map((f) => f.path).sort() ?? [];
   assert.ok(paths.includes("operations/.gitkeep"));
   const legacyAccountsPrefix = ["ads", "accounts"].join("/") + "/";

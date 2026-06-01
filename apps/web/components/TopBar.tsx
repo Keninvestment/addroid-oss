@@ -6,8 +6,9 @@ import Link from "next/link";
 import { prisma } from "../lib/prisma";
 import { ensureWebWorkspace } from "../lib/meta-runtime";
 import { countApprovalRequiredPrs } from "../lib/approvals";
+import { webT, type WebLanguage } from "../lib/i18n";
 
-export async function TopBar() {
+export async function TopBar({ language }: { language: WebLanguage }) {
   const version = process.env.npm_package_version ?? "0.0.0";
 
   let defaultLabel: string | null = null;
@@ -42,25 +43,25 @@ export async function TopBar() {
           style={{ textDecoration: "none" }}
           aria-label={
             defaultLabel
-              ? `デフォルト Meta アカウント: ${defaultLabel} (クリックで切替)`
-              : "デフォルト Meta アカウント未設定 (クリックで設定)"
+              ? webT(language, "top.account.aria.set", { account: defaultLabel })
+              : webT(language, "top.account.aria.empty")
           }
         >
-          広告アカウント:{" "}
+          {webT(language, "top.account")}{" "}
           {defaultLabel ? (
             <span className="mono">{defaultLabel}</span>
           ) : (
-            <span>未設定</span>
+            <span>{webT(language, "top.unset")}</span>
           )}
         </Link>
         {approvalRequiredCount > 0 ? (
           <Link
             href="/approvals"
             className="top-bar__approval-alert"
-            aria-label={`承認が必要な変更が ${approvalRequiredCount} 件あります`}
+            aria-label={webT(language, "top.approval.aria", { count: approvalRequiredCount })}
           >
             <span className="top-bar__approval-dot" aria-hidden="true" />
-            <span>承認</span>
+            <span>{webT(language, "top.approval")}</span>
             <span className="top-bar__approval-count">
               {approvalRequiredCount}
             </span>

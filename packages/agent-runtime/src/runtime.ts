@@ -1,4 +1,10 @@
 import type { LLMCompletionRequest, LLMProvider } from "@addroid/llm-provider";
+import {
+  resolveAddroidLanguage,
+  translateMessage,
+  type AddroidLanguage,
+  type AddroidMessageDictionary,
+} from "@addroid/config";
 import type { AgentContext } from "./context.js";
 import {
   evaluateAgentToolPolicy,
@@ -91,19 +97,19 @@ export async function runAgentTurn(opts: {
   model?: string;
   purpose?: string;
   surface?: AgentSurface;
+  language?: AddroidLanguage;
 }): Promise<AgentResponse> {
+  const language = opts.language ?? resolveAddroidLanguage();
   const requestPolicy = isDeniedAgentRequest(opts.input);
   if (!requestPolicy.allowed) {
     return {
-      message:
-        `その操作は安全ポリシーにより実行できません: ${requestPolicy.reason}\n` +
-        "AdDroid では validate / dry-run / GitHub PR / worker apply の経路を使ってください。",
+      message: t(language, "policy.denied", { reason: requestPolicy.reason ?? "policy denied" }),
       toolResults: [],
     };
   }
 
   const response = await buildAgentResponseWithLlm(opts).catch((err) =>
-    buildFallbackAgentResponse(opts.input, err)
+    buildFallbackAgentResponse(opts.input, err, language)
   );
 
   const toolResults: AgentToolResult[] = [];
@@ -146,7 +152,9 @@ async function buildAgentResponseWithLlm(opts: {
   model?: string;
   purpose?: string;
   surface?: AgentSurface;
+  language?: AddroidLanguage;
 }): Promise<ChatAgentResponse> {
+  const language = opts.language ?? resolveAddroidLanguage();
   const req: LLMCompletionRequest = {
     ...(opts.model ? { model: opts.model } : {}),
     temperature: 0.2,
@@ -157,7 +165,8 @@ async function buildAgentResponseWithLlm(opts: {
         role: "system",
         content: buildAgentSystemPrompt(
           opts.agentContext,
-          opts.surface ?? "cli-chat"
+          opts.surface ?? "cli-chat",
+          language
         ),
       },
       {
@@ -170,13 +179,15 @@ async function buildAgentResponseWithLlm(opts: {
   return parseAgentResponse(res.content);
 }
 
-function buildFallbackAgentResponse(input: string, err: unknown): ChatAgentResponse {
+function buildFallbackAgentResponse(
+  input: string,
+  err: unknown,
+  language: AddroidLanguage
+): ChatAgentResponse {
   void input;
   const errorMessage = formatLlmFailure(err);
   return {
-    message:
-      `LLM による解釈に失敗したため、操作は実行しませんでした: ${errorMessage}\n` +
-      "少し待って同じ内容をもう一度送るか、接続状態を確認してください。",
+    message: t(language, "llm.failed", { error: errorMessage }),
     tools: [],
   };
 }
@@ -191,18 +202,27 @@ function formatLlmFailure(err: unknown): string {
 
 export function buildAgentSystemPrompt(
   agentContext: AgentContext,
-  surface: AgentSurface = "cli-chat"
+  surface: AgentSurface = "cli-chat",
+  language: AddroidLanguage = resolveAddroidLanguage()
 ): string {
+  const responseLanguage =
+    language === "en"
+      ? "Respond in English. Be concise and operational."
+      : "Respond in Japanese. Be concise and operational.";
+  const jsonSchema =
+    language === "en"
+      ? '{"message":"short English message","tools":[{"name":"get_report","args":{"kind":"daily"},"why":"short reason"}]}'
+      : '{"message":"short Japanese message","tools":[{"name":"get_report","args":{"kind":"daily"},"why":"short reason"}]}';
   return [
     "You are AdDroid local agent.",
-    "Respond in Japanese. Be concise and operational.",
+    responseLanguage,
     "You may answer normally when no tool is needed.",
     "When an AdDroid operation should run, return ONLY strict JSON with this schema:",
-    '{"message":"short Japanese message","tools":[{"name":"get_report","args":{"kind":"daily"},"why":"short reason"}]}',
+    jsonSchema,
     "Do not wrap JSON in markdown.",
     `Current surface: ${surface}`,
     "Available tools for this surface:",
-    renderToolManifestForPrompt(surface),
+    renderToolManifestForPrompt(surface, language),
     "Users may also type slash shortcuts such as /status, /report, /submit, /connect, /account, /schedule, and /open. Interpret those as normal user intent and choose the appropriate tool.",
     "Choose tools by user intent and recent chat context. Use get_report for user-facing daily, budget, and improvement reports because it returns the standard AdDroid summary/commentary format. Use metricDate as YYYY-MM-DD for explicit calendar dates and metricDateRelative for relative dates. Use query_meta_ads for raw read-only Meta Ads inspection, hierarchy lookup, and specific field/object checks. Treat read-only query results as internal evidence: in the final user-facing answer, mention only the facts needed for the user's request and do not dump unrelated rows, catalogs, or full object lists.",
     "Before asking the user for missing ad-operation details, decide whether the missing value is likely available through Meta Ads read-only data. If it is, autonomously run narrow query_meta_ads lookups first, such as get by known campaign/adset/ad/creative/page IDs or parent-filtered lists with small limits. Ask the user only after those read-only lookups cannot resolve the value or the choice is genuinely business context.",
@@ -222,6 +242,29 @@ export function buildAgentSystemPrompt(
     "Agent context:",
     agentContext.content,
   ].join("\n");
+}
+
+const MESSAGES: AddroidMessageDictionary = {
+  ja: {
+    "policy.denied":
+      "その操作は安全ポリシーにより実行できません: {reason}\nAdDroid では validate / dry-run / GitHub PR / worker apply の経路を使ってください。",
+    "llm.failed":
+      "LLM による解釈に失敗したため、操作は実行しませんでした: {error}\n少し待って同じ内容をもう一度送るか、接続状態を確認してください。",
+  },
+  en: {
+    "policy.denied":
+      "That operation cannot be executed because of the safety policy: {reason}\nUse AdDroid's validate / dry-run / GitHub PR / worker apply path instead.",
+    "llm.failed":
+      "AdDroid did not run an operation because LLM interpretation failed: {error}\nPlease try the same request again in a moment, or check the connection status.",
+  },
+};
+
+function t(
+  language: AddroidLanguage,
+  key: string,
+  values?: Record<string, string | number | null | undefined>
+): string {
+  return translateMessage(MESSAGES, language, key, values);
 }
 
 export function buildAgentLoopInput(

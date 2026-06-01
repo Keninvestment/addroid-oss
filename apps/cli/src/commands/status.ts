@@ -3,7 +3,7 @@
 // pid file (~/.addroid/run/up.json) と DoctorResult 直近 1 行を読み出し、
 // 「いま web/worker は動いているのか」「直近の依存診断結果は何か」を 1 画面で示す。
 
-import { resolveAddroidPaths, readAddroidConfig } from "@addroid/config";
+import { resolveAddroidLanguage, resolveAddroidPaths, readAddroidConfig } from "@addroid/config";
 import net from "node:net";
 import { isProcessAlive, readUpState } from "../lib/processes.js";
 import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
@@ -15,7 +15,20 @@ interface DoctorRow {
 }
 
 export async function runStatus(args: string[]): Promise<number> {
+  const language = resolveAddroidLanguage();
   if (args.includes("--help") || args.includes("-h")) {
+    if (language === "en") {
+      process.stdout.write(
+        [
+          "addroid status — check connection and runtime status",
+          "",
+          "Usage:",
+          "  addroid status",
+          "",
+        ].join("\n")
+      );
+      return 0;
+    }
     process.stdout.write(
       [
         "addroid status — 接続・起動状態を確認",
@@ -36,6 +49,7 @@ export async function runStatus(args: string[]): Promise<number> {
   lines.push(`  config        : ${config ? `${paths.configFile} (loaded)` : `${paths.configFile} (not found — \`addroid init\`)`}`);
   if (config) {
     lines.push(`  workspace     : ${config.workspace.slug} — ${config.workspace.displayName}`);
+    lines.push(`  language      : ${config.ui.language}`);
     lines.push(`  database ref  : ${config.database.urlRef}`);
     lines.push(
       `  web bind      : ${config.web?.hostname ?? "127.0.0.1"}:${config.web?.port ?? 3000}`
@@ -54,7 +68,7 @@ export async function runStatus(args: string[]): Promise<number> {
 
   const state = await readUpState(paths);
   if (!state) {
-    lines.push("  processes     : (not running — pid file 無し)");
+    lines.push(`  processes     : ${language === "en" ? "(not running — no pid file)" : "(not running — pid file 無し)"}`);
   } else {
     const parentAlive = isProcessAlive(state.parentPid);
     const webFailed = state.webStatus === "failed";
@@ -104,7 +118,7 @@ export async function runStatus(args: string[]): Promise<number> {
   if (doctor) {
     lines.push(`  last doctor   : ${doctor.ranAt.toISOString()}  overall=${doctor.overall}`);
   } else {
-    lines.push("  last doctor   : (記録なし — `addroid doctor` を実行すると残ります)");
+    lines.push(`  last doctor   : ${language === "en" ? "(no record — run `addroid doctor` to create one)" : "(記録なし — `addroid doctor` を実行すると残ります)"}`);
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));

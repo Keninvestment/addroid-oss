@@ -14,7 +14,11 @@ import {
   defaultAddroidConfig,
   ensureAddroidPaths,
   readAddroidConfig,
+  resolveAddroidLanguage,
   resolveWebBinding,
+  translateMessage,
+  type AddroidLanguage,
+  type AddroidMessageDictionary,
 } from "@addroid/config";
 import type {
   LLMProvider,
@@ -81,6 +85,10 @@ import {
   saveBudgetGuardPolicyConfig,
   type BudgetGuardPolicyConfigInput,
 } from "../../../worker/src/lib/budget-guard-policy-config.js";
+import {
+  saveSubmissionGuardPolicyConfig,
+  type SubmissionGuardPolicyConfigInput,
+} from "../../../worker/src/lib/submission-guard-policy-config.js";
 import {
   decidePullRequestApproval,
   type ApprovalDecisionAction,
@@ -166,20 +174,20 @@ const ADDROID_BOT = [
 ];
 
 const SLASH_COMMANDS = [
-  { command: "/help", description: "使い方と例を表示" },
-  { command: "/attach", description: "次の依頼に参考画像を添付" },
-  { command: "/attachments", description: "添付中の参考画像を表示" },
-  { command: "/clear-attachments", description: "添付中の参考画像をクリア" },
-  { command: "/resume", description: "過去の会話を選択して再開" },
-  { command: "/status", description: "接続・起動状態を確認" },
-  { command: "/report", description: "日次レポートを取得" },
-  { command: "/submit", description: "入稿前チェックを実行" },
-  { command: "/connect", description: "Meta / GitHub / AI / Slack を接続" },
-  { command: "/account", description: "広告アカウントを確認・選択" },
-  { command: "/schedule", description: "自動実行を確認・変更" },
-  { command: "/open", description: "Web UI の URL を表示" },
-  { command: "/stop", description: "Web UI と worker を停止" },
-  { command: "/exit", description: "チャットを終了" },
+  { command: "/help", descriptionKey: "slash.help" },
+  { command: "/attach", descriptionKey: "slash.attach" },
+  { command: "/attachments", descriptionKey: "slash.attachments" },
+  { command: "/clear-attachments", descriptionKey: "slash.clearAttachments" },
+  { command: "/resume", descriptionKey: "slash.resume" },
+  { command: "/status", descriptionKey: "slash.status" },
+  { command: "/report", descriptionKey: "slash.report" },
+  { command: "/submit", descriptionKey: "slash.submit" },
+  { command: "/connect", descriptionKey: "slash.connect" },
+  { command: "/account", descriptionKey: "slash.account" },
+  { command: "/schedule", descriptionKey: "slash.schedule" },
+  { command: "/open", descriptionKey: "slash.open" },
+  { command: "/stop", descriptionKey: "slash.stop" },
+  { command: "/exit", descriptionKey: "slash.exit" },
 ] as const;
 
 export async function runChatCommand(
@@ -192,16 +200,20 @@ export async function runChatCommand(
   } catch (err) {
     const out = overrides.output ?? defaultStdout;
     out.write(`[addroid chat] ${(err as Error).message}\n`);
-    printChatHelp(out);
+    printChatHelp(out, resolveAddroidLanguage({ env: overrides.env ?? process.env }));
     return 2;
   }
   if (parsed.help) {
-    printChatHelp(overrides.output ?? defaultStdout);
+    printChatHelp(
+      overrides.output ?? defaultStdout,
+      resolveAddroidLanguage({ env: overrides.env ?? process.env })
+    );
     return 0;
   }
 
   const out = overrides.output ?? defaultStdout;
   const env = overrides.env ?? process.env;
+  const language = await resolveCliChatLanguage(env);
   if (parsed.history) {
     await printChatHistory(env, out);
     return 0;
@@ -216,7 +228,7 @@ export async function runChatCommand(
     );
     if (!selected) return 0;
     requestedSessionId = selected.id;
-    out.write(`会話を再開します: ${selected.title} (${selected.id})\n`);
+    out.write(t(language, "resume.selected", { title: selected.title, id: selected.id }) + "\n");
   }
   let chatMemory = overrides.runCommand
     ? undefined
@@ -228,7 +240,7 @@ export async function runChatCommand(
     !parsed.once && !parsed.newSession && (parsed.resume || parsed.sessionId)
   );
   const [providerResult, agentContext] = await Promise.all([
-    resolveChatProvider(overrides, env),
+    resolveChatProvider(overrides, env, language),
     overrides.agentContext ? Promise.resolve(overrides.agentContext) : buildAgentContext(env),
   ]);
   if (!providerResult.ok) {
@@ -246,6 +258,7 @@ export async function runChatCommand(
         model: parsed.model,
         runCommand: overrides.runCommand ?? defaultRunChatCommand,
         agentContext,
+        language,
         userFacingTools: !overrides.runCommand,
         chatMemory,
         referenceImagePaths: parsed.referenceImagePaths,
@@ -267,7 +280,7 @@ export async function runChatCommand(
       ].join("\n")
     );
   }
-  printSplash(out, providerResult, env);
+  printSplash(out, providerResult, env, language);
   if (shouldPrintResumedTranscript && chatMemory?.sessionId) {
     await printChatSessionTranscript(env, out, chatMemory.sessionId);
   }
@@ -284,7 +297,7 @@ export async function runChatCommand(
       const input = (
         rl
           ? await rl.question("addroid> ")
-          : await readChatLine(inputStream, out)
+          : await readChatLine(inputStream, out, language)
       ).trim();
       if (!input) continue;
       if (isExitInput(input)) {
@@ -295,12 +308,14 @@ export async function runChatCommand(
         const attachment = await handleAttachmentSlashCommand(input, {
           out,
           referenceImagePaths: pendingReferenceImagePaths,
+          language,
         });
         if (attachment.handled) continue;
         const slash = await handleSlashCommand(input, {
           out,
           runCommand: overrides.runCommand ?? defaultRunChatCommand,
           agentContext,
+          language,
           resumeSession: overrides.runCommand
             ? undefined
             : async () => {
@@ -313,7 +328,7 @@ export async function runChatCommand(
                 if (!selected) return false;
                 chatMemory = await loadChatMemory(env, { sessionId: selected.id });
                 out.write(
-                  `会話を再開しました: ${selected.title} (${selected.id})\n`
+                  t(language, "resume.done", { title: selected.title, id: selected.id }) + "\n"
                 );
                 await printChatSessionTranscript(env, out, selected.id);
                 return true;
@@ -335,6 +350,7 @@ export async function runChatCommand(
         model: parsed.model,
         runCommand: overrides.runCommand ?? defaultRunChatCommand,
         agentContext,
+        language,
         userFacingTools: !overrides.runCommand,
         chatMemory,
         referenceImagePaths: pendingReferenceImagePaths,
@@ -353,13 +369,14 @@ async function handleSlashCommand(
     out: NodeJS.WritableStream;
     runCommand: (command: ChatCommandName, args: string[]) => Promise<number>;
     agentContext: AgentContext;
+    language: AddroidLanguage;
     resumeSession?: () => Promise<boolean>;
   }
 ): Promise<{ handled: boolean; exit: boolean; code: number }> {
   const [command = "", ...args] = input.trim().split(/\s+/);
   switch (command) {
     case "/help":
-      printChatHelp(opts.out);
+      printChatHelp(opts.out, opts.language);
       return { handled: true, exit: false, code: 0 };
     case "/exit":
     case "/quit":
@@ -367,7 +384,7 @@ async function handleSlashCommand(
       return { handled: true, exit: true, code: 0 };
     case "/resume":
       if (!opts.resumeSession) {
-        opts.out.write("この実行では会話履歴の再開を使えません。\n");
+        opts.out.write(t(opts.language, "resume.unavailable") + "\n");
         return { handled: true, exit: false, code: 0 };
       }
       await opts.resumeSession();
@@ -399,16 +416,17 @@ async function handleAttachmentSlashCommand(
   opts: {
     out: NodeJS.WritableStream;
     referenceImagePaths: string[];
+    language: AddroidLanguage;
   }
 ): Promise<{ handled: boolean }> {
   const [command = "", ...args] = input.trim().split(/\s+/);
   if (command === "/attachments") {
     if (opts.referenceImagePaths.length === 0) {
-      opts.out.write("参考画像は添付されていません。\n");
+      opts.out.write(t(opts.language, "attachments.empty") + "\n");
     } else {
       opts.out.write(
         [
-          "添付中の参考画像:",
+          t(opts.language, "attachments.current"),
           ...opts.referenceImagePaths.map((p, i) => `- ${i + 1}: ${p}`),
           "",
         ].join("\n")
@@ -418,12 +436,12 @@ async function handleAttachmentSlashCommand(
   }
   if (command === "/clear-attachments") {
     opts.referenceImagePaths.splice(0, opts.referenceImagePaths.length);
-    opts.out.write("参考画像の添付をクリアしました。\n");
+    opts.out.write(t(opts.language, "attachments.cleared") + "\n");
     return { handled: true };
   }
   if (command !== "/attach") return { handled: false };
   if (args.length === 0) {
-    opts.out.write("使い方: /attach <参考画像パス> [追加パス...]\n");
+    opts.out.write(t(opts.language, "attachments.usage") + "\n");
     return { handled: true };
   }
   const added: string[] = [];
@@ -431,12 +449,12 @@ async function handleAttachmentSlashCommand(
     const abs = path.resolve(raw);
     const ext = path.extname(abs).toLowerCase();
     if (![".png", ".jpg", ".jpeg", ".webp"].includes(ext)) {
-      opts.out.write(`skip: 参考画像として未対応の形式です: ${raw}\n`);
+      opts.out.write(t(opts.language, "attachments.unsupported", { path: raw }) + "\n");
       continue;
     }
     const stat = await fs.stat(abs).catch(() => null);
     if (!stat?.isFile()) {
-      opts.out.write(`skip: ファイルが見つかりません: ${raw}\n`);
+      opts.out.write(t(opts.language, "attachments.missing", { path: raw }) + "\n");
       continue;
     }
     if (!opts.referenceImagePaths.includes(abs)) {
@@ -446,8 +464,8 @@ async function handleAttachmentSlashCommand(
   }
   opts.out.write(
     added.length > 0
-      ? `参考画像を ${added.length} 件添付しました。次のクリエイティブ生成依頼で使います。\n`
-      : "追加された参考画像はありません。\n"
+      ? t(opts.language, "attachments.added", { count: added.length }) + "\n"
+      : t(opts.language, "attachments.noneAdded") + "\n"
   );
   return { handled: true };
 }
@@ -462,6 +480,7 @@ async function handleChatInput(
     model?: string;
     runCommand: (command: ChatCommandName, args: string[]) => Promise<number>;
     agentContext: AgentContext;
+    language: AddroidLanguage;
     userFacingTools: boolean;
     chatMemory?: ChatMemory;
     referenceImagePaths?: string[];
@@ -488,6 +507,7 @@ async function handleChatInput(
           model: opts.model,
           purpose: "cli:chat-agent",
           surface: "cli-chat",
+          language: opts.language,
         })
       );
     } catch (err) {
@@ -1227,6 +1247,7 @@ async function executeUserFacingTool(
     env: NodeJS.ProcessEnv;
     agentContext: AgentContext;
     provider: LLMProvider;
+    language: AddroidLanguage;
     model?: string;
     referenceImagePaths?: string[];
   }
@@ -1259,6 +1280,10 @@ async function executeUserFacingTool(
   if (tool.tool === "configure_budget_guard") {
     const code = await configureBudgetGuardForChat(tool, opts);
     return { handled: true, code, message: `budget guard config exit ${code}` };
+  }
+  if (tool.tool === "configure_submission_guards") {
+    const code = await configureSubmissionGuardsForChat(tool, opts);
+    return { handled: true, code, message: `submission guards config exit ${code}` };
   }
   if (tool.tool === "open_web_ui") {
     opts.out.write(`Web UI を開くにはこちらを使ってください:\n${opts.agentContext.webUrl}\n`);
@@ -1430,6 +1455,57 @@ async function configureBudgetGuardForChat(
   }
 }
 
+async function configureSubmissionGuardsForChat(
+  tool: ReadyAgentTool,
+  opts: { out: NodeJS.WritableStream; env: NodeJS.ProcessEnv; agentContext: AgentContext }
+): Promise<number> {
+  if (!opts.env.DATABASE_URL) {
+    opts.out.write("安全ガードを設定できません。先に `addroid init` を完了してください。\n");
+    return 2;
+  }
+  let ctx: Awaited<ReturnType<typeof prepareChatCronContext>> | null = null;
+  try {
+    ctx = await prepareChatCronContext(opts.env);
+    const saved = await saveSubmissionGuardPolicyConfig({
+      prisma: ctx.prisma as never,
+      workspaceId: ctx.workspaceId,
+      input: normalizeSubmissionGuardConfigInput(tool.toolArgs),
+      actor: "agent:cli-chat",
+      env: opts.env,
+    });
+    const budget = saved.policy.guards.budgetIncrease;
+    await ctx.prisma.auditLog.create({
+      data: {
+        workspaceId: ctx.workspaceId,
+        actor: "agent:cli-chat",
+        action: "submission_guards.policy_saved_via_chat",
+        target: "submission_guards_policy",
+        ref: "workflows/guards.yaml",
+        metadata: {
+          warnOverRatio: budget.warnOverRatio,
+          blockOverRatio: budget.blockOverRatio,
+        },
+      },
+    }).catch(() => undefined);
+    opts.out.write(
+      [
+        "安全ガードを保存しました。",
+        `- 予算変更: ${budget.warnOverRatio}倍以上で警告`,
+        `- 予算変更: ${budget.blockOverRatio}倍以上でブロック`,
+        `- file: ${saved.yamlPath}`,
+        `確認: ${opts.agentContext.webUrl}/guards`,
+        "",
+      ].join("\n")
+    );
+    return 0;
+  } catch (err) {
+    opts.out.write(`安全ガードを設定できませんでした: ${(err as Error).message}\n`);
+    return 1;
+  } finally {
+    await ctx?.close().catch(() => undefined);
+  }
+}
+
 async function runDailyReportForChat(
   tool: ReadyAgentTool,
   opts: {
@@ -1437,10 +1513,11 @@ async function runDailyReportForChat(
     input?: NodeJS.ReadableStream;
     env: NodeJS.ProcessEnv;
     agentContext: AgentContext;
+    language: AddroidLanguage;
   }
 ): Promise<number> {
   if (!opts.env.DATABASE_URL) {
-    opts.out.write("日次レポートを取得できません。先に `addroid init` を完了してください。\n");
+    opts.out.write(t(opts.language, "report.missingInit") + "\n");
     return 2;
   }
 
@@ -1469,7 +1546,7 @@ async function runDailyReportForChat(
       return 0;
     }
 
-    const progress = createWorkingIndicator(opts.out, opts.input, "日次レポートを作成中");
+    const progress = createWorkingIndicator(opts.out, opts.input, t(opts.language, "report.working"));
     const run = await progress.run(waitForCronRun(ctx.prisma, jobId, preset, 180_000));
     if (!run) {
       opts.out.write(
@@ -1488,14 +1565,14 @@ async function runDailyReportForChat(
       orderBy: { createdAt: "asc" },
       select: { level: true, message: true, payload: true },
     });
-    opts.out.write(formatDailyReportForUser(run, logs, opts.agentContext.webUrl));
+    opts.out.write(formatDailyReportForUser(run, logs, opts.agentContext.webUrl, opts.language));
     return run.state === "failed" ? 1 : 0;
   } catch (err) {
     if (err instanceof ChatInterruptedError) {
-      opts.out.write("日次レポートの完了待ちを中断しました。処理自体は継続している場合があります。\n");
+      opts.out.write(t(opts.language, "report.interrupted") + "\n");
       return 130;
     }
-    opts.out.write(`日次レポートを取得できませんでした: ${(err as Error).message}\n`);
+    opts.out.write(t(opts.language, "report.failed", { error: (err as Error).message }) + "\n");
     return 1;
   } finally {
     await ctx?.close().catch(() => undefined);
@@ -2262,14 +2339,17 @@ function formatDailyReportForUser(
     output: unknown;
   },
   logs: Array<{ level: string; message: string; payload: unknown }>,
-  webUrl: string
+  webUrl: string,
+  language: AddroidLanguage = "ja"
 ): string {
   const summaries = collectDailyReportSummaries(run.output, logs);
   const lines: string[] = [];
   if (summaries.length === 0) {
-    lines.push(run.state === "failed" ? "日次レポートは失敗しました。" : "日次レポートは完了しました。");
-    if (run.errorMessage) lines.push(`理由: ${run.errorMessage}`);
-    lines.push(`詳細: ${webUrl}/reports/daily`);
+    lines.push(
+      run.state === "failed" ? t(language, "report.stateFailed") : t(language, "report.stateDone")
+    );
+    if (run.errorMessage) lines.push(t(language, "report.reason", { error: run.errorMessage }));
+    lines.push(t(language, "report.details", { url: `${webUrl}/reports/daily` }));
     lines.push("");
     return lines.join("\n");
   }
@@ -2278,10 +2358,10 @@ function formatDailyReportForUser(
   const failed = summaries.filter((s) => s.status !== "succeeded");
   lines.push(
     succeeded.length > 0
-      ? `日次レポートを取得しました。`
-      : `日次レポートを取得しましたが、確認が必要です。`
+      ? t(language, "report.got")
+      : t(language, "report.gotNeedsReview")
   );
-  lines.push(`対象: ${summaries.length}件 / 成功 ${succeeded.length} / 確認 ${failed.length}`);
+  lines.push(t(language, "report.counts", { total: summaries.length, succeeded: succeeded.length, failed: failed.length }));
   lines.push("");
 
   for (const summary of summaries) {
@@ -2697,6 +2777,34 @@ function normalizeBudgetGuardConfigInput(
   };
 }
 
+function normalizeSubmissionGuardConfigInput(
+  args: Record<string, unknown>
+): SubmissionGuardPolicyConfigInput {
+  const budgetIncrease = isRecord(args.budgetIncrease) ? args.budgetIncrease : {};
+  return {
+    warnOverRatio: readRequiredInlineNumber(
+      args.warnOverRatio ??
+        args.warn_over_ratio ??
+        budgetIncrease.warnOverRatio ??
+        budgetIncrease.warn_over_ratio,
+      "warnOverRatio"
+    ),
+    blockOverRatio: readRequiredInlineNumber(
+      args.blockOverRatio ??
+        args.block_over_ratio ??
+        budgetIncrease.blockOverRatio ??
+        budgetIncrease.block_over_ratio,
+      "blockOverRatio"
+    ),
+  };
+}
+
+function readRequiredInlineNumber(value: unknown, key: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) throw new Error(`${key} が指定されていません`);
+  return n;
+}
+
 function readRequiredToolNumber(args: Record<string, unknown>, key: string): number {
   const n = readOptionalToolNumber(args, key);
   if (n === null) throw new Error(`${key} が指定されていません`);
@@ -3042,7 +3150,8 @@ async function defaultRunChatCommand(command: ChatCommandName, args: string[]): 
 
 async function resolveChatProvider(
   overrides: ChatCommandOverrides,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  language: AddroidLanguage = resolveAddroidLanguage({ env })
 ): Promise<
   | { ok: true; provider: LLMProvider; choice: string; reason: string; close?: () => Promise<void> }
   | { ok: false; message: string }
@@ -3053,8 +3162,7 @@ async function resolveChatProvider(
   if (!env.DATABASE_URL || !env.ENCRYPTION_KEY) {
     return {
       ok: false,
-      message:
-        "[addroid chat] DATABASE_URL / ENCRYPTION_KEY が未設定です。先に `addroid init` を完了してください。",
+      message: t(language, "chat.missingRuntime"),
     };
   }
   const [{ prisma }, { selectLLMProviderForWorker }] = await Promise.all([
@@ -3067,8 +3175,7 @@ async function resolveChatProvider(
     await prisma.$disconnect().catch(() => undefined);
     return {
       ok: false,
-      message:
-        "[addroid chat] LLM credential が見つかりません。`addroid connect ai` で provider を選択して接続してください。",
+      message: t(language, "chat.llmMissing"),
     };
   }
   return {
@@ -3083,13 +3190,14 @@ async function resolveChatProvider(
 function printSplash(
   out: NodeJS.WritableStream,
   provider: { choice: string; reason: string },
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  language: AddroidLanguage
 ): void {
   const binding = resolveWebBinding(env);
   const webUrl = `http://${binding.hostname}:${binding.port}`;
   const width = terminalWidth(out);
   const title = "AdDroid";
-  const subtitle = "Local AI operator for Meta ads";
+  const subtitle = t(language, "splash.subtitle");
   out.write("\n");
   out.write(color("╭" + "─".repeat(width - 2) + "╮\n", "frame", out));
   out.write(color(`│ ${padRight("◉  AdDroid Chat", width - 4)} │\n`, "frame", out));
@@ -3110,8 +3218,8 @@ function printSplash(
     out.write(`│  ${bot}  ${padRight(text, width - botWidth - 7)} │\n`);
   }
   out.write(color("├" + "─".repeat(width - 2) + "┤\n", "frame", out));
-  out.write(`│ ${padRight('Try "日次レポートを取得", "入稿前チェック", or type /', width - 4)} │\n`);
-  out.write(`│ ${padRight("Enter で送信、Shift+Enter で改行、/exit で終了", width - 4)} │\n`);
+  out.write(`│ ${padRight(t(language, "splash.try"), width - 4)} │\n`);
+  out.write(`│ ${padRight(t(language, "splash.keys"), width - 4)} │\n`);
   out.write(color("╰" + "─".repeat(width - 2) + "╯\n\n", "frame", out));
 }
 
@@ -3151,7 +3259,8 @@ function completeSlashCommand(line: string): [string[], string] {
 
 function readChatLine(
   input: NodeJS.ReadableStream,
-  out: NodeJS.WritableStream
+  out: NodeJS.WritableStream,
+  language: AddroidLanguage = resolveAddroidLanguage()
 ): Promise<string> {
   const stdin = input as NodeJS.ReadStream;
   const width = terminalWidth(out);
@@ -3193,7 +3302,7 @@ function readChatLine(
         const item = matches[i]!;
         const marker = i === selected ? color("›", "accent", out) : " ";
         const command = i === selected ? color(item.command, "accent", out) : item.command;
-        lines.push(`  ${marker} ${padRight(command, 14)} ${color(item.description, "muted", out)}`);
+        lines.push(`  ${marker} ${padRight(command, 14)} ${color(t(language, item.descriptionKey), "muted", out)}`);
       }
     }
     out.write(lines.join("\n") + "\n");
@@ -3374,7 +3483,45 @@ function charWidth(char: string): number {
   return 1;
 }
 
-function printChatHelp(out: NodeJS.WritableStream): void {
+function printChatHelp(out: NodeJS.WritableStream, language: AddroidLanguage): void {
+  if (language === "en") {
+    out.write(
+      [
+        "addroid chat — LLM-backed local agent chat",
+        "",
+        "Usage:",
+        "  addroid chat",
+        "  addroid chat --once \"get the daily report\"",
+        "  addroid chat --resume",
+        "  addroid chat --history",
+        "  addroid chat --session <id>",
+        "  addroid chat --new-session",
+        "  addroid chat --reference-image ./ref.png --once \"generate a creative using this image\"",
+        "",
+        "Examples:",
+        "  Get the daily report",
+        "  Check the submission before applying",
+        "  Connect GitHub and create the ops repo",
+        "  Reconnect AI with the Codex app-server",
+        "  Open the Web UI",
+        "",
+        "Notes:",
+        "  - Uses the Codex app-server / OpenAI / Anthropic credential configured by init/connect.",
+        "  - Type `/` in the prompt to show available commands.",
+        "  - In interactive input, Enter sends and Shift+Enter inserts a newline.",
+        "  - `/report`, `/submit`, `/connect github`, `/account`, `/schedule`, `/open`, and `/status` run directly.",
+        "  - Attach reference images for the next creative request with `/attach ./ref.png`.",
+        "  - Use `--resume` or `/resume` to select and resume a previous CLI chat session.",
+        "  - Use `--history` to list recent sessions, or `--session <id>` to resume one directly.",
+        "  - Unless a session is explicitly selected, `addroid chat` and `--once` start a new session.",
+        "  - The LLM reads AGENTS.md and key docs, then executes supported AdDroid tools directly.",
+        "  - Arbitrary shell, restore, destructive git, secret display, and approval-bypass Meta changes are denied.",
+        "  - --yes is accepted for compatibility, but chat does not show confirmation prompts.",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   out.write(
     [
       "addroid chat — LLM-backed local agent chat",
@@ -3410,6 +3557,111 @@ function printChatHelp(out: NodeJS.WritableStream): void {
       "",
     ].join("\n")
   );
+}
+
+async function resolveCliChatLanguage(env: NodeJS.ProcessEnv): Promise<AddroidLanguage> {
+  const config = await readAddroidConfig(env).catch(() => null);
+  return resolveAddroidLanguage({
+    preference: config?.ui.language,
+    env,
+  });
+}
+
+const CHAT_MESSAGES: AddroidMessageDictionary = {
+  ja: {
+    "resume.selected": "会話を再開します: {title} ({id})",
+    "resume.done": "会話を再開しました: {title} ({id})",
+    "resume.unavailable": "この実行では会話履歴の再開を使えません。",
+    "chat.missingRuntime": "[addroid chat] DATABASE_URL / ENCRYPTION_KEY が未設定です。先に `addroid init` を完了してください。",
+    "chat.llmMissing": "[addroid chat] LLM credential が見つかりません。`addroid connect ai` で provider を選択して接続してください。",
+    "attachments.empty": "参考画像は添付されていません。",
+    "attachments.current": "添付中の参考画像:",
+    "attachments.cleared": "参考画像の添付をクリアしました。",
+    "attachments.usage": "使い方: /attach <参考画像パス> [追加パス...]",
+    "attachments.unsupported": "skip: 参考画像として未対応の形式です: {path}",
+    "attachments.missing": "skip: ファイルが見つかりません: {path}",
+    "attachments.added": "参考画像を {count} 件添付しました。次のクリエイティブ生成依頼で使います。",
+    "attachments.noneAdded": "追加された参考画像はありません。",
+    "splash.subtitle": "Local AI operator for Meta ads",
+    "splash.try": "Try \"日次レポートを取得\", \"入稿前チェック\", or type /",
+    "splash.keys": "Enter で送信、Shift+Enter で改行、/exit で終了",
+    "slash.help": "使い方と例を表示",
+    "slash.attach": "次の依頼に参考画像を添付",
+    "slash.attachments": "添付中の参考画像を表示",
+    "slash.clearAttachments": "添付中の参考画像をクリア",
+    "slash.resume": "過去の会話を選択して再開",
+    "slash.status": "接続・起動状態を確認",
+    "slash.report": "日次レポートを取得",
+    "slash.submit": "入稿前チェックを実行",
+    "slash.connect": "Meta / GitHub / AI / Slack を接続",
+    "slash.account": "広告アカウントを確認・選択",
+    "slash.schedule": "自動実行を確認・変更",
+    "slash.open": "Web UI の URL を表示",
+    "slash.stop": "Web UI と worker を停止",
+    "slash.exit": "チャットを終了",
+    "report.missingInit": "日次レポートを取得できません。先に `addroid init` を完了してください。",
+    "report.working": "日次レポートを作成中",
+    "report.interrupted": "日次レポートの完了待ちを中断しました。処理自体は継続している場合があります。",
+    "report.failed": "日次レポートを取得できませんでした: {error}",
+    "report.stateFailed": "日次レポートは失敗しました。",
+    "report.stateDone": "日次レポートは完了しました。",
+    "report.reason": "理由: {error}",
+    "report.details": "詳細: {url}",
+    "report.got": "日次レポートを取得しました。",
+    "report.gotNeedsReview": "日次レポートを取得しましたが、確認が必要です。",
+    "report.counts": "対象: {total}件 / 成功 {succeeded} / 確認 {failed}",
+  },
+  en: {
+    "resume.selected": "Resuming conversation: {title} ({id})",
+    "resume.done": "Resumed conversation: {title} ({id})",
+    "resume.unavailable": "Conversation history resume is not available in this run.",
+    "chat.missingRuntime": "[addroid chat] DATABASE_URL / ENCRYPTION_KEY is not set. Complete `addroid init` first.",
+    "chat.llmMissing": "[addroid chat] No LLM credential was found. Choose and connect a provider with `addroid connect ai`.",
+    "attachments.empty": "No reference images are attached.",
+    "attachments.current": "Attached reference images:",
+    "attachments.cleared": "Cleared the attached reference images.",
+    "attachments.usage": "Usage: /attach <reference-image-path> [additional-paths...]",
+    "attachments.unsupported": "skip: unsupported reference image format: {path}",
+    "attachments.missing": "skip: file not found: {path}",
+    "attachments.added": "Attached {count} reference image(s). They will be used in the next creative generation request.",
+    "attachments.noneAdded": "No reference images were added.",
+    "splash.subtitle": "Local AI operator for Meta ads",
+    "splash.try": "Try \"get the daily report\", \"check submission\", or type /",
+    "splash.keys": "Enter sends, Shift+Enter inserts a newline, /exit quits",
+    "slash.help": "Show help and examples",
+    "slash.attach": "Attach reference images to the next request",
+    "slash.attachments": "Show attached reference images",
+    "slash.clearAttachments": "Clear attached reference images",
+    "slash.resume": "Select and resume a previous conversation",
+    "slash.status": "Check connection and runtime status",
+    "slash.report": "Get the daily report",
+    "slash.submit": "Run a pre-submit check",
+    "slash.connect": "Connect Meta / GitHub / AI / Slack",
+    "slash.account": "Review or select ad accounts",
+    "slash.schedule": "Review or update automation",
+    "slash.open": "Show the Web UI URL",
+    "slash.stop": "Stop Web UI and worker",
+    "slash.exit": "Exit chat",
+    "report.missingInit": "Cannot get the daily report. Run `addroid init` first.",
+    "report.working": "Creating the daily report",
+    "report.interrupted": "Stopped waiting for the daily report. The job may still be running.",
+    "report.failed": "Could not get the daily report: {error}",
+    "report.stateFailed": "The daily report failed.",
+    "report.stateDone": "The daily report completed.",
+    "report.reason": "Reason: {error}",
+    "report.details": "Details: {url}",
+    "report.got": "Daily report retrieved.",
+    "report.gotNeedsReview": "Daily report retrieved, but it needs review.",
+    "report.counts": "Accounts: {total} / succeeded {succeeded} / needs review {failed}",
+  },
+};
+
+function t(
+  language: AddroidLanguage,
+  key: string,
+  values?: Record<string, string | number | null | undefined>
+): string {
+  return translateMessage(CHAT_MESSAGES, language, key, values);
 }
 
 function parseChatArgs(args: string[]): ParsedChatArgs {

@@ -9,7 +9,7 @@
 // Next.js は独自の dotenv 統合を持っているが、`addroid` 経路は素の Node プロセス
 // なので明示ロードが必要 (詳細は packages/config/src/env-files.ts のコメント参照)。
 
-import { loadEnvFilesFromRepoRoot } from "@addroid/config";
+import { loadEnvFilesFromRepoRoot, resolveAddroidLanguage } from "@addroid/config";
 import { resolveRepoRoot } from "./lib/paths.js";
 
 try {
@@ -115,6 +115,38 @@ async function main(argv: string[]): Promise<number> {
 }
 
 function printHelp() {
+  const language = resolveAddroidLanguage();
+  if (language === "en") {
+    process.stdout.write(
+      [
+        "addroid — AdDroid OSS local CLI",
+        "",
+        "Usage:",
+        "  addroid <command> [...args]",
+        "",
+        "Commands:",
+        "  chat      Interactive natural-language agent chat",
+        "  init      First-run setup and missing configuration guide",
+        "  start     Start or repair resident services",
+        "  stop      Stop resident services",
+        "  open      Open the Web UI or print its URL",
+        "  status    Check connection and runtime status",
+        "  connect   Connect or reconnect Meta / GitHub / AI / Slack",
+        "  account   Review and select the Meta ad account",
+        "  report    Run reports and improvement checks now",
+        "  submit    Check submissions and preview planned changes",
+        "  schedule  Review and update scheduled tasks",
+        "  backup    Back up the database",
+        "  version   CLI version",
+        "  help      Show this help",
+        "",
+        "Detailed commands for CI / troubleshooting: doctor, logs, validate, plan, activate, cron, auth, accounts, restore, service, up, down.",
+        "All operations are localhost-bound and outbound-only.",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid — AdDroid OSS local CLI",

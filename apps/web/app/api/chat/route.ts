@@ -6,6 +6,7 @@ import {
   loadWebChatSessionMessages,
   runWebAgentChat,
 } from "../../../lib/agent-chat";
+import { resolveWebLanguage } from "../../../lib/i18n";
 import { requireTrustedWebAction } from "../../../lib/request-guard";
 
 export const dynamic = "force-dynamic";
@@ -47,11 +48,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, error: parsed.error }, { status: 400 });
   }
   const input = parsed.input;
+  const language = await resolveWebLanguage(request.headers.get("accept-language"));
   const result = await runWebAgentChat(input, {
     userInput: parsed.userInput,
     referenceImagePaths: parsed.referenceImagePaths,
     sessionId: parsed.sessionId,
     surface: parsed.surface,
+    language,
   }).catch((err) => ({
     ok: false,
     message: "",

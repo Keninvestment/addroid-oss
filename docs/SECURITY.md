@@ -126,8 +126,10 @@ AdDroid runtime は `~/.addroid/secrets.local.yaml` を読み取り得ます。
 - Zod スキーマ (`packages/ops-schemas`) と dry-run plan で以下を必ず拒否します:
   - 不正な GitOps operation manifest / cron 設定の構造
   - `account.key` パスの不整合
-  - 安全でない予算変更 (例: 一気に 10x)
+  - 安全でない予算変更 (既定では 2x 以上を警告、5x 以上をブロック)
   - 初期 active キャンペーンの作成
+- 入稿ガードの設定は ops repo の `workflows/guards.yaml` に保存します。
+  Web UI `/guards`、CLI chat、ダッシュボード chat、Slack chat から自然言語でも変更できます。
 
 ### 4.1 audit_logs.actor の規約
 

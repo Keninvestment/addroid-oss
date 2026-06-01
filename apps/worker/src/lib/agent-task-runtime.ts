@@ -13,6 +13,11 @@ import {
   type MetaAssetReadinessReport,
 } from "@addroid/meta-adapter";
 import {
+  readAddroidConfig,
+  resolveAddroidLanguage,
+  type AddroidLanguage,
+} from "@addroid/config";
+import {
   CRON_PRESETS,
   SCHEDULED_TASK_JOB_NAME,
   resolveCronScheduleTimeZone,
@@ -62,6 +67,10 @@ import {
   saveBudgetGuardPolicyConfig,
   type BudgetGuardPolicyConfigInput,
 } from "./budget-guard-policy-config.js";
+import {
+  saveSubmissionGuardPolicyConfig,
+  type SubmissionGuardPolicyConfigInput,
+} from "./submission-guard-policy-config.js";
 import { formatImprovementReportForUser } from "./improvement-report-format.js";
 import {
   decidePullRequestApproval,
@@ -233,6 +242,7 @@ export async function runScheduledAgentTaskJob(
     select: { id: true },
   });
   try {
+    const language = await resolveWorkerLanguage();
     const agentContext = await buildAgentContext(process.env);
     const executions = [];
     const seenTools = new Set<string>();
@@ -244,6 +254,7 @@ export async function runScheduledAgentTaskJob(
         agentContext,
         purpose: "worker:agent-task",
         surface: "scheduled-agent",
+        language,
       });
       if (turn.message) message = turn.message;
       if (turn.toolResults.length === 0) break;
@@ -333,6 +344,13 @@ export async function runScheduledAgentTaskJob(
     }
     throw err;
   }
+}
+
+async function resolveWorkerLanguage(): Promise<AddroidLanguage> {
+  const config = await readAddroidConfig().catch(() => null);
+  return resolveAddroidLanguage({
+    preference: config?.ui.language,
+  });
 }
 
 function computeNextRunAt(cron: string, currentDate = new Date()): Date {
@@ -453,6 +471,8 @@ export async function executeWorkerAgentTool(opts: {
         return await setScheduleEnabled({ ...opts, tool: readyTool });
       case "configure_budget_guard":
         return await configureBudgetGuard({ ...opts, tool: readyTool });
+      case "configure_submission_guards":
+        return await configureSubmissionGuards({ ...opts, tool: readyTool });
       case "manage_schedule":
         return await manageSchedule({ ...opts, tool: readyTool });
       case "check_submission":
@@ -928,6 +948,44 @@ async function configureBudgetGuard(opts: {
   };
 }
 
+async function configureSubmissionGuards(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  webUrl: string;
+  actor?: string;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const saved = await saveSubmissionGuardPolicyConfig({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    input: normalizeSubmissionGuardConfigInput(opts.tool.toolArgs),
+    actor: opts.actor ?? "agent:scheduled-task",
+    env: process.env,
+  });
+  const budget = saved.policy.guards.budgetIncrease;
+  await opts.prisma.auditLog.create({
+    data: {
+      workspaceId: opts.workspaceId,
+      actor: opts.actor ?? "agent:scheduled-task",
+      action: "submission_guards.policy_saved_via_chat",
+      target: "submission_guards_policy",
+      ref: "workflows/guards.yaml",
+      metadata: {
+        warnOverRatio: budget.warnOverRatio,
+        blockOverRatio: budget.blockOverRatio,
+      } as Prisma.InputJsonValue,
+    },
+  }).catch(() => undefined);
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message:
+      `安全ガードを保存しました。予算変更は ${budget.warnOverRatio}倍以上で警告、` +
+      `${budget.blockOverRatio}倍以上でブロックします。確認: ${opts.webUrl}/guards`,
+    data: { saved },
+  };
+}
+
 async function showRecentLogs(opts: {
   tool: Extract<AgentToolResult, { status: "ready" }>;
   prisma: PrismaClient;
@@ -1142,6 +1200,34 @@ function normalizeBudgetGuardConfigInput(
         ? (args.safeCategories as string[] | string)
         : null,
   };
+}
+
+function normalizeSubmissionGuardConfigInput(
+  args: Record<string, unknown>
+): SubmissionGuardPolicyConfigInput {
+  const budgetIncrease = isRecord(args.budgetIncrease) ? args.budgetIncrease : {};
+  return {
+    warnOverRatio: readRequiredInlineNumber(
+      args.warnOverRatio ??
+        args.warn_over_ratio ??
+        budgetIncrease.warnOverRatio ??
+        budgetIncrease.warn_over_ratio,
+      "warnOverRatio"
+    ),
+    blockOverRatio: readRequiredInlineNumber(
+      args.blockOverRatio ??
+        args.block_over_ratio ??
+        budgetIncrease.blockOverRatio ??
+        budgetIncrease.block_over_ratio,
+      "blockOverRatio"
+    ),
+  };
+}
+
+function readRequiredInlineNumber(value: unknown, label: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) throw new Error(`${label} が指定されていません。`);
+  return n;
 }
 
 function readNumberArg(value: unknown, label: string): number {

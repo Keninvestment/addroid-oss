@@ -20,7 +20,11 @@ import {
   ensureAddroidPaths,
   homeAnchorPath,
   parseDatabaseUrl,
+  resolveAddroidLanguage,
   resolveAddroidPaths,
+  translateMessage,
+  type AddroidLanguage,
+  type AddroidMessageDictionary,
 } from "@addroid/config";
 import type { LLMProvider } from "@addroid/llm-provider";
 import { Prisma } from "@addroid/db";
@@ -78,6 +82,10 @@ import {
   type BudgetGuardPolicyConfigInput,
 } from "../../worker/src/lib/budget-guard-policy-config";
 import {
+  saveSubmissionGuardPolicyConfig,
+  type SubmissionGuardPolicyConfigInput,
+} from "../../worker/src/lib/submission-guard-policy-config";
+import {
   ensureOpsRepoLocalCheckout,
   resolveOpsRepoLocalDirForWorkspace,
 } from "../../worker/src/lib/ops-repo-local";
@@ -120,6 +128,7 @@ export interface WebAgentChatOptions {
   referenceImagePaths?: string[];
   sessionId?: string;
   surface?: string;
+  language?: AddroidLanguage;
 }
 
 export interface WebChatSessionSummary {
@@ -146,13 +155,47 @@ const CHAT_AUDIT_ACTIONS = [
   "agent.chat_via_cli",
 ] as const;
 
+const WEB_AGENT_MESSAGES: AddroidMessageDictionary = {
+  ja: {
+    "chat.emptyInput": "入力が空です。",
+    "chat.llmMissing": "LLM credential が見つかりません。/ai から接続してください。",
+    "report.stateFailed": "日次レポートは失敗しました。",
+    "report.stateDone": "日次レポートは完了しました。",
+    "report.reason": "理由: {error}",
+    "report.details": "詳細: {url}",
+    "report.got": "日次レポートを取得しました。",
+    "report.gotNeedsReview": "日次レポートを取得しましたが、確認が必要です。",
+    "report.counts": "対象: {total}件 / 成功 {succeeded} / 確認 {failed}",
+  },
+  en: {
+    "chat.emptyInput": "The input is empty.",
+    "chat.llmMissing": "No LLM credential was found. Connect one from /ai.",
+    "report.stateFailed": "The daily report failed.",
+    "report.stateDone": "The daily report completed.",
+    "report.reason": "Reason: {error}",
+    "report.details": "Details: {url}",
+    "report.got": "Daily report retrieved.",
+    "report.gotNeedsReview": "Daily report retrieved, but it needs review.",
+    "report.counts": "Accounts: {total} / succeeded {succeeded} / needs review {failed}",
+  },
+};
+
+function t(
+  language: AddroidLanguage,
+  key: string,
+  values?: Record<string, string | number | null | undefined>
+): string {
+  return translateMessage(WEB_AGENT_MESSAGES, language, key, values);
+}
+
 export async function runWebAgentChat(
   input: string,
   options: WebAgentChatOptions = {}
 ): Promise<WebAgentReply> {
+  const language = options.language ?? resolveAddroidLanguage();
   const text = input.trim();
   if (!text) {
-    return { ok: false, message: "入力が空です。", executions: [] };
+    return { ok: false, message: t(language, "chat.emptyInput"), executions: [] };
   }
   const workspace = await ensureWebWorkspace();
   const sessionId = normalizeSessionId(options.sessionId) ?? randomUUID();
@@ -162,7 +205,7 @@ export async function runWebAgentChat(
   if (!connection && selection.choice !== "mock") {
     return {
       ok: false,
-      message: "LLM credential が見つかりません。/ai から接続してください。",
+      message: t(language, "chat.llmMissing"),
       executions: [],
     };
   }
@@ -211,6 +254,7 @@ export async function runWebAgentChat(
       agentContext,
       purpose: "web:dashboard-chat",
       surface: "web-chat",
+      language,
     });
     if (turn.message) message = turn.message;
     if (turn.toolResults.length === 0) break;
@@ -232,7 +276,8 @@ export async function runWebAgentChat(
         workspace.id,
         selection.provider,
         options.referenceImagePaths ?? [],
-        sessionId
+        sessionId,
+        language
       );
       executions.push(execution);
       executedAny = true;
@@ -549,7 +594,8 @@ export async function executeWebAgentTool(
   workspaceId: string,
   provider?: LLMProvider,
   referenceImagePaths: string[] = [],
-  sessionId?: string
+  sessionId?: string,
+  language: AddroidLanguage = resolveAddroidLanguage()
 ): Promise<WebAgentExecution> {
   if (tool.status === "denied") {
     return {
@@ -600,13 +646,15 @@ export async function executeWebAgentTool(
       case "connect_service":
         return connectServiceResult(tool.toolArgs, tool.display);
       case "get_report":
-        return await runReportTool(tool.toolArgs, tool.display, webUrl);
+        return await runReportTool(tool.toolArgs, tool.display, webUrl, language);
       case "create_scheduled_agent_task":
         return await createScheduledAgentTaskTool(tool.toolArgs, tool.display);
       case "set_schedule_enabled":
         return await setScheduleEnabledTool(tool.toolArgs, tool.display);
       case "configure_budget_guard":
         return await configureBudgetGuardTool(tool.toolArgs, tool.display, webUrl);
+      case "configure_submission_guards":
+        return await configureSubmissionGuardsTool(tool.toolArgs, tool.display, webUrl);
       case "manage_schedule":
         return await manageScheduleTool(tool.toolArgs, tool.display);
       case "check_submission":
@@ -1604,7 +1652,8 @@ function connectServiceResult(
 async function runReportTool(
   args: Record<string, unknown>,
   display: string,
-  webUrl: string
+  webUrl: string,
+  language: AddroidLanguage
 ): Promise<WebAgentExecution> {
   const preset = reportPreset(typeof args.kind === "string" ? args.kind : "daily");
   const metricDate = resolveMetricDateArg(args);
@@ -1622,7 +1671,10 @@ async function runReportTool(
       return {
         display,
         status: "ok",
-        message: `日次レポートを作成中です。完了後に ${webUrl}/reports/daily で確認できます。`,
+        message:
+          language === "en"
+            ? `The daily report is being created. Check ${webUrl}/reports/daily after it completes.`
+            : `日次レポートを作成中です。完了後に ${webUrl}/reports/daily で確認できます。`,
         data: result,
       };
     }
@@ -1634,7 +1686,7 @@ async function runReportTool(
     return {
       display,
       status: run.state === "failed" ? "error" : "ok",
-      message: formatDailyReportForUser(run, logs, webUrl),
+      message: formatDailyReportForUser(run, logs, webUrl, language),
       data: { result, run, logs },
     };
   }
@@ -1851,6 +1903,39 @@ async function configureBudgetGuardTool(
       `予算チェックを保存しました。${result.enabled ? "自動実行はON" : "自動実行はOFF"}です。` +
       ` 確認: ${webUrl}/budget`,
     data: { saved, schedule: result },
+  };
+}
+
+async function configureSubmissionGuardsTool(
+  args: Record<string, unknown>,
+  display: string,
+  webUrl: string
+): Promise<WebAgentExecution> {
+  const workspace = await ensureWebWorkspace();
+  const saved = await saveSubmissionGuardPolicyConfig({
+    prisma,
+    workspaceId: workspace.id,
+    input: normalizeSubmissionGuardConfigInput(args),
+    actor: "agent:web-chat",
+  });
+  const budget = saved.policy.guards.budgetIncrease;
+  await recordAgentAudit(
+    workspace.id,
+    "submission_guards.policy_saved_via_chat",
+    {
+      path: "workflows/guards.yaml",
+      warnOverRatio: budget.warnOverRatio,
+      blockOverRatio: budget.blockOverRatio,
+    },
+    "agent:web-chat"
+  );
+  return {
+    display,
+    status: "ok",
+    message:
+      `安全ガードを保存しました。予算変更は ${budget.warnOverRatio}倍以上で警告、` +
+      `${budget.blockOverRatio}倍以上でブロックします。確認: ${webUrl}/guards`,
+    data: { saved },
   };
 }
 
@@ -2153,14 +2238,15 @@ function formatDailyReportForUser(
     output: unknown;
   },
   logs: Array<{ payload: unknown }>,
-  webUrl: string
+  webUrl: string,
+  language: AddroidLanguage = "ja"
 ): string {
   const summaries = collectDailyReportSummaries(run.output, logs);
   if (summaries.length === 0) {
     return [
-      run.state === "failed" ? "日次レポートは失敗しました。" : "日次レポートは完了しました。",
-      ...(run.errorMessage ? [`理由: ${run.errorMessage}`] : []),
-      `詳細: ${webUrl}/reports/daily`,
+      run.state === "failed" ? t(language, "report.stateFailed") : t(language, "report.stateDone"),
+      ...(run.errorMessage ? [t(language, "report.reason", { error: run.errorMessage })] : []),
+      t(language, "report.details", { url: `${webUrl}/reports/daily` }),
     ].join("\n");
   }
 
@@ -2169,10 +2255,14 @@ function formatDailyReportForUser(
   const lines: string[] = [];
   lines.push(
     succeeded.length > 0
-      ? "日次レポートを取得しました。"
-      : "日次レポートを取得しましたが、確認が必要です。"
+      ? t(language, "report.got")
+      : t(language, "report.gotNeedsReview")
   );
-  lines.push(`対象: ${summaries.length}件 / 成功 ${succeeded.length} / 確認 ${failed.length}`);
+  lines.push(t(language, "report.counts", {
+    total: summaries.length,
+    succeeded: succeeded.length,
+    failed: failed.length,
+  }));
   lines.push("");
 
   for (const summary of summaries) {
@@ -2578,6 +2668,34 @@ function normalizeBudgetGuardConfigInput(
       Array.isArray(args.safeCategories) || typeof args.safeCategories === "string"
         ? (args.safeCategories as string[] | string)
         : [],
+  };
+}
+
+function normalizeSubmissionGuardConfigInput(
+  args: Record<string, unknown>
+): SubmissionGuardPolicyConfigInput {
+  const budgetIncrease = isRecord(args.budgetIncrease) ? args.budgetIncrease : {};
+  return {
+    warnOverRatio: readRequiredNumber(
+      {
+        value:
+          args.warnOverRatio ??
+          args.warn_over_ratio ??
+          budgetIncrease.warnOverRatio ??
+          budgetIncrease.warn_over_ratio,
+      },
+      "value"
+    ),
+    blockOverRatio: readRequiredNumber(
+      {
+        value:
+          args.blockOverRatio ??
+          args.block_over_ratio ??
+          budgetIncrease.blockOverRatio ??
+          budgetIncrease.block_over_ratio,
+      },
+      "value"
+    ),
   };
 }
 

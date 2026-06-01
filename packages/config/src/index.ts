@@ -16,6 +16,22 @@ export {
 } from "./config.js";
 
 export {
+  SUPPORTED_ADDROID_LANGUAGES,
+  detectLanguageFromAcceptLanguage,
+  detectLanguageFromEnv,
+  languageLabel,
+  languageToHtmlLang,
+  languageToLocale,
+  normalizeAddroidLanguagePreference,
+  resolveAddroidLanguage,
+  translateMessage,
+  type AddroidLanguage,
+  type AddroidLanguagePreference,
+  type AddroidMessageDictionary,
+  type ResolveAddroidLanguageOptions,
+} from "./locale.js";
+
+export {
   ALLOWED_LOCALHOST_HOSTNAMES,
   ensureAddroidPaths,
   homeAnchorPath,

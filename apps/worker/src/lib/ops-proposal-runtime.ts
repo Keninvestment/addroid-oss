@@ -88,6 +88,12 @@ export async function createOpsChangeProposal(opts: {
     actor: opts.actor,
     source: opts.source,
   });
+  await enrichBudgetGuardContext({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    accountKey,
+    manifest,
+  });
   const changes = manifest.actions.map(formatOperationChange);
   if (changes.length === 0) {
     throw new Error("PR にできる操作が見つかりませんでした。target id、level、desiredChanges を確認してください。");
@@ -217,6 +223,110 @@ export async function createOpsChangeProposal(opts: {
     planOk: true,
     planSummary,
   };
+}
+
+async function enrichBudgetGuardContext(input: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  accountKey: string;
+  manifest: OperationManifest;
+}): Promise<void> {
+  const budgetUpdates = input.manifest.actions.filter((action) => {
+    if (action.kind !== "campaign.update" && action.kind !== "adset.update") return false;
+    return readNumber(action.payload.dailyBudget) !== null ||
+      readNumber(action.payload.lifetimeBudget) !== null;
+  });
+  if (budgetUpdates.length === 0) return;
+  const accountDelegate = input.prisma.adAccount as unknown as {
+    findUnique?: (args: {
+      where: { workspaceId_key: { workspaceId: string; key: string } };
+      select: { id: true; currency: true };
+    }) => Promise<{ id: string; currency: string | null } | null>;
+  } | undefined;
+  if (typeof accountDelegate?.findUnique !== "function") return;
+  const account = await accountDelegate.findUnique({
+    where: {
+      workspaceId_key: {
+        workspaceId: input.workspaceId,
+        key: input.accountKey,
+      },
+    },
+    select: { id: true, currency: true },
+  }).catch(() => null);
+  if (!account) return;
+  const nodeDelegate = input.prisma.adsHierarchyNode as unknown as {
+    findUnique?: (args: {
+      where: {
+        accountId_nodeType_nodeKey: {
+          accountId: string;
+          nodeType: string;
+          nodeKey: string;
+        };
+      };
+      select: { spec: true };
+    }) => Promise<{ spec: unknown } | null>;
+  } | undefined;
+  if (typeof nodeDelegate?.findUnique !== "function") return;
+  for (const action of budgetUpdates) {
+    const nodeType = action.kind === "campaign.update" ? "campaign" : "adset";
+    const nodeKey = readBudgetTargetId(action);
+    if (!nodeKey) continue;
+    const node = await nodeDelegate.findUnique({
+      where: {
+        accountId_nodeType_nodeKey: {
+          accountId: account.id,
+          nodeType,
+          nodeKey,
+        },
+      },
+      select: { spec: true },
+    }).catch(() => null);
+    const current = currentBudgetFromSpec(node?.spec);
+    if (current.dailyBudget === null && current.lifetimeBudget === null) continue;
+    action.payload = {
+      ...action.payload,
+      guardContext: {
+        ...(isRecord(action.payload.guardContext) ? action.payload.guardContext : {}),
+        ...(current.dailyBudget !== null ? { currentDailyBudget: current.dailyBudget } : {}),
+        ...(current.lifetimeBudget !== null ? { currentLifetimeBudget: current.lifetimeBudget } : {}),
+        currency: account.currency ?? null,
+        source: "ads_hierarchy",
+      },
+    };
+  }
+}
+
+function readBudgetTargetId(action: Omit<GraphOperationAction, "account">): string | null {
+  const key = action.kind === "campaign.update" ? "campaignId" : "adsetId";
+  const value = action.payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function currentBudgetFromSpec(spec: unknown): {
+  dailyBudget: number | null;
+  lifetimeBudget: number | null;
+} {
+  const root = isRecord(spec) ? spec : {};
+  const raw = isRecord(root.raw) ? root.raw : {};
+  return {
+    dailyBudget:
+      readNumber(root.dailyBudget) ??
+      readNestedNumber(root, ["payload", "dailyBudget"]) ??
+      readNumber(raw.daily_budget),
+    lifetimeBudget:
+      readNumber(root.lifetimeBudget) ??
+      readNestedNumber(root, ["payload", "lifetimeBudget"]) ??
+      readNumber(raw.lifetime_budget),
+  };
+}
+
+function readNestedNumber(root: Record<string, unknown>, keys: string[]): number | null {
+  let current: unknown = root;
+  for (const key of keys) {
+    if (!isRecord(current)) return null;
+    current = current[key];
+  }
+  return readNumber(current);
 }
 
 interface OperationManifest {

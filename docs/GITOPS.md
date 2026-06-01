@@ -180,6 +180,10 @@ npm run addroid -- plan --dry-run    # Apply の差分シミュレーション
 `plan` の出力は `apply_jobs` に `state: simulated` として記録され、Web UI `/plans`
 からも参照できます。実書き込みは発生しません。
 
+入稿ガードは `workflows/guards.yaml` で管理します。既定では現在予算から 2 倍以上の
+増額を警告、5 倍以上の増額をブロックします。警告は反映可能ですが、ブロックは
+CI / `submit` / `plan` で失敗として扱います。
+
 ---
 
 ## 9. Web UI の確認ポイント
@@ -190,6 +194,7 @@ npm run addroid -- plan --dry-run    # Apply の差分シミュレーション
 | `/approvals` | 承認待ち PR、Web UI からの merge |
 | `/approvals/[prNumber]` | PR の preview body / 変更ファイル一覧 / merge 操作 |
 | `/plans` | Apply 前の plan dry-run 結果 |
+| `/guards` | 入稿ガードの確認と予算増加ルールの編集 |
 | `/campaigns` | Apply 後の Meta 階層確認と Activate 操作 |
 | `/cron/audit` | `audit_logs` の閲覧 |
 

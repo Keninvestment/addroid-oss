@@ -1,0 +1,11 @@
+version: 1
+# AdDroid OSS — submission guards.
+#
+# 入稿・変更PRの内容を CI / addroid submit / addroid plan --dry-run で検査する
+# 安全ガードです。Meta には直接反映しません。
+guards:
+  budgetIncrease:
+    # 現在予算の2倍以上に増える変更は警告します。警告は反映可能です。
+    warnOverRatio: 2
+    # 現在予算の5倍以上に増える変更はブロックします。
+    blockOverRatio: 5

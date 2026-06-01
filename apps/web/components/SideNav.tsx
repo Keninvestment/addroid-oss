@@ -2,64 +2,67 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useI18n } from "./I18nProvider";
 
 interface NavItem {
   href: string;
-  label: string;
+  labelKey: string;
   exact?: boolean;
 }
 
 interface NavGroup {
-  label: string;
+  labelKey: string;
   items: NavItem[];
 }
 
 const groups: NavGroup[] = [
   {
-    label: "全体",
-    items: [{ href: "/", label: "ホーム", exact: true }],
+    labelKey: "nav.group.overview",
+    items: [{ href: "/", labelKey: "nav.home", exact: true }],
   },
   {
-    label: "広告運用",
+    labelKey: "nav.group.ops",
     items: [
-      { href: "/accounts", label: "広告アカウント" },
-      { href: "/reports/daily", label: "日次レポート" },
-      { href: "/budget", label: "予算チェック" },
-      { href: "/plans", label: "入稿前チェック" },
-      { href: "/campaigns", label: "配信中の広告" },
+      { href: "/accounts", labelKey: "nav.accounts" },
+      { href: "/reports/daily", labelKey: "nav.dailyReport" },
+      { href: "/budget", labelKey: "nav.budget" },
+      { href: "/guards", labelKey: "nav.guards" },
+      { href: "/plans", labelKey: "nav.plans" },
+      { href: "/campaigns", labelKey: "nav.campaigns" },
     ],
   },
   {
-    label: "改善",
+    labelKey: "nav.group.improve",
     items: [
-      { href: "/improvements", label: "改善提案" },
-      { href: "/creatives", label: "クリエイティブ生成" },
-      { href: "/creatives/submit", label: "クリエイティブ入稿" },
+      { href: "/improvements", labelKey: "nav.improvements" },
+      { href: "/creatives", labelKey: "nav.creatives" },
+      { href: "/creatives/submit", labelKey: "nav.creativeSubmit" },
     ],
   },
   {
-    label: "確認と自動化",
+    labelKey: "nav.group.automation",
     items: [
-      { href: "/approvals", label: "承認待ち" },
-      { href: "/cron", label: "自動実行", exact: true },
-      { href: "/cron/runs", label: "実行ログ" },
-      { href: "/cron/audit", label: "操作履歴" },
-      { href: "/github", label: "GitHub 連携" },
+      { href: "/approvals", labelKey: "nav.approvals" },
+      { href: "/cron", labelKey: "nav.cron", exact: true },
+      { href: "/cron/runs", labelKey: "nav.cronRuns" },
+      { href: "/cron/audit", labelKey: "nav.audit" },
+      { href: "/github", labelKey: "nav.github" },
     ],
   },
   {
-    label: "設定",
-    items: [{ href: "/setup", label: "接続と健康状態" }],
+    labelKey: "nav.group.settings",
+    items: [{ href: "/setup", labelKey: "nav.setup" }],
   },
 ];
 
 export function SideNav() {
   const pathname = usePathname() ?? "/";
+  const { t } = useI18n();
   return (
     <nav className="side-nav" aria-label="primary">
       {groups.map((group) => (
-        <div className="side-nav__group" key={group.label}>
-          <div className="side-nav__group-label">{group.label}</div>
+        <div className="side-nav__group" key={group.labelKey}>
+          <div className="side-nav__group-label">{t(group.labelKey)}</div>
           {group.items.map((item) => {
             const active = item.exact ? pathname === item.href : pathname.startsWith(item.href);
             return (
@@ -69,7 +72,7 @@ export function SideNav() {
                 className="side-nav__link"
                 data-active={active ? "true" : "false"}
               >
-                {item.label}
+                {t(item.labelKey)}
               </Link>
             );
           })}

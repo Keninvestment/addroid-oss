@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { headers } from "next/headers";
 import {
   buildSlackAppManifest,
   homeAnchorPath,
@@ -19,6 +20,7 @@ import { PageHeader } from "../../components/ui/PageHeader";
 import { EmptyState } from "../../components/ui/EmptyState";
 import { SlackConnectForm } from "./SlackConnectForm";
 import { formatDateTime, resolveDisplayTimeZone } from "../../lib/datetime";
+import { resolveWebLanguage, webT } from "../../lib/i18n";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +63,10 @@ function buildSlackManifestPreview(
 }
 
 export default async function SetupPage() {
+  const headerList = await headers();
+  const language = await resolveWebLanguage(headerList.get("accept-language"));
+  const t = (key: string, values?: Record<string, string | number | null | undefined>) =>
+    webT(language, key, values);
   const pageDisplayTimeZone = resolveDisplayTimeZone();
   const paths = resolveAddroidPaths();
   const repoRoot = process.cwd().includes("/apps/web")
@@ -146,15 +152,14 @@ export default async function SetupPage() {
     if (!slackInstallation) {
       return {
         state: "info",
-        label: "Slack 未設定 (任意)",
-        detail:
-          "AdDroid は Slack なしでも動作します。Slack 通知や /adops を使う場合のみ、addroid connect slack で接続してください。",
+        label: t("setup.slack.unset"),
+        detail: t("setup.slack.unsetDetail"),
       };
     }
     if (!slackInstallation.hasAppToken) {
       return {
         state: "warn",
-        label: "Slack 接続済み (Socket Mode 用 app token なし)",
+        label: t("setup.slack.connectedNoAppToken"),
         detail:
           "xoxb- bot token は登録されていますが、xapp- app-level token が未登録のため Socket Mode が使えません。addroid connect slack を再実行して app token を登録してください。",
       };
@@ -163,7 +168,9 @@ export default async function SetupPage() {
     const channelId = slackInstallation.metadata?.notificationChannelId;
     return {
       state: "ok",
-      label: `Slack 接続済み: ${teamName}${channelId ? ` (channel ${channelId})` : ""}`,
+      label: t("setup.slack.connected", {
+        team: `${teamName}${channelId ? ` (channel ${channelId})` : ""}`,
+      }),
       detail:
         "通知チャンネルが保存されています。Slack に障害があっても、承認済み変更の確認や自動実行は通常通り稼働します。",
     };
@@ -172,7 +179,7 @@ export default async function SetupPage() {
   // OSS リリース衛生チェック (UI 内で読み取り可能なものだけ判定する)
   const securityChecks: DoctorCheck[] = [
     {
-      name: "この端末だけで開ける",
+      name: t("setup.security.localOnly"),
       state: binding.hostname === "127.0.0.1" || binding.hostname === "localhost" ? "ok" : "error",
       message: `bind=${binding.hostname}:${binding.port}`,
       hint:
@@ -181,7 +188,7 @@ export default async function SetupPage() {
           : "ADDROID_WEB_HOSTNAME を 127.0.0.1 に戻してください。",
     },
     {
-      name: ".gitignore が secrets を除外",
+      name: t("setup.security.secretsIgnored"),
       ...(() => {
         const gitignorePath = path.join(repoRoot, ".gitignore");
         try {
@@ -207,7 +214,7 @@ export default async function SetupPage() {
       })(),
     },
     {
-      name: "接続情報の暗号化",
+      name: t("setup.security.encryption"),
       ...(() => {
         const key = process.env.ENCRYPTION_KEY ?? "";
         if (!key) {
@@ -230,7 +237,7 @@ export default async function SetupPage() {
       })(),
     },
     {
-      name: "外部からの着信を使わない",
+      name: t("setup.security.noInbound"),
       state: "ok",
       message:
         "AdDroid は公開URLを要求しません。承認済み変更は定期確認で検出します。",
@@ -246,12 +253,12 @@ export default async function SetupPage() {
   return (
     <>
       <PageHeader
-        title="接続と健康状態"
-        subtitle="AdDroid が使える状態か、必要な接続ができているかを確認します。"
+        title={t("setup.title")}
+        subtitle={t("setup.subtitle")}
       />
 
       <div className="page-body page-body--single">
-        <Panel title="初期設定メモ" subtitle="通常は初回セットアップ時だけ確認します">
+        <Panel title={t("setup.memo.title")} subtitle={t("setup.memo.subtitle")}>
           <KeyValueList
             items={[
               { label: "アプリの準備", value: <CodeBlock>npm install</CodeBlock> },

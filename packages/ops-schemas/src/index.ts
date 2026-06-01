@@ -160,6 +160,34 @@ export const BudgetGuardPolicyYamlSchema = z
 
 export type BudgetGuardPolicyYaml = z.infer<typeof BudgetGuardPolicyYamlSchema>;
 
+export const SubmissionGuardBudgetIncreaseSchema = z
+  .object({
+    warnOverRatio: z.number().positive().default(2),
+    blockOverRatio: z.number().positive().default(5),
+  })
+  .strict()
+  .refine((value) => value.warnOverRatio < value.blockOverRatio, {
+    message: "warnOverRatio は blockOverRatio より小さくしてください",
+    path: ["warnOverRatio"],
+  });
+
+export const SubmissionGuardsYamlSchema = z
+  .object({
+    version: z.literal(1),
+    guards: z
+      .object({
+        budgetIncrease: SubmissionGuardBudgetIncreaseSchema.default({
+          warnOverRatio: 2,
+          blockOverRatio: 5,
+        }),
+      })
+      .strict()
+      .default({ budgetIncrease: { warnOverRatio: 2, blockOverRatio: 5 } }),
+  })
+  .strict();
+
+export type SubmissionGuardsYaml = z.infer<typeof SubmissionGuardsYamlSchema>;
+
 export const AutomationMetricWindowSchema = z
   .object({
     preset: z.enum(["today", "yesterday", "last_7d", "last_14d", "last_30d"]).optional(),
@@ -304,6 +332,7 @@ export interface OpsRepoLayout {
   projectYaml: string;
   cronYaml: string;
   budgetGuardYaml: string;
+  submissionGuardsYaml: string;
   automationRulesYaml: string;
 }
 
@@ -311,6 +340,7 @@ export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
   projectYaml: ".addroid/project.yaml",
   cronYaml: "workflows/cron.yaml",
   budgetGuardYaml: "workflows/budget-guard.yaml",
+  submissionGuardsYaml: "workflows/guards.yaml",
   automationRulesYaml: "workflows/automation-rules.yaml",
 };
 
@@ -319,6 +349,13 @@ export function loadBudgetGuardPolicy(
   layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
 ): BudgetGuardPolicyYaml | null {
   return loadYamlFile(rootDir, layout.budgetGuardYaml, BudgetGuardPolicyYamlSchema);
+}
+
+export function loadSubmissionGuardsPolicy(
+  rootDir: string,
+  layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
+): SubmissionGuardsYaml | null {
+  return loadYamlFile(rootDir, layout.submissionGuardsYaml, SubmissionGuardsYamlSchema);
 }
 
 export function loadAutomationRules(

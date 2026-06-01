@@ -8,8 +8,10 @@ import {
   BudgetGuardPolicyYamlSchema,
   CronYamlSchema,
   ProjectYamlSchema,
+  SubmissionGuardsYamlSchema,
   loadAutomationRules,
   loadBudgetGuardPolicy,
+  loadSubmissionGuardsPolicy,
 } from "../index.js";
 
 test("ProjectYamlSchema accepts project metadata", () => {
@@ -57,6 +59,23 @@ test("BudgetGuardPolicyYamlSchema accepts optional policy fields", () => {
   assert.equal(out.success, true);
 });
 
+test("SubmissionGuardsYamlSchema accepts budget increase guard and rejects inverted ratios", () => {
+  assert.equal(
+    SubmissionGuardsYamlSchema.safeParse({
+      version: 1,
+      guards: { budgetIncrease: { warnOverRatio: 2, blockOverRatio: 5 } },
+    }).success,
+    true
+  );
+  assert.equal(
+    SubmissionGuardsYamlSchema.safeParse({
+      version: 1,
+      guards: { budgetIncrease: { warnOverRatio: 5, blockOverRatio: 2 } },
+    }).success,
+    false
+  );
+});
+
 test("AutomationRulesYamlSchema accepts a rule document", () => {
   const out = AutomationRulesYamlSchema.safeParse({
     version: 1,
@@ -87,8 +106,14 @@ test("loadBudgetGuardPolicy and loadAutomationRules read ops policy files lenien
       "version: 1\nrules: []\n",
       "utf8"
     );
+    fs.writeFileSync(
+      path.join(dir, "workflows/guards.yaml"),
+      "version: 1\nguards:\n  budgetIncrease:\n    warnOverRatio: 2\n    blockOverRatio: 5\n",
+      "utf8"
+    );
     assert.equal(loadBudgetGuardPolicy(dir)?.version, 1);
     assert.equal(loadAutomationRules(dir)?.rules.length, 0);
+    assert.equal(loadSubmissionGuardsPolicy(dir)?.guards.budgetIncrease.blockOverRatio, 5);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

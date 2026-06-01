@@ -26,8 +26,11 @@ import {
   getCryptoBoundary,
   readLocalSecrets,
   readAddroidConfig,
+  normalizeAddroidLanguagePreference,
+  resolveAddroidLanguage,
   writeAddroidConfig,
   type AddroidConfig,
+  type AddroidLanguagePreference,
 } from "@addroid/config";
 import {
   checkCodexCli,
@@ -98,6 +101,7 @@ interface InitOptions {
   noChat: boolean;
   noService: boolean;
   projectName?: string;
+  language?: AddroidLanguagePreference;
   databaseUrl?: string;
   envFile?: string;
   help: boolean;
@@ -128,6 +132,7 @@ type InitAuthPrismaClient = {
 
 interface ScaffoldOptions {
   projectName?: string;
+  language?: AddroidLanguagePreference;
 }
 
 interface CommandResult {
@@ -185,7 +190,10 @@ export async function runInit(
 
   if (interactive) {
     if (await shouldShortCircuitAlreadyInitialized(opts, overrides, env)) {
-      const result = await safeScaffoldAddroid({ projectName: opts.projectName });
+      const result = await safeScaffoldAddroid({
+        projectName: opts.projectName,
+        language: opts.language,
+      });
       if (!result) return 1;
       const auth = await readInitAuthState(env, overrides);
       const cliLinkLines = await maybeEnsureCliCommand({
@@ -206,7 +214,10 @@ export async function runInit(
     return runNonInteractiveSetup(opts, overrides);
   }
 
-  const result = await safeScaffoldAddroid({ projectName: opts.projectName });
+  const result = await safeScaffoldAddroid({
+    projectName: opts.projectName,
+    language: opts.language,
+  });
   if (!result) return 1;
   printScaffoldResult(result);
   return 0;
@@ -220,6 +231,7 @@ function shouldRunNonInteractiveSetup(opts: InitOptions): boolean {
       opts.projectName ||
       opts.databaseUrl ||
       opts.envFile ||
+      opts.language ||
       opts.mockIntegrations ||
       opts.force
   );
@@ -237,6 +249,7 @@ function shouldRunReauthOnly(opts: InitOptions): boolean {
       !opts.dbPush &&
       !opts.projectName &&
       !opts.databaseUrl &&
+      !opts.language &&
       !opts.mockIntegrations &&
       !opts.force
   );
@@ -250,6 +263,7 @@ function hasSetupIntent(opts: InitOptions): boolean {
       opts.projectName ||
       opts.databaseUrl ||
       opts.envFile ||
+      opts.language ||
       opts.mockIntegrations ||
       opts.force ||
       hasReauthIntent(opts)
@@ -310,7 +324,10 @@ async function runNonInteractiveSetup(
   });
   lines.push(...formatEnvResult(envResult));
 
-  const scaffold = await safeScaffoldAddroid({ projectName: opts.projectName });
+  const scaffold = await safeScaffoldAddroid({
+    projectName: opts.projectName,
+    language: opts.language,
+  });
   if (!scaffold) return 1;
   lines.push(...formatScaffoldResult(scaffold));
 
@@ -519,7 +536,7 @@ async function runInteractiveInit(
     mockIntegrations: opts.mockIntegrations,
     forcePlaceholders: true,
   });
-  const scaffold = await safeScaffoldAddroid({ projectName });
+  const scaffold = await safeScaffoldAddroid({ projectName, language: opts.language });
   if (!scaffold) return 1;
 
   const out: string[] = [];
@@ -1070,14 +1087,16 @@ function mergeWithDefaults(
 ): AddroidConfig {
   const defaults = defaultAddroidConfig();
   const projectName = opts.projectName?.trim();
+  const language = opts.language ?? existing?.ui?.language ?? defaults.ui.language;
   if (!existing) {
-    if (!projectName) return defaults;
+    if (!projectName && language === defaults.ui.language) return defaults;
     return AddroidConfigSchema.parse({
       ...defaults,
+      ui: { language },
       workspace: {
         ...defaults.workspace,
-        slug: slugify(projectName),
-        displayName: projectName,
+        slug: projectName ? slugify(projectName) : defaults.workspace.slug,
+        displayName: projectName || defaults.workspace.displayName,
       },
     });
   }
@@ -1091,6 +1110,9 @@ function mergeWithDefaults(
       // 黙って戻さない。未指定 (旧スキーマ) は schema default の "proposal" に倒す。
       executionMode:
         existing.workspace.executionMode ?? defaults.workspace.executionMode,
+    },
+    ui: {
+      language,
     },
     database: {
       // urlRef は env に追従させる (既存値は意図的に上書き)。
@@ -2284,6 +2306,9 @@ function parseInitArgs(args: string[]): InitOptions {
     else if (a === "--no-service") opts.noService = true;
     else if (a === "--project-name") opts.projectName = next();
     else if (a.startsWith("--project-name=")) opts.projectName = a.slice("--project-name=".length);
+    else if (a === "--language" || a === "--lang") opts.language = parseLanguageOption(next());
+    else if (a.startsWith("--language=")) opts.language = parseLanguageOption(a.slice("--language=".length));
+    else if (a.startsWith("--lang=")) opts.language = parseLanguageOption(a.slice("--lang=".length));
     else if (a === "--database-url") opts.databaseUrl = next();
     else if (a.startsWith("--database-url=")) opts.databaseUrl = a.slice("--database-url=".length);
     else if (a === "--env-file") opts.envFile = next();
@@ -2293,7 +2318,54 @@ function parseInitArgs(args: string[]): InitOptions {
   return opts;
 }
 
+function parseLanguageOption(value: string): AddroidLanguagePreference {
+  const parsed = normalizeAddroidLanguagePreference(value);
+  if (!parsed) throw new Error("--language must be auto, ja, or en");
+  return parsed;
+}
+
 function printInitHelp(): void {
+  if (resolveAddroidLanguage({ env: process.env }) === "en") {
+    process.stdout.write(
+      [
+        "addroid init — first-run setup wizard",
+        "",
+        "Usage:",
+        "  addroid init",
+        "  addroid init --non-interactive --yes [--project-name NAME] [--database-url URL]",
+        "",
+        "Options:",
+        "  --interactive          Force the interactive wizard",
+        "  --non-interactive      Run without prompts; alone, this only creates the ~/.addroid scaffold",
+        "  --yes, -y              Initialize .env and DB defaults without confirmation",
+        "  --project-name NAME    Set the workspace name",
+        "  --language auto|ja|en  Set UI / CLI / Agent language (default: auto)",
+        "  --database-url URL     DATABASE_URL to save in .env",
+        "  --env-file PATH        Env file to write (default: repo-root .env)",
+        "  --install-deps         Explicitly install missing GitHub CLI / PostgreSQL dependencies",
+        "  --skip-deps            Skip dependency diagnosis",
+        "  --skip-db-create       Skip local DB / role creation",
+        "  --db-push              Run npm run db:generate && npm run db:push",
+        "  --skip-db-push         Skip Prisma schema application",
+        "  --mock-integrations    Add mock flags to .env for first-run verification",
+        "  --skip-link-cli        Skip checkout link for the `addroid` command",
+        "  --force                Re-run setup checks even if initialization is detected",
+        "  --reauth-meta          Compatibility: rerun only Meta connection. Usually use `addroid connect meta`",
+        "  --reauth-github        Compatibility: rerun only GitHub connection. Usually use `addroid connect github`",
+        "  --reauth-llm           Compatibility: rerun only LLM connection. Usually use `addroid connect ai`",
+        "  --no-chat              Do not auto-start `addroid chat` after setup",
+        "  --no-service           Skip resident-service auto-install after setup",
+        "",
+        "Interactive setup:",
+        "  A Meta Access Token is required to use a real Meta ad account.",
+        "  The default setup does not use an OAuth callback; after token input, selectable Ad Accounts are shown.",
+        "  Production submission requires a Privacy Policy URL and Live/public mode on the issuing Meta App.",
+        "  `addroid connect meta` encrypts and saves the token, then lets you select an Ad Account.",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid init — first-run setup wizard",
@@ -2307,6 +2379,7 @@ function printInitHelp(): void {
       "  --non-interactive      対話せず実行。単独指定時は ~/.addroid scaffold のみ作成",
       "  --yes, -y              既定値で .env・DB を初期化し、確認を省略",
       "  --project-name NAME    workspace 名を設定",
+      "  --language auto|ja|en  UI / CLI / Agent の表示言語を設定 (既定: auto)",
       "  --database-url URL     .env に保存する DATABASE_URL",
       "  --env-file PATH        書き込み先 env file (既定: repo root の .env)",
       "  --install-deps         GitHub CLI / PostgreSQL の不足分を明示的にインストール",

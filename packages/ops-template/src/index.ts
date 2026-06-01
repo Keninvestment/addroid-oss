@@ -10,6 +10,7 @@
 // 含まれるファイル:
 //   - operations/.gitkeep
 //   - workflows/cron.yaml
+//   - workflows/guards.yaml
 //   - .addroid/project.yaml
 //   - .github/workflows/addroid-validate.yml
 //   - README.md

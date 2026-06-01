@@ -1,4 +1,6 @@
-const DEFAULT_LOCALE = "ja-JP";
+import { languageToLocale, resolveAddroidLanguage } from "@addroid/config";
+
+const DEFAULT_LOCALE = languageToLocale(resolveAddroidLanguage());
 const FALLBACK_TIME_ZONE = "UTC";
 
 export interface DateTimeFormatOptions {

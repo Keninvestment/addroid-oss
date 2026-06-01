@@ -4,6 +4,8 @@
 // Deprecated tools should remain listed with an empty allowedSurfaces window
 // until a release note explicitly removes them.
 
+import type { AddroidLanguage } from "@addroid/config";
+
 export type AgentSurface = "cli-chat" | "web-chat" | "slack-chat" | "scheduled-agent";
 
 export type AgentToolEffect =
@@ -112,6 +114,17 @@ export const AGENT_TOOL_MANIFEST = [
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat"],
     guidance:
       "Use this when the user explicitly provides budget amounts or threshold values. If the account or budget amounts are missing, ask a concise clarification question first. autoPause only creates approval-gated candidates; it must not directly mutate Meta from chat.",
+  },
+  {
+    name: "configure_submission_guards",
+    description:
+      "入稿・変更PRを事前検査する安全ガードを設定する。まずは予算増加ガードを変更し、Meta は直接変更しない。",
+    args:
+      "{budgetIncrease?:{warnOverRatio?:number,blockOverRatio?:number}, warnOverRatio?:number, blockOverRatio?:number}",
+    effects: ["local-write"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat"],
+    guidance:
+      "Use this when the user asks to change submission/safety guardrails such as '予算ガードを3倍で警告、6倍でブロック'. Require both warning and blocking ratios unless the missing value can be safely kept from current context. warnOverRatio must be smaller than blockOverRatio. Do not use configure_budget_guard; that is for spend monitoring, while this tool is for pre-submit CI/plan guards.",
   },
   {
     name: "manage_schedule",
@@ -274,14 +287,50 @@ export function getAgentToolsForSurface(
   );
 }
 
-export function renderToolManifestForPrompt(surface: AgentSurface): string {
+export function renderToolManifestForPrompt(
+  surface: AgentSurface,
+  language: AddroidLanguage = "ja"
+): string {
   return getAgentToolsForSurface(surface)
     .map((tool) => {
       const guidance = tool.guidance ? ` ${tool.guidance}` : "";
-      return `- ${tool.name}: ${tool.description} args ${tool.args}.${guidance}`;
+      const description =
+        language === "en" ? ENGLISH_TOOL_DESCRIPTIONS[tool.name] ?? tool.description : tool.description;
+      return `- ${tool.name}: ${description} args ${tool.args}.${guidance}`;
     })
     .join("\n");
 }
+
+const ENGLISH_TOOL_DESCRIPTIONS: Record<string, string> = {
+  diagnose: "Run a detailed AdDroid diagnosis.",
+  check_status: "Check connection, DB, worker, GitHub, and runtime status.",
+  list_ad_accounts: "List registered Meta ad accounts and Page / Instagram asset readiness evidence.",
+  sync_ad_accounts: "Sync ad accounts from Meta and check Page / Instagram asset readiness evidence.",
+  select_ad_account: "Select the default ad account.",
+  connect_service: "Start or guide a Meta / GitHub / AI / Slack connection flow.",
+  get_report: "Run a daily report, budget check, or improvement proposal now.",
+  check_submission: "Validate ops repo submissions and show the dry-run plan without applying to Meta.",
+  create_scheduled_agent_task: "Save and enable a recurring natural-language task.",
+  set_schedule_enabled: "Update an existing preset schedule and enabled state.",
+  configure_budget_guard: "Save ad-account budget monitoring rules and optionally enable its schedule.",
+  configure_submission_guards: "Configure pre-submit safety guards for ad changes.",
+  manage_schedule: "List, run, or inspect existing preset schedules.",
+  show_logs: "Show AdDroid operational logs.",
+  stop_services: "Stop local AdDroid processes.",
+  start_delivery: "Deprecated; use a GitOps PR for delivery-affecting changes.",
+  propose_ops_change: "Create a GitHub PR for production ad changes without applying directly to Meta.",
+  decide_approval: "Approve and merge, or reject, a tracked GitOps PR.",
+  propose_creative_submission: "Create a creative/campaign/adset/ad submission PR from generated or local assets.",
+  generate_creatives: "Generate new image creative ideas and save them to the creative library.",
+  resolve_creative_submission_context: "Resolve missing placement/Page/Instagram/link context from current Meta state.",
+  promote_creative_submission: "Promote saved generated creatives into an ops repo submission PR.",
+  propose_automation_rule: "Create a safe GitHub PR for recurring or conditional ad-operation rules.",
+  propose_automation_rule_update: "Create a recalibration PR for an existing automation rule.",
+  backup_data: "Create an AdDroid database backup.",
+  open_web_ui: "Show the local Web UI URL.",
+  query_meta_ads: "Run a read-only query against Meta Graph API / Mirror DB.",
+  sync_meta_mirror: "Sync current Meta state into the Mirror DB without changing Meta.",
+};
 
 export function isToolAllowedOnSurface(
   toolName: string,

@@ -1,17 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { BusyLabel, LoadingDots } from "../components/ui/AsyncFeedback";
+import { useI18n } from "../components/I18nProvider";
 import { useToast } from "../components/ui/Toast";
-
-const EXAMPLES = [
-  "日次レポートを取得して",
-  "入稿前チェックを実行して",
-  "Meta広告アカウントを同期して",
-  "バックアップを作成して",
-  "広告アカウントの状態を確認して",
-  "毎朝9時に日次レポートを送る設定にして",
-] as const;
 
 interface ApiExecution {
   display: string;
@@ -56,23 +49,41 @@ interface DashboardChatPanelProps {
   surface?: string;
   startNewSession?: boolean;
   sessionResetKey?: string;
+  refreshOnSuccess?: boolean;
 }
 
 export function DashboardChatPanel({
-  title = "やりたいことを入力",
-  description = "レポート取得、入稿前チェック、アカウント同期、バックアップ、自動実行の設定を文章で依頼できます。",
-  emptyText = "「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「予算チェックを有効にして」などを入力できます。",
-  badge = "安全確認つき",
-  examples = EXAMPLES,
-  placeholder = "例: 日次レポートを取得して",
+  title,
+  description,
+  emptyText,
+  badge,
+  examples,
+  placeholder,
   contextPrefix,
   allowAttachments = false,
   initialInput,
   surface = "dashboard",
   startNewSession = true,
   sessionResetKey = "",
+  refreshOnSuccess = false,
 }: DashboardChatPanelProps) {
+  const { literal, t } = useI18n();
+  const router = useRouter();
   const toast = useToast();
+  const effectiveTitle = title ? literal(title) : t("chat.title");
+  const effectiveDescription = description ? literal(description) : t("chat.description");
+  const effectiveEmptyText = emptyText ? literal(emptyText) : t("chat.empty");
+  const effectiveBadge = badge ? literal(badge) : t("chat.badge");
+  const effectivePlaceholder = placeholder ? literal(placeholder) : t("chat.placeholder");
+  const effectiveExamples =
+    examples?.map((item) => literal(item)) ?? [
+      t("chat.example.daily"),
+      t("chat.example.submit"),
+      t("chat.example.sync"),
+      t("chat.example.backup"),
+      t("chat.example.status"),
+      t("chat.example.schedule"),
+    ];
   const [input, setInput] = useState(initialInput ?? "");
   const [busy, setBusy] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -92,8 +103,8 @@ export function DashboardChatPanel({
     const needle = input.trim();
     if (busy || messages.length > 0) return [];
     if (needle.length > 0) return [];
-    return [...examples];
-  }, [busy, examples, input, messages.length]);
+    return [...effectiveExamples];
+  }, [busy, effectiveExamples, input, messages.length]);
 
   const refreshSessions = useCallback(async () => {
     const res = await fetch("/api/chat?limit=30");
@@ -110,11 +121,7 @@ export function DashboardChatPanel({
         error?: string;
       };
       if (!res.ok || body.error) {
-        toast.push({
-          variant: "error",
-          title: "会話履歴を開けません",
-          description: body.error,
-        });
+        toast.push({ variant: "error", title: t("chat.history.openFailed"), description: body.error });
         return;
       }
       sessionIdRef.current = nextSessionId;
@@ -184,7 +191,8 @@ export function DashboardChatPanel({
     setFiles([]);
     setBusy(true);
     const activeSessionId = sessionIdRef.current || sessionId;
-    const fileSummary = files.length > 0 ? `\n添付: ${files.map((f) => f.name).join(", ")}` : "";
+    const fileSummary =
+      files.length > 0 ? `\n${t("chat.attachmentPrefix")} ${files.map((f) => f.name).join(", ")}` : "";
     setMessages((prev) => [
       ...prev,
       { id: makeId(), role: "user", text: `${text}${fileSummary}` },
@@ -203,10 +211,10 @@ export function DashboardChatPanel({
       const reply =
         body.message ||
         (error
-          ? `実行できませんでした: ${error}`
+          ? t("chat.failed", { error })
           : executions.length
-            ? "実行しました。"
-            : "回答はありません。");
+            ? t("chat.done")
+            : t("chat.noAnswer"));
       setMessages((prev) => [
         ...prev,
         {
@@ -221,6 +229,9 @@ export function DashboardChatPanel({
         setSessionId(body.sessionId);
         window.localStorage.setItem(storageKey(surface), body.sessionId);
       }
+      if (refreshOnSuccess && body.ok && executions.some((e) => e.status === "ok")) {
+        router.refresh();
+      }
       void refreshSessions();
       if (!res.ok || error || executions.some((e) => e.status === "error")) {
         toast.push({
@@ -233,7 +244,7 @@ export function DashboardChatPanel({
       const message = (err as Error).message;
       setMessages((prev) => [
         ...prev,
-        { id: makeId(), role: "assistant", text: `実行できませんでした: ${message}` },
+        { id: makeId(), role: "assistant", text: t("chat.failed", { error: message }) },
       ]);
       toast.push({ variant: "error", title: "Agent chat failed", description: message });
     } finally {
@@ -245,12 +256,12 @@ export function DashboardChatPanel({
     <section className="agent-chat" aria-label="AdDroid agent chat">
       <div className="agent-chat__head">
         <div>
-          <h2>{title}</h2>
-          <p>{description}</p>
+          <h2>{effectiveTitle}</h2>
+          <p>{effectiveDescription}</p>
         </div>
         <div className="agent-chat__actions">
           <select
-            aria-label="会話履歴"
+            aria-label={t("chat.history")}
             value={sessionId}
             onChange={(e) => {
               const value = e.target.value;
@@ -266,8 +277,10 @@ export function DashboardChatPanel({
             }}
             disabled={busy || !sessionId}
           >
-            <option value={sessionId}>{messages.length ? "現在の会話" : "新しい会話"}</option>
-            <option value="__new__">新しい会話を開始</option>
+            <option value={sessionId}>
+              {messages.length ? t("chat.current") : t("chat.new")}
+            </option>
+            <option value="__new__">{t("chat.startNew")}</option>
             {sessions
               .filter((session) => session.id !== sessionId)
               .map((session) => (
@@ -276,13 +289,13 @@ export function DashboardChatPanel({
                 </option>
               ))}
           </select>
-          <span className="agent-chat__badge">{badge}</span>
+          <span className="agent-chat__badge">{effectiveBadge}</span>
         </div>
       </div>
       <div className="agent-chat__messages" aria-busy={busy}>
         {messages.length === 0 ? (
           <div className="agent-chat__empty">
-            {emptyText}
+            {effectiveEmptyText}
           </div>
         ) : (
           <>
@@ -320,7 +333,7 @@ export function DashboardChatPanel({
                 aria-live="polite"
               >
                 <div className="agent-chat__bubble agent-chat__typing">
-                  <LoadingDots label="応答を作成中" />
+                  <LoadingDots label={t("chat.thinking")} />
                 </div>
               </div>
             ) : null}
@@ -371,14 +384,14 @@ export function DashboardChatPanel({
                 void submit();
               }
             }}
-            placeholder={placeholder}
+            placeholder={effectivePlaceholder}
             rows={2}
             disabled={busy}
           />
           {allowAttachments ? (
             <div className="agent-chat__attachments">
               <label>
-                <span>素材・参考画像を添付</span>
+                <span>{t("chat.attach")}</span>
                 <input
                   type="file"
                   accept="image/*,video/*"
@@ -403,7 +416,7 @@ export function DashboardChatPanel({
           disabled={busy || !input.trim()}
           aria-busy={busy}
         >
-          {busy ? <BusyLabel>実行中</BusyLabel> : "送信"}
+          {busy ? <BusyLabel>{t("chat.running")}</BusyLabel> : t("chat.send")}
         </button>
       </form>
     </section>

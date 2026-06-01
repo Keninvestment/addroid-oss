@@ -20,6 +20,10 @@ import { Prisma, type PrismaClient } from "@addroid/db";
 import fs from "node:fs";
 import path from "node:path";
 import { isSupportedMetaCliOperation } from "@addroid/meta-adapter";
+import {
+  loadSubmissionGuardsPolicy,
+  type SubmissionGuardsYaml,
+} from "@addroid/ops-schemas";
 export type PlanRunSource = "web" | "web-chat" | "slack-chat" | "agent-task" | "ci" | "cli";
 
 export interface PlanCounts {
@@ -86,6 +90,16 @@ export interface PlanRunInput {
   accountFilter?: string | null;
 }
 
+const DEFAULT_SUBMISSION_GUARDS_POLICY: SubmissionGuardsYaml = {
+  version: 1,
+  guards: {
+    budgetIncrease: {
+      warnOverRatio: 2,
+      blockOverRatio: 5,
+    },
+  },
+};
+
 /**
  * Ops repo を読み、operations/*.json を per-account にまとめ、UI/CLI 用の
  * `PlanRunOutput` を返す。
@@ -103,6 +117,8 @@ export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
   const accumulatedErrors: ValidationFinding[] = [];
   const accumulatedWarnings: ValidationFinding[] = [];
   const grouped = new Map<string, { actions: OperationPlanAction[]; findings: PlanFinding[] }>();
+  const submissionGuards =
+    loadSubmissionGuardsPolicy(input.rootDir) ?? DEFAULT_SUBMISSION_GUARDS_POLICY;
   for (const file of findOperationFiles(input.rootDir)) {
     let parsed: unknown;
     try {
@@ -118,6 +134,15 @@ export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
     const current = grouped.get(normalized.accountKey) ?? { actions: [], findings: [] };
     current.actions.push(...normalized.actions);
     current.findings.push(...normalized.findings);
+    const guardFindings = evaluateSubmissionGuards({
+      file,
+      accountKey: normalized.accountKey,
+      actions: normalized.actions,
+      policy: submissionGuards,
+    });
+    accumulatedErrors.push(...guardFindings.errors);
+    accumulatedWarnings.push(...guardFindings.warnings);
+    current.findings.push(...guardFindings.findings);
     grouped.set(normalized.accountKey, current);
   }
 
@@ -164,6 +189,120 @@ export function runPlanForRoot(input: PlanRunInput): PlanRunOutput {
     totalCounts,
     risk,
   };
+}
+
+function evaluateSubmissionGuards(input: {
+  file: string;
+  accountKey: string;
+  actions: OperationPlanAction[];
+  policy: SubmissionGuardsYaml;
+}): {
+  errors: ValidationFinding[];
+  warnings: ValidationFinding[];
+  findings: PlanFinding[];
+} {
+  const errors: ValidationFinding[] = [];
+  const warnings: ValidationFinding[] = [];
+  const findings: PlanFinding[] = [];
+  const budgetPolicy = input.policy.guards.budgetIncrease;
+  for (let i = 0; i < input.actions.length; i += 1) {
+    const action = input.actions[i]!;
+    const pointer = `/actions/${i}`;
+    const budgetChecks = budgetIncreaseChecks(action);
+    for (const check of budgetChecks) {
+      if (check.previous === null) {
+        continue;
+      }
+      if (check.previous <= 0) continue;
+      const ratio = check.next / check.previous;
+      if (!Number.isFinite(ratio) || ratio < 1) continue;
+      const summary =
+        `${check.label} ${formatBudgetNumber(check.previous)} -> ${formatBudgetNumber(check.next)} (${formatRatio(ratio)})`;
+      if (ratio >= budgetPolicy.blockOverRatio) {
+        const message =
+          `予算増加ガード: ${summary} はブロックライン ${formatRatio(budgetPolicy.blockOverRatio)} 以上です。`;
+        errors.push({ file: input.file, pointer, message });
+        findings.push({ level: "error", pointer, message });
+      } else if (ratio >= budgetPolicy.warnOverRatio) {
+        const message =
+          `予算増加ガード: ${summary} は警告ライン ${formatRatio(budgetPolicy.warnOverRatio)} 以上です。`;
+        warnings.push({ file: input.file, pointer, message });
+        findings.push({ level: "warning", pointer, message });
+      }
+    }
+  }
+  return { errors, warnings, findings };
+}
+
+interface BudgetIncreaseCheck {
+  label: string;
+  previous: number | null;
+  next: number;
+}
+
+function budgetIncreaseChecks(action: OperationPlanAction): BudgetIncreaseCheck[] {
+  const out: BudgetIncreaseCheck[] = [];
+  if (action.kind !== "graph_operation" || !action.payload) return out;
+  if (action.verb !== "update") return out;
+  if (action.resource !== "campaign" && action.resource !== "adset") return out;
+  const payload = action.payload;
+  const graphPayload = isRecord(payload.graphPayload) ? payload.graphPayload : {};
+  const guardContext = isRecord(payload.guardContext) ? payload.guardContext : {};
+  const dailyNext =
+    readFiniteNumber(payload.dailyBudget) ?? readFiniteNumber(graphPayload.daily_budget);
+  if (dailyNext !== null) {
+    out.push({
+      label: `${action.resource}.dailyBudget`,
+      previous:
+        readFiniteNumber(guardContext.currentDailyBudget) ??
+        readFiniteNumber(payload.currentDailyBudget) ??
+        readFiniteNumber(payload.previousDailyBudget) ??
+        readNestedNumber(payload, ["budgetBefore", "dailyBudget"]) ??
+        readNestedNumber(payload, ["currentBudget", "dailyBudget"]),
+      next: dailyNext,
+    });
+  }
+  const lifetimeNext =
+    readFiniteNumber(payload.lifetimeBudget) ?? readFiniteNumber(graphPayload.lifetime_budget);
+  if (lifetimeNext !== null) {
+    out.push({
+      label: `${action.resource}.lifetimeBudget`,
+      previous:
+        readFiniteNumber(guardContext.currentLifetimeBudget) ??
+        readFiniteNumber(payload.currentLifetimeBudget) ??
+        readFiniteNumber(payload.previousLifetimeBudget) ??
+        readNestedNumber(payload, ["budgetBefore", "lifetimeBudget"]) ??
+        readNestedNumber(payload, ["currentBudget", "lifetimeBudget"]),
+      next: lifetimeNext,
+    });
+  }
+  return out;
+}
+
+function readNestedNumber(root: Record<string, unknown>, pathParts: string[]): number | null {
+  let current: unknown = root;
+  for (const part of pathParts) {
+    if (!isRecord(current)) return null;
+    current = current[part];
+  }
+  return readFiniteNumber(current);
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function formatRatio(value: number): string {
+  return `${Number(value.toFixed(2))}x`;
+}
+
+function formatBudgetNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
 }
 
 function countActions(

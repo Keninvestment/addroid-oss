@@ -31,6 +31,7 @@ test("buildOpsTemplate emits the required paths", () => {
     "workflows/automation-rules.yaml",
     "workflows/budget-guard.yaml",
     "workflows/cron.yaml",
+    "workflows/guards.yaml",
   ]);
 });
 

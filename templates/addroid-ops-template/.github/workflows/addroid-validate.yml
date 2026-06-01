@@ -4,6 +4,7 @@ on:
     paths:
       - "operations/**"
       - "workflows/cron.yaml"
+      - "workflows/guards.yaml"
       - ".addroid/project.yaml"
   workflow_dispatch:
 permissions:
@@ -40,7 +41,9 @@ jobs:
           const yaml = require("js-yaml");
 
           const errors = [];
+          const warnings = [];
           const root = process.cwd();
+          let budgetIncreaseGuard = { warnOverRatio: 2, blockOverRatio: 5 };
 
           function readYaml(rel) {
             const abs = path.join(root, rel);
@@ -101,6 +104,101 @@ jobs:
             }
           }
 
+          // workflows/guards.yaml
+          const guards = readYaml("workflows/guards.yaml");
+          if (guards !== null) {
+            if (!guards || typeof guards !== "object") {
+              errors.push("workflows/guards.yaml — top-level must be a mapping");
+            } else {
+              const budget = guards.guards && guards.guards.budgetIncrease;
+              if (!budget || typeof budget !== "object") {
+                errors.push("workflows/guards.yaml :: guards.budgetIncrease — must be a mapping");
+              } else {
+                const warn = Number(budget.warnOverRatio);
+                const block = Number(budget.blockOverRatio);
+                if (!Number.isFinite(warn) || warn <= 0) {
+                  errors.push("workflows/guards.yaml :: warnOverRatio — must be a positive number");
+                }
+                if (!Number.isFinite(block) || block <= 0) {
+                  errors.push("workflows/guards.yaml :: blockOverRatio — must be a positive number");
+                }
+                if (Number.isFinite(warn) && Number.isFinite(block) && warn >= block) {
+                  errors.push("workflows/guards.yaml :: warnOverRatio — must be smaller than blockOverRatio");
+                }
+                if (Number.isFinite(warn) && warn > 0 && Number.isFinite(block) && block > 0 && warn < block) {
+                  budgetIncreaseGuard = { warnOverRatio: warn, blockOverRatio: block };
+                }
+              }
+            }
+          }
+
+          function isObject(value) {
+            return value && typeof value === "object" && !Array.isArray(value);
+          }
+
+          function readNumber(value) {
+            if (typeof value === "number" && Number.isFinite(value)) return value;
+            if (typeof value === "string" && value.trim().length > 0) {
+              const n = Number(value);
+              if (Number.isFinite(n)) return n;
+            }
+            return null;
+          }
+
+          function readNestedNumber(root, keys) {
+            let current = root;
+            for (const key of keys) {
+              if (!isObject(current)) return null;
+              current = current[key];
+            }
+            return readNumber(current);
+          }
+
+          function formatRatio(value) {
+            return `${Number(value.toFixed(2))}x`;
+          }
+
+          function evaluateBudgetIncreaseGuard(opRel, action, index) {
+            if (!isObject(action) || typeof action.kind !== "string") return;
+            if (action.kind !== "campaign.update" && action.kind !== "adset.update") return;
+            const payload = isObject(action.payload) ? action.payload : {};
+            const graphPayload = isObject(payload.graphPayload) ? payload.graphPayload : {};
+            const guardContext = isObject(payload.guardContext) ? payload.guardContext : {};
+            const checks = [
+              {
+                label: `${action.kind}.dailyBudget`,
+                next: readNumber(payload.dailyBudget) ?? readNumber(graphPayload.daily_budget),
+                previous:
+                  readNumber(guardContext.currentDailyBudget) ??
+                  readNumber(payload.currentDailyBudget) ??
+                  readNumber(payload.previousDailyBudget) ??
+                  readNestedNumber(payload, ["budgetBefore", "dailyBudget"]) ??
+                  readNestedNumber(payload, ["currentBudget", "dailyBudget"]),
+              },
+              {
+                label: `${action.kind}.lifetimeBudget`,
+                next: readNumber(payload.lifetimeBudget) ?? readNumber(graphPayload.lifetime_budget),
+                previous:
+                  readNumber(guardContext.currentLifetimeBudget) ??
+                  readNumber(payload.currentLifetimeBudget) ??
+                  readNumber(payload.previousLifetimeBudget) ??
+                  readNestedNumber(payload, ["budgetBefore", "lifetimeBudget"]) ??
+                  readNestedNumber(payload, ["currentBudget", "lifetimeBudget"]),
+              },
+            ];
+            for (const check of checks) {
+              if (check.next === null || check.previous === null || check.previous <= 0) continue;
+              const ratio = check.next / check.previous;
+              if (!Number.isFinite(ratio) || ratio < 1) continue;
+              const summary = `${opRel} :: actions[${index}] ${check.label} ${check.previous} -> ${check.next} (${formatRatio(ratio)})`;
+              if (ratio >= budgetIncreaseGuard.blockOverRatio) {
+                errors.push(`${summary} — blocked by budget increase guard ${formatRatio(budgetIncreaseGuard.blockOverRatio)}`);
+              } else if (ratio >= budgetIncreaseGuard.warnOverRatio) {
+                warnings.push(`${summary} — warning by budget increase guard ${formatRatio(budgetIncreaseGuard.warnOverRatio)}`);
+              }
+            }
+          }
+
           // operations/<account>/*.json
           const operationsDir = path.join(root, "operations");
           if (fs.existsSync(operationsDir)) {
@@ -125,16 +223,28 @@ jobs:
                   errors.push(`${opRel} — top-level must be an object`);
                   continue;
                 }
-                if (manifest.version !== 1) errors.push(`${opRel} :: version — must be 1`);
+                if (manifest.version !== 1 && manifest.version !== 2) {
+                  errors.push(`${opRel} :: version — must be 1 or 2`);
+                }
                 if (typeof manifest.accountKey !== "string" || manifest.accountKey.length === 0) {
                   errors.push(`${opRel} :: accountKey — must be a non-empty string`);
                 }
                 if (!Array.isArray(manifest.actions)) {
                   errors.push(`${opRel} :: actions — must be a list`);
+                } else if (manifest.version === 2) {
+                  manifest.actions.forEach((action, index) => {
+                    evaluateBudgetIncreaseGuard(opRel, action, index);
+                  });
                 }
               }
             };
             walk(operationsDir, "");
+          }
+
+          if (warnings.length > 0) {
+            console.log("[addroid-validate] warnings:");
+            for (const w of warnings) console.log(`  - ${w}`);
+            console.log("");
           }
 
           if (errors.length > 0) {
@@ -142,16 +252,16 @@ jobs:
             for (const e of errors) console.log(`  - ${e}`);
             console.log("");
             console.log(
-              "Note: this PR-time workflow only runs minimal structural checks. " +
-                "Authoritative Zod validation runs server-side via the AdDroid worker on merged PRs."
+              "Note: this PR-time workflow runs structural checks plus budget increase guards. " +
+                "Authoritative Zod validation and apply safety checks run server-side via the AdDroid worker on merged PRs."
             );
             process.exit(1);
           }
 
           console.log("[addroid-validate] structural check ok");
           console.log(
-            "Note: full Zod validation (unsafe budget changes, mismatched account keys, " +
+            "Note: full Zod validation (mismatched account keys, " +
               "operation matrix support, approval status, and apply safety checks run server-side via the AdDroid " +
-              "worker on merged PRs."
+              "worker on merged PRs)."
           );
           NODE

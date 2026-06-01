@@ -3,6 +3,7 @@ import {
   defaultAddroidConfig,
   ensureAddroidPaths,
   readAddroidConfig,
+  resolveAddroidLanguage,
   resolveWebBinding,
 } from "@addroid/config";
 import { runAccountsCommand } from "./accounts.js";
@@ -270,6 +271,21 @@ function openUrl(url: string): void {
 }
 
 function printOpenHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid open — open the Web UI",
+        "",
+        "Usage:",
+        "  addroid open [--no-open]",
+        "",
+        "Options:",
+        "  --no-open   Print the URL without opening a browser",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid open — Web UI を開く",
@@ -285,6 +301,24 @@ function printOpenHelp(): void {
 }
 
 function printConnectHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid connect — connect or reconnect external services",
+        "",
+        "Usage:",
+        "  addroid connect meta",
+        "  addroid connect github",
+        "  addroid connect ai",
+        "  addroid connect slack",
+        "",
+        "Notes:",
+        "  - ai starts by choosing Codex app-server, OpenAI API key, or Claude API key.",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid connect — 外部サービスを接続・再接続",
@@ -303,6 +337,20 @@ function printConnectHelp(): void {
 }
 
 function printAccountHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid account — review and select the Meta ad account",
+        "",
+        "Usage:",
+        "  addroid account",
+        "  addroid account sync [--select-default]",
+        "  addroid account choose [--ad-account-id act_123 | --key primary]",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid account — 利用する Meta 広告アカウントを確認・選択",
@@ -317,6 +365,20 @@ function printAccountHelp(): void {
 }
 
 function printReportHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid report — run reports and improvement checks now",
+        "",
+        "Usage:",
+        "  addroid report [daily]",
+        "  addroid report budget",
+        "  addroid report improvement",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid report — レポート・改善チェックを今すぐ実行",
@@ -331,6 +393,22 @@ function printReportHelp(): void {
 }
 
 function printScheduleHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid schedule — review and update automation",
+        "",
+        "Usage:",
+        "  addroid schedule",
+        "  addroid schedule enable daily",
+        "  addroid schedule disable budget",
+        "  addroid schedule run improvement",
+        "  addroid schedule logs daily [--limit N]",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid schedule — 自動実行の確認・変更",
@@ -347,6 +425,27 @@ function printScheduleHelp(): void {
 }
 
 function printSubmitHelp(): void {
+  if (resolveAddroidLanguage() === "en") {
+    process.stdout.write(
+      [
+        "addroid submit — pre-submit check and planned-change preview",
+        "",
+        "Usage:",
+        "  addroid submit [--root <ops-repo>] [--base <previous-repo>] [--account <key>] [--save]",
+        "",
+        "Options:",
+        "  --root <dir>     Ops repo to check (default: ADDROID_OPS_REPO_LOCAL_DIR, then current directory)",
+        "  --base <dir>     Base ops repo to compare against",
+        "  --account <key>  Show planned changes for one account",
+        "  --save           Save the result to history",
+        "",
+        "Notes:",
+        "  - This never applies directly to Meta. It only validates and dry-runs.",
+        "",
+      ].join("\n")
+    );
+    return;
+  }
   process.stdout.write(
     [
       "addroid submit — 入稿前チェックと変更予定の確認",

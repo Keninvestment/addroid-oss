@@ -9,6 +9,9 @@ import {
   downloadSlackPrivateFile,
   getSlackFileInfo,
   postSlackMessage,
+  readAddroidConfig,
+  resolveAddroidLanguage,
+  type AddroidLanguage,
   type SlackFetch,
 } from "@addroid/config";
 import { Prisma, type PrismaClient } from "@addroid/db";
@@ -78,6 +81,7 @@ export async function runSlackAgentJob(
   let message = "";
   let failed = false;
   try {
+    const language = await resolveSlackAgentLanguage();
     const agentContext = await buildAgentContext(process.env);
     const webUrl = opts.webUrl ?? agentContext.webUrl;
     const referenceImagePaths = await loadSlackReferenceImages(opts);
@@ -93,6 +97,7 @@ export async function runSlackAgentJob(
         agentContext,
         purpose: "worker:slack-chat",
         surface: "slack-chat",
+        language,
       });
       if (turn.message) message = turn.message;
       if (turn.toolResults.length === 0) break;
@@ -181,6 +186,13 @@ export async function runSlackAgentJob(
     postedProcessing,
     postedFinal,
   };
+}
+
+async function resolveSlackAgentLanguage(): Promise<AddroidLanguage> {
+  const config = await readAddroidConfig().catch(() => null);
+  return resolveAddroidLanguage({
+    preference: config?.ui.language,
+  });
 }
 
 function toolSignature(tool: AgentToolResult): string | null {

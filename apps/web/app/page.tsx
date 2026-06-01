@@ -147,15 +147,6 @@ export default async function DashboardPage() {
         <div className="col-span-12">
           <DashboardChatPanel
             surface="dashboard"
-            emptyText="「日次レポートを取得」「入稿前チェック」「Meta広告アカウントを同期」「参考画像を添付してクリエイティブを生成」などを入力できます。"
-            examples={[
-              "日次レポートを取得して",
-              "入稿前チェックを実行して",
-              "Meta広告アカウントを同期して",
-              "参考画像を添付して、既存広告に近いトーンの新しいクリエイティブを生成して",
-              "広告アカウントの状態を確認して",
-              "毎朝9時に日次レポートを送る設定にして",
-            ]}
             contextPrefix={[
               "この画面は Web UI ダッシュボードの汎用チャットです。",
               "ユーザーが添付画像や既存広告を参考にして新しいクリエイティブ案だけを生成したい場合は、generate_creatives の referenceImagePaths を使ってください。/creatives の Creative ID を指定して入稿PRに回す場合は promote_creative_submission を使ってください。広告作成、入稿、キャンペーン/広告セット作成、PR作成を明示していない限り propose_creative_submission は使わないでください。",

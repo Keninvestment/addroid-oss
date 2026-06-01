@@ -161,6 +161,70 @@ test("runPlanForRoot rejects ACTIVE create status inside graphPayload", () => {
   }
 });
 
+test("runPlanForRoot warns when budget increase reaches warn ratio", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "workflows/guards.yaml": `version: 1
+guards:
+  budgetIncrease:
+    warnOverRatio: 2
+    blockOverRatio: 5
+`,
+    "operations/primary/budget-warn.json": operationManifest("primary", [
+      {
+        kind: "adset.update",
+        payload: {
+          adsetId: "as_1",
+          dailyBudget: 250,
+          guardContext: { currentDailyBudget: 100 },
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, true);
+    assert.equal(out.risk, "warn");
+    assert.equal(out.validationWarnings.length, 1);
+    assert.match(out.validationWarnings[0]!.message, /2\.5x/);
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot blocks when budget increase reaches block ratio", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "workflows/guards.yaml": `version: 1
+guards:
+  budgetIncrease:
+    warnOverRatio: 2
+    blockOverRatio: 5
+`,
+    "operations/primary/budget-block.json": operationManifest("primary", [
+      {
+        kind: "campaign.update",
+        payload: {
+          campaignId: "cmp_1",
+          dailyBudget: 500,
+          guardContext: { currentDailyBudget: 100 },
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, false);
+    assert.equal(out.risk, "error");
+    assert.equal(out.validationErrors.length, 1);
+    assert.match(out.validationErrors[0]!.message, /5x/);
+  } finally {
+    cleanup();
+  }
+});
+
 // ---- runPlanForRoot: guardrail violation (plan-level error) --------
 
 test("runPlanForRoot surfaces invalid operation manifest as validation errors", () => {

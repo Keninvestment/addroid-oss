@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import YAML from "yaml";
 import { z } from "zod";
 import { ensureAddroidPaths, resolveAddroidPaths } from "./paths.js";
+import { normalizeAddroidLanguagePreference } from "./locale.js";
 
 /**
  * Regression fix: workspace 全体の execution mode。
@@ -34,6 +35,24 @@ export const AddroidConfigSchema = z.object({
     displayName: z.string().min(1),
     executionMode: ExecutionModeSchema.default("proposal"),
   }),
+  ui: z
+    .object({
+      language: z
+        .string()
+        .default("auto")
+        .transform((value, ctx) => {
+          const parsed = normalizeAddroidLanguagePreference(value);
+          if (!parsed) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: "ui.language must be auto, ja, or en",
+            });
+            return z.NEVER;
+          }
+          return parsed;
+        }),
+    })
+    .default({ language: "auto" }),
   database: z.object({
     urlRef: z.string().min(1).describe("DATABASE_URL の解決元 (例: '.env.local')"),
   }),
@@ -82,6 +101,7 @@ export function defaultAddroidConfig(env: NodeJS.ProcessEnv = process.env): Addr
       displayName: "Default Workspace",
       executionMode: "proposal",
     },
+    ui: { language: "auto" },
     database: { urlRef: databaseUrlRef },
     web: { hostname: "127.0.0.1", port: 3000 },
     github: {},

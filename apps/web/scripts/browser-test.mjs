@@ -92,6 +92,7 @@ const REQUIRED_NAV_HREFS = [
   "/accounts",
   "/reports/daily",
   "/budget",
+  "/guards",
   "/plans",
   "/campaigns",
   "/improvements",
@@ -119,6 +120,11 @@ const SCENARIOS = [
     id: "accounts-meta-oauth",
     url: "/accounts",
     expectContains: ["広告アカウント", "Meta 連携", "利用する広告アカウント"],
+  },
+  {
+    id: "submission-guards",
+    url: "/guards",
+    expectContains: ["安全ガード", "予算変更", "警告"],
   },
   {
     id: "plans-adhoc-dry-run",
