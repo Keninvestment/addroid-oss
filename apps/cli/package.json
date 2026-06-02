@@ -4,13 +4,13 @@
   "description": "AdDroid OSS CLI — local-only operator console for GitOps-driven Meta ad operations.",
   "type": "module",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/addroid-oss/addroid#readme",
+  "homepage": "https://github.com/bb8ad8/addroid-oss#readme",
   "bugs": {
-    "url": "https://github.com/addroid-oss/addroid/issues"
+    "url": "https://github.com/bb8ad8/addroid-oss/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/addroid-oss/addroid.git",
+    "url": "git+https://github.com/bb8ad8/addroid-oss.git",
     "directory": "apps/cli"
   },
   "keywords": [

@@ -35,40 +35,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-## [Unreleased]
-
-> 次回リリース予定の変更を追記する場所。マージごとに該当セクション
-> (Added / Changed / Deprecated / Removed / Fixed / Security) に追記し、
-> リリース時に下の `## [X.Y.Z] - YYYY-MM-DD` セクションに移動する。
-
-### Added
--
-
-### Changed
--
-
-### Deprecated
--
-
-### Removed
--
-
-### Fixed
--
-
-### Security
--
-
----
-
-## [0.1.0] - YYYY-MM-DD
+## [0.1.0] - 2026-06-03
 
 > AdDroid OSS の初回 OSS 公開リリース。`addroid init` / `addroid start` / `addroid status` /
 > `addroid open` と詳細診断系コマンドでローカル起動が完結する localhost-only / outbound-only / GitOps 駆動の
 > Meta 広告運用コンソールを提供します。
->
-> **公開日は npm publish 実行時に確定します** ([`docs/RELEASE.md`](docs/RELEASE.md) §"リリース手順"
-> Step 5 で `YYYY-MM-DD` を確定値に置換)。
 
 ### Added — Operator console foundation
 
@@ -182,5 +153,4 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/addroid-oss/addroid/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/addroid-oss/addroid/releases/tag/v0.1.0
+[0.1.0]: https://github.com/bb8ad8/addroid-oss/releases/tag/v0.1.0
