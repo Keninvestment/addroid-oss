@@ -15,9 +15,11 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import * as readlineControl from "node:readline";
 import readline from "node:readline/promises";
+import { fileURLToPath } from "node:url";
 import {
   AddroidConfigSchema,
   ConfigParseError,
@@ -193,7 +195,7 @@ export async function runInit(
       const result = await safeScaffoldAddroid({
         projectName: opts.projectName,
         language: opts.language,
-      });
+      }, env);
       if (!result) return 1;
       const auth = await readInitAuthState(env, overrides);
       const cliLinkLines = await maybeEnsureCliCommand({
@@ -217,9 +219,15 @@ export async function runInit(
   const result = await safeScaffoldAddroid({
     projectName: opts.projectName,
     language: opts.language,
-  });
+  }, env);
   if (!result) return 1;
-  printScaffoldResult(result);
+  const cliLinkLines = await maybeEnsureCliCommand({
+    env,
+    runner: overrides.runCommand ?? defaultRunCommand,
+    confirm: overrides.confirm ?? defaultConfirm,
+    skip: opts.skipLinkCli,
+  });
+  printScaffoldResult(result, cliLinkLines);
   return 0;
 }
 
@@ -279,7 +287,7 @@ async function shouldShortCircuitAlreadyInitialized(
   if (!env.DATABASE_URL || !env.ENCRYPTION_KEY) return false;
   let existing: AddroidConfig | null = null;
   try {
-    existing = await readAddroidConfig();
+    existing = await readAddroidConfig(env);
   } catch {
     return false;
   }
@@ -327,9 +335,17 @@ async function runNonInteractiveSetup(
   const scaffold = await safeScaffoldAddroid({
     projectName: opts.projectName,
     language: opts.language,
-  });
+  }, env);
   if (!scaffold) return 1;
   lines.push(...formatScaffoldResult(scaffold));
+  lines.push(
+    ...(await maybeEnsureCliCommand({
+      env,
+      runner,
+      confirm: overrides.confirm ?? defaultConfirm,
+      skip: opts.skipLinkCli,
+    }))
+  );
 
   if (!opts.skipDbCreate && opts.yes) {
     const db = maybeCreateLocalDatabase(databaseUrl, runner, env);
@@ -494,7 +510,7 @@ async function runInteractiveInit(
 
   let existing: AddroidConfig | null = null;
   try {
-    existing = await readAddroidConfig();
+    existing = await readAddroidConfig(env);
   } catch (err) {
     if (err instanceof ConfigParseError) {
       process.stderr.write(formatConfigParseError(err));
@@ -536,7 +552,7 @@ async function runInteractiveInit(
     mockIntegrations: opts.mockIntegrations,
     forcePlaceholders: true,
   });
-  const scaffold = await safeScaffoldAddroid({ projectName, language: opts.language });
+  const scaffold = await safeScaffoldAddroid({ projectName, language: opts.language }, env);
   if (!scaffold) return 1;
 
   const out: string[] = [];
@@ -778,68 +794,270 @@ async function maybeEnsureCliCommand(opts: {
     return [
       "CLI command setup:",
       "  addroid       : skipped (--skip-link-cli)",
-      "                  後で `npm run link:cli` を実行すると `addroid status` の形で使えます。",
+      "                  後で `npm run addroid -- init` を再実行すると `addroid status` の形で使えます。",
       "",
     ];
   }
 
-  let repoRoot: string;
-  try {
-    repoRoot = resolveRepoRoot();
-  } catch {
-    return [];
-  }
+  void opts.runner;
+  void opts.confirm;
 
-  const lookupEnv = {
-    ...opts.env,
-    PATH: stripNodeModulesBinFromPath(opts.env.PATH ?? process.env.PATH ?? ""),
-  };
-  const existing = opts.runner("sh", ["-c", "command -v addroid"], {
-    cwd: repoRoot,
-    env: lookupEnv,
-    timeoutMs: 10_000,
-  });
-  const existingPath = existing.status === 0 ? existing.stdout.trim().split(/\r?\n/)[0] : "";
-  if (existingPath) {
+  const paths = await ensureAddroidPaths(opts.env);
+  const result = await ensureAddroidCommandLink(paths, opts.env);
+  if (result.skippedReason) {
     return [
       "CLI command setup:",
-      `  addroid       : available (${existingPath})`,
+      `  addroid       : skipped (${result.skippedReason})`,
+      "                  この repository root では `npm run addroid -- <command>` も使えます。",
       "",
     ];
   }
 
-  const shouldLink = await opts.confirm(
-    "`addroid status` のように直接実行できるよう、この checkout の CLI をリンクしますか?",
-    true
-  );
-  if (!shouldLink) {
-    return [
-      "CLI command setup:",
-      "  addroid       : skipped",
-      "                  後で `npm run link:cli` を実行すると `addroid status` の形で使えます。",
-      "",
-    ];
-  }
-
-  const linked = opts.runner("npm", ["link", "--workspace", "apps/cli"], {
-    cwd: repoRoot,
-    env: opts.env,
-    timeoutMs: 120_000,
-  });
-  if (linked.status === 0) {
-    return [
-      "CLI command setup:",
-      "  addroid       : linked",
-      "                  以後は `npm run addroid -- status` ではなく `addroid status` を使えます。",
-      "",
-    ];
-  }
-  return [
+  const lines = [
     "CLI command setup:",
-    `  addroid       : link failed - ${summarizeCommandFailure(linked)}`,
-    "                  セットアップは続行します。後で `npm run link:cli` を再実行してください。",
-    "",
+    `  addroid       : ${result.wrote ? "created/updated" : "available"} (${result.commandPath})`,
+    `  addroid-cli   : ${result.wrote ? "created/updated" : "available"} (${path.join(result.binDir, "addroid-cli")})`,
   ];
+  if (result.pathAvailable) {
+    lines.push("                  current shell can run `addroid <command>` directly.");
+  } else {
+    lines.push("                  open a new terminal to use `addroid <command>` directly.");
+    if (result.profilePath) {
+      lines.push(
+        `                  PATH profile: ${result.profilePath} ${
+          result.profileUpdated ? "(updated)" : "(already configured)"
+        }`
+      );
+    } else if (result.profileSkippedReason) {
+      lines.push(`                  PATH profile: not modified (${result.profileSkippedReason})`);
+    }
+    if (result.exportLine) {
+      lines.push(`                  current shell: ${result.exportLine}`);
+    }
+  }
+  lines.push("");
+  return lines;
+}
+
+interface CommandLinkResult {
+  binDir: string;
+  commandPath: string;
+  pathAvailable: boolean;
+  wrote: boolean;
+  skippedReason?: string;
+  profilePath?: string;
+  profileUpdated?: boolean;
+  profileSkippedReason?: string;
+  exportLine?: string;
+}
+
+async function ensureAddroidCommandLink(
+  paths: Awaited<ReturnType<typeof ensureAddroidPaths>>,
+  env: NodeJS.ProcessEnv
+): Promise<CommandLinkResult> {
+  const binDir = resolveAddroidCommandBinDir(paths, env);
+  const commandPath = path.join(binDir, "addroid");
+  const aliasPath = path.join(binDir, "addroid-cli");
+  const pathAvailable = isPathEntryAvailable(binDir, env);
+  const target = await resolveCurrentCliLauncherPath();
+  const result: CommandLinkResult = {
+    binDir,
+    commandPath,
+    pathAvailable,
+    wrote: false,
+  };
+
+  if (!target) {
+    result.skippedReason = "CLI launcher not found";
+    return result;
+  }
+
+  await fs.mkdir(binDir, { recursive: true });
+  const marker = "# Generated by addroid init.";
+  const wrapper =
+    "#!/bin/sh\n" +
+    `${marker} Re-run init to refresh this repository link.\n` +
+    `exec node ${shellQuote(target)} "$@"\n`;
+
+  const primary = await writeCommandWrapper(commandPath, wrapper, marker, target, binDir);
+  if (primary.skippedReason) {
+    result.skippedReason = primary.skippedReason;
+    return maybeUpdatePathProfile(result, env);
+  }
+  const alias = await writeCommandWrapper(aliasPath, wrapper, marker, target, binDir);
+  result.wrote = primary.wrote || alias.wrote;
+  return maybeUpdatePathProfile(result, env);
+}
+
+async function writeCommandWrapper(
+  commandPath: string,
+  wrapper: string,
+  marker: string,
+  target: string,
+  binDir: string
+): Promise<{ wrote: boolean; skippedReason?: string }> {
+  let existing = "";
+  try {
+    const stat = await fs.lstat(commandPath);
+    if (stat.isSymbolicLink()) {
+      const linked = await fs.readlink(commandPath);
+      if (path.resolve(binDir, linked) === target) {
+        await fs.unlink(commandPath);
+      } else {
+        return { wrote: false, skippedReason: `existing ${path.basename(commandPath)} symlink points to ${linked}` };
+      }
+    } else {
+      existing = await fs.readFile(commandPath, "utf8");
+      if (existing && existing !== wrapper && !existing.includes(marker)) {
+        return {
+          wrote: false,
+          skippedReason: `existing ${path.basename(commandPath)} command was not created by init`,
+        };
+      }
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  if (existing !== wrapper) {
+    await fs.writeFile(commandPath, wrapper, { encoding: "utf8", mode: 0o755 });
+    await fs.chmod(commandPath, 0o755).catch(() => undefined);
+    return { wrote: true };
+  }
+  await fs.chmod(commandPath, 0o755).catch(() => undefined);
+  return { wrote: false };
+}
+
+function resolveAddroidCommandBinDir(
+  paths: Awaited<ReturnType<typeof ensureAddroidPaths>>,
+  env: NodeJS.ProcessEnv
+): string {
+  const override = env.ADDROID_COMMAND_BIN_DIR?.trim();
+  if (override) return path.resolve(override);
+  if (env.ADDROID_HOME?.trim()) return path.join(paths.home, "bin");
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
+  const localBin = path.join(home, ".local", "bin");
+  if (isPathEntryAvailable(localBin, env)) return localBin;
+  return path.join(paths.home, "bin");
+}
+
+function isPathEntryAvailable(binDir: string, env: NodeJS.ProcessEnv): boolean {
+  const normalized = path.resolve(binDir);
+  return (env.PATH ?? "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .some((entry) => path.resolve(entry) === normalized);
+}
+
+async function resolveCurrentCliLauncherPath(): Promise<string | null> {
+  const candidates: string[] = [];
+  try {
+    candidates.push(path.join(resolveRepoRoot(), "apps", "cli", "bin", "addroid.cjs"));
+  } catch {
+    /* global package install: fall back to import location */
+  }
+
+  let dir = path.dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 6; i += 1) {
+    candidates.push(path.join(dir, "bin", "addroid.cjs"));
+    candidates.push(path.join(dir, "..", "bin", "addroid.cjs"));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    try {
+      const stat = await fs.stat(resolved);
+      if (stat.isFile()) return resolved;
+    } catch {
+      /* keep trying */
+    }
+  }
+  return null;
+}
+
+async function maybeUpdatePathProfile(
+  result: CommandLinkResult,
+  env: NodeJS.ProcessEnv
+): Promise<CommandLinkResult> {
+  if (result.skippedReason) return result;
+  result.exportLine = `export PATH="${pathProfileEntry(result.binDir, env)}:$PATH"`;
+  if (result.pathAvailable) {
+    result.profileSkippedReason = "already on PATH";
+    return result;
+  }
+  if (env.CI === "true") {
+    result.profileSkippedReason = "CI=true";
+    return result;
+  }
+  if (env.ADDROID_HOME?.trim()) {
+    result.profileSkippedReason = "ADDROID_HOME is custom; profile not modified automatically";
+    return result;
+  }
+  if (env.ADDROID_SKIP_PATH_PROFILE === "1") {
+    result.profileSkippedReason = "ADDROID_SKIP_PATH_PROFILE=1";
+    return result;
+  }
+  const profilePath = resolveShellProfilePath(env);
+  if (!profilePath) {
+    result.profileSkippedReason = "shell profile not detected";
+    return result;
+  }
+  result.profilePath = profilePath;
+  const line = result.exportLine;
+  let current = "";
+  try {
+    current = await fs.readFile(profilePath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      result.profileSkippedReason = `profile read failed: ${(err as Error).message}`;
+      return result;
+    }
+  }
+  if (current.includes(result.binDir) || current.includes(pathProfileEntry(result.binDir, env))) {
+    result.profileUpdated = false;
+    return result;
+  }
+  const next =
+    current.replace(/\n*$/, "\n") +
+    "\n# Added by AdDroid OSS init: make `addroid` available as a command.\n" +
+    `${line}\n`;
+  try {
+    await fs.mkdir(path.dirname(profilePath), { recursive: true });
+    await fs.writeFile(profilePath, next, "utf8");
+    result.profileUpdated = true;
+  } catch (err) {
+    result.profileSkippedReason = `profile update failed: ${(err as Error).message}`;
+  }
+  return result;
+}
+
+function resolveShellProfilePath(env: NodeJS.ProcessEnv): string | null {
+  const override = env.ADDROID_SHELL_PROFILE?.trim();
+  if (override) return path.resolve(override);
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
+  if (!home) return null;
+  const shell = path.basename(env.SHELL ?? "");
+  if (shell === "zsh") return path.join(home, ".zshrc");
+  if (shell === "bash") return path.join(home, ".bashrc");
+  if (process.platform === "darwin") return path.join(home, ".zshrc");
+  return path.join(home, ".profile");
+}
+
+function pathProfileEntry(binDir: string, env: NodeJS.ProcessEnv): string {
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim() || os.homedir();
+  const absolute = path.resolve(binDir);
+  const prefix = home.endsWith(path.sep) ? home : `${home}${path.sep}`;
+  if (absolute.startsWith(prefix)) {
+    return `$HOME/${absolute.slice(prefix.length).split(path.sep).join("/")}`;
+  }
+  return absolute;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function maybeConfigureMetaAccessToken(opts: {
@@ -1046,12 +1264,15 @@ interface ScaffoldResult {
   secretsCreated: boolean;
 }
 
-async function scaffoldAddroid(opts: ScaffoldOptions): Promise<ScaffoldResult> {
-  const paths = await ensureAddroidPaths();
+async function scaffoldAddroid(
+  opts: ScaffoldOptions,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ScaffoldResult> {
+  const paths = await ensureAddroidPaths(env);
 
   let existing: AddroidConfig | null = null;
   try {
-    existing = await readAddroidConfig();
+    existing = await readAddroidConfig(env);
   } catch (err) {
     if (err instanceof ConfigParseError) {
       process.stderr.write(formatConfigParseError(err));
@@ -1061,7 +1282,7 @@ async function scaffoldAddroid(opts: ScaffoldOptions): Promise<ScaffoldResult> {
   }
 
   const next = mergeWithDefaults(existing, opts);
-  const result = await writeAddroidConfig(next);
+  const result = await writeAddroidConfig(next, env);
 
   const secretsCreated = await ensureSecretsStub(paths.secretsFile);
   return {
@@ -1072,9 +1293,12 @@ async function scaffoldAddroid(opts: ScaffoldOptions): Promise<ScaffoldResult> {
   };
 }
 
-async function safeScaffoldAddroid(opts: ScaffoldOptions): Promise<ScaffoldResult | null> {
+async function safeScaffoldAddroid(
+  opts: ScaffoldOptions,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ScaffoldResult | null> {
   try {
-    return await scaffoldAddroid(opts);
+    return await scaffoldAddroid(opts, env);
   } catch (err) {
     if (err instanceof InitAbort) return null;
     throw err;
@@ -2047,13 +2271,6 @@ function quoteEnv(value: string): string {
   return JSON.stringify(value);
 }
 
-function stripNodeModulesBinFromPath(value: string): string {
-  return value
-    .split(path.delimiter)
-    .filter((entry) => !/[\\/]node_modules[\\/]\.bin$/.test(entry))
-    .join(path.delimiter);
-}
-
 function isPlaceholderEnvValue(key: string, value: string): boolean {
   const v = value.trim();
   if (!v) return true;
@@ -2066,8 +2283,12 @@ function isPlaceholderEnvValue(key: string, value: string): boolean {
   return /replace|placeholder/i.test(v);
 }
 
-function printScaffoldResult(result: ScaffoldResult): void {
-  const lines = ["[addroid init]", "", ...formatScaffoldResult(result), "", "Next steps:"];
+function printScaffoldResult(result: ScaffoldResult, cliLinkLines: string[] = []): void {
+  const lines = ["[addroid init]", "", ...formatScaffoldResult(result)];
+  if (cliLinkLines.length > 0) {
+    lines.push("", ...cliLinkLines.filter((line) => line.length > 0));
+  }
+  lines.push("", "Next steps:");
   if (!process.env.DATABASE_URL) {
     lines.push("  1. addroid init --interactive    # .env / DB まで対話セットアップ");
     lines.push("  2. addroid status");

@@ -33,19 +33,19 @@ OpenAI / Claude API key を直接使うユーザー向けの経路です。`addr
 Claude (Anthropic) API key の選択から開始できます。
 
 ```bash
-npm run addroid -- connect ai
+addroid connect ai
 # provider を明示する場合
-npm run addroid -- connect ai --provider openai
+addroid connect ai --provider openai
 # または
-npm run addroid -- connect ai --provider anthropic
+addroid connect ai --provider anthropic
 ```
 
 `--api-key` を省略すると、TTY では非表示入力になります。CI などでは
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` を一時的な環境変数として渡せます。
 
 ```bash
-npm run addroid -- connect ai --provider openai --model gpt-5.5
-npm run addroid -- connect ai --provider anthropic --model claude-opus-4-7
+addroid connect ai --provider openai --model gpt-5.5
+addroid connect ai --provider anthropic --model claude-opus-4-7
 ```
 
 CLI / init の既定値は次の方針です。
@@ -71,7 +71,7 @@ AdDroid の既定値は最新・高性能優先で `claude-opus-4-7` にしま�
 切断:
 
 ```bash
-npm run addroid -- connect ai --provider openai --disconnect
+addroid connect ai --provider openai --disconnect
 ```
 
 `ADDROID_LLM_PROVIDER=openai|anthropic|codex` を設定すると provider 優先度を明示できます。
@@ -124,10 +124,10 @@ URL は localhost / loopback のみ許可されます。
 後から接続し直す場合:
 
 ```bash
-npm run addroid -- connect ai
+addroid connect ai
 
 # Codex app-server だけを直接再接続したい場合
-npm run addroid -- connect ai --provider codex
+addroid connect ai --provider codex
 ```
 
 Web UI から接続する場合は、`addroid start` で常駐サービスを起動してから
@@ -139,7 +139,7 @@ Web UI から接続する場合は、`addroid start` で常駐サービスを起
 ## 4. 開発 / E2E モード (`MockLLMProvider`)
 
 ```bash
-ADDROID_LLM_MOCK=1 npm run addroid -- up
+ADDROID_LLM_MOCK=1 addroid up
 ```
 
 - 外部 OpenAI / Codex API には一切到達しない
@@ -173,9 +173,9 @@ ADDROID_LLM_MOCK=1 npm run addroid -- up
 ### 6.1 mock を使う
 
 ```bash
-ADDROID_IMAGE_MOCK=1 npm run addroid -- up
+ADDROID_IMAGE_MOCK=1 addroid up
 # または
-ENABLE_MOCK_IMAGE_PROVIDER=1 npm run addroid -- up
+ENABLE_MOCK_IMAGE_PROVIDER=1 addroid up
 ```
 
 `MockImageProvider` が deterministic な placeholder PNG を返し、外部通信は発生しません。
@@ -187,8 +187,8 @@ ENABLE_MOCK_IMAGE_PROVIDER=1 npm run addroid -- up
 追加で画像専用 API key を `.env` に保存する必要はありません。
 
 ```bash
-npm run addroid -- connect ai --provider openai
-ADDROID_IMAGE_PROVIDER=openai npm run addroid -- up
+addroid connect ai --provider openai
+ADDROID_IMAGE_PROVIDER=openai addroid up
 ```
 
 未指定時も、保存済み OpenAI API key があり Codex image provider が優先されていなければ
@@ -213,7 +213,7 @@ Codex を使う場合は、OpenAI Images API を直接叩かず、ローカル�
 app-server を起動し、JSON-RPC で生成依頼を送り、保存された PNG を bytes として読み込みます。
 
 ```bash
-ADDROID_IMAGE_PROVIDER=codex npm run addroid -- up
+ADDROID_IMAGE_PROVIDER=codex addroid up
 ```
 
 通常は `ADDROID_CODEX_APP_SERVER_URL` を設定せず、AdDroid に localhost の空き port で

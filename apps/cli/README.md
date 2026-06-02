@@ -17,10 +17,18 @@ addroid init
 addroid status
 ```
 
-`npm install` 後の `postinstall` は次に実行すべき `addroid init` を表示するだけで、
+global install の `postinstall` は次に実行すべき `addroid init` を表示するだけで、
 OS パッケージやユーザー設定を勝手に変更しません。uv / GitHub CLI /
 PostgreSQL の不足分は `addroid init` で実行コマンドを表示し、確認後にセットアップします。
 
+repository checkout では、初回だけ次を使います。
+
+```bash
+npm install
+npm run addroid -- init
+```
+
+`init` 後は `addroid chat`、`addroid status`、`addroid start` のように直接 command として使えます。
 実運用 (Web UI / Worker) を起動する場合はリポジトリをクローンしてセットアップしてください。詳細は OSS リポジトリの `docs/SETUP.md` を参照してください。
 
 ---

@@ -5,8 +5,9 @@ Ads YAML をリポジトリの単一ソースとして扱い、AI が広告案�
 GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取得・予算監視・改善提案を
 自動実行します。
 
-> **Status:** Initial OSS release candidate. `npm install` / `addroid init` で
-> セットアップと常駐サービス登録が完結します。必要に応じて `addroid start` で
+> **Status:** Initial OSS release candidate. repository checkout では
+> `npm install` / `npm run addroid -- init` で
+> セットアップと常駐サービス登録が完結し、その後は `addroid <command>` を直接使えます。必要に応じて `addroid start` で
 > 常駐サービスを起動・修復できます。セットアップ後の通常操作は
 > `addroid chat` に自然文で依頼します。`addroid init` は
 > GitHub CLI / PostgreSQL を診断し、不足分は同じ流れで確認しながらセットアップできます。
@@ -191,8 +192,8 @@ npm install
 
 # 2. 初回セットアップ
 #    PostgreSQL と、Meta / GitHub / LLM Provider の接続を案内します。
-#    初回は local bin 経由で起動し、init 中に `addroid` コマンドをリンクします。
-npx --no-install addroid init
+#    初回は repository の local bin 経由で起動し、init 中に `addroid` command wrapper を作成します。
+npm run addroid -- init
 
 # 3. init 後はチャットに自然文で依頼できます
 addroid chat
@@ -203,6 +204,7 @@ addroid chat
 addroid connect meta
 addroid connect github
 addroid connect ai
+```
 
 # 5. Web UI や自動実行が動いていない場合だけ、常駐サービスを起動・修復
 addroid start
@@ -237,8 +239,9 @@ Meta の接続をやり直したい
 コマンドを見せた上で個別に確認します。Meta token / GitHub / LLM Provider が未設定の場合は、
 Meta Access Token 入力、GitHub Device Flow 認証と ops repository 作成、
 Codex app-server / OpenAI / Anthropic API key の選択まで案内します。
-リポジトリ checkout で `addroid` コマンドが未リンクの場合は、init 中に確認して
-`npm link --workspace apps/cli` を実行し、以後 `addroid status` の形で使えるようにします。
+リポジトリ checkout で `addroid` コマンドが未設定の場合は、init 中に
+`~/.addroid/bin/addroid` / `addroid-cli` などの command wrapper を作成し、必要に応じて
+shell profile に PATH を追加します。新しい terminal では `addroid status` の形で使えます。
 初期設定済みの状態で再実行した場合は、既存の config / secrets / credential を保持し、
 状態表示だけで終了します。
 
@@ -320,9 +323,9 @@ campaign / adset です。`ad` は直接予算を持たないため、親 adset 
 定期ルールとして扱います。どちらか判断できない予算変更・停止・再開リクエストでは、
 実行前に「今すぐ一度だけ」「定期ルール」「両方」の確認質問を返します。
 
-リポジトリ checkout では `addroid init` が checkout link を案内します。スキップした場合も
-`npm run link:cli` を一度実行すると、以後は `npx --no-install addroid status` ではなく
-`addroid status` と入力できます。npm package として
+リポジトリ checkout では `npm run addroid -- init` が checkout wrapper を作成します。
+スキップした場合も `npm run addroid -- init` を再実行すると、以後は
+`npm run addroid -- status` ではなく `addroid status` と入力できます。npm package として
 導入する場合は `npm install -g @addroid/cli` でも同じ `addroid` コマンドが入ります。
 worker のみ別プロセスに分離して水平スケールしたい場合は、前景実行の
 `addroid start --foreground --separate-worker` を使います。
@@ -376,8 +379,8 @@ addroid/
 | コマンド | 説明 |
 |---|---|
 | `npm install` | ワークスペース全体の依存解決 |
-| `npm run link:cli` | この checkout の CLI を `addroid` コマンドとしてリンク |
-| `addroid init` | 対話型初期セットアップ。初期設定済みなら既存 credential を保持して状態表示のみ |
+| `npm run addroid -- init` | repository checkout の初回 bootstrap。完了後は `addroid <command>` を直接利用 |
+| `addroid init` | command wrapper 作成後の再初期化・状態確認。既存 credential は保持 |
 | `addroid chat` | 通常利用の入口。自然文でレポート、予算確認、改善提案、入稿チェック、接続確認を依頼 |
 | `addroid start` | 常駐サービスをインストールして起動・修復。Web UI と worker はサービス内で動作 |
 | `addroid stop` | 常駐サービスを停止 |

@@ -215,13 +215,15 @@ npm run addroid -- init     # 対話型 wizard: .env / DB / ~/.addroid / Prisma 
 
 # 実際の Meta 広告アカウントと入稿用 ops repo は init 内で接続します。
 # init でスキップした場合だけ、後から個別に実行します。
-npm run addroid -- connect meta
-npm run addroid -- connect github
-npm run addroid -- start    # 常駐サービスを起動・修復
+addroid connect meta
+addroid connect github
+addroid start               # 常駐サービスを起動・修復
 ```
 
-`addroid` を `npm install -g @addroid/cli` で導入済みであれば `addroid init` /
-`addroid status` / `addroid start` をそのまま呼び出せます。詳細診断の `addroid doctor` は任意の
+`npm run addroid -- init` は repository checkout での初回 bootstrap です。`init` 後は
+`addroid status` / `addroid chat` / `addroid start` を直接呼び出せます。互換 alias として
+`addroid-cli <command>` も作成されます。現在の shell で PATH がまだ反映されていない場合は、
+`init` の出力に表示される `export PATH=...` を実行してください。詳細診断の `addroid doctor` は任意の
 診断コマンドで、セットアップ後や起動前の確認に使います。`addroid init` は対話端末で
 完了した場合、macOS は LaunchAgent、Linux / WSL2 は systemd user service として
 AdDroid を登録し、Web UI と pg-boss worker をログイン時に自動起動します。

@@ -18,31 +18,6 @@ try {
   /* repo root を解決できない実行形態では env auto-load を skip。後段で明示エラー */
 }
 
-import { runDoctor } from "./commands/doctor.js";
-import { runInit } from "./commands/init.js";
-import { runUp } from "./commands/up.js";
-import { runDown } from "./commands/down.js";
-import { runLogs } from "./commands/logs.js";
-import { runStatus } from "./commands/status.js";
-import { runValidate } from "./commands/validate.js";
-import { runPlan } from "./commands/plan.js";
-import { runActivateCommand } from "./commands/activate.js";
-import { runCronCommand } from "./commands/cron.js";
-import { runAuthCommand } from "./commands/auth.js";
-import { runAccountsCommand } from "./commands/accounts.js";
-import { runBackupCommand, runRestoreCommand } from "./commands/backup.js";
-import { runChatCommand } from "./commands/chat.js";
-import { runServiceCommand } from "./commands/service.js";
-import { runStartCommand, runStopCommand } from "./commands/service-public.js";
-import {
-  runAccountCommand,
-  runConnectCommand,
-  runOpenCommand,
-  runReportCommand,
-  runScheduleCommand,
-  runSubmitCommand,
-} from "./commands/public.js";
-
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
@@ -58,55 +33,55 @@ async function main(argv: string[]): Promise<number> {
       printVersion();
       return 0;
     case "init":
-      return runInit(rest);
+      return (await import("./commands/init.js")).runInit(rest);
     case "start":
-      return runStartCommand(rest);
+      return (await import("./commands/service-public.js")).runStartCommand(rest);
     case "stop":
-      return runStopCommand(rest);
+      return (await import("./commands/service-public.js")).runStopCommand(rest);
     case "open":
-      return runOpenCommand(rest);
+      return (await import("./commands/public.js")).runOpenCommand(rest);
     case "status":
-      return runStatus(rest);
+      return (await import("./commands/status.js")).runStatus(rest);
     case "connect":
-      return runConnectCommand(rest);
+      return (await import("./commands/public.js")).runConnectCommand(rest);
     case "account":
-      return runAccountCommand(rest);
+      return (await import("./commands/public.js")).runAccountCommand(rest);
     case "report":
-      return runReportCommand(rest);
+      return (await import("./commands/public.js")).runReportCommand(rest);
     case "submit":
-      return runSubmitCommand(rest);
+      return (await import("./commands/public.js")).runSubmitCommand(rest);
     case "schedule":
-      return runScheduleCommand(rest);
+      return (await import("./commands/public.js")).runScheduleCommand(rest);
     case "chat":
-      return runChatCommand(rest);
+      return (await import("./commands/chat.js")).runChatCommand(rest);
     case "backup":
-      return runBackupCommand(rest);
+      return (await import("./commands/backup.js")).runBackupCommand(rest);
 
     // Detailed / CI-oriented commands. They intentionally stay out of the top help.
     case "doctor":
-      return runDoctor(rest);
+      return (await import("./commands/doctor.js")).runDoctor(rest);
     case "logs":
-      return runLogs(rest);
+      return (await import("./commands/logs.js")).runLogs(rest);
     case "service":
-      return runServiceCommand(rest);
+      return (await import("./commands/service.js")).runServiceCommand(rest);
     case "restore":
-      return runRestoreCommand(rest);
+      return (await import("./commands/backup.js")).runRestoreCommand(rest);
     case "validate":
-      return runValidate(rest);
+      return (await import("./commands/validate.js")).runValidate(rest);
     case "up":
-      return runUp(rest);
+      return (await import("./commands/up.js")).runUp(rest);
     case "down":
-      return runDown(rest);
+      return (await import("./commands/down.js")).runDown(rest);
     case "plan":
-      return runPlan(rest);
+      return (await import("./commands/plan.js")).runPlan(rest);
     case "activate":
-      return runActivateCommand(rest);
+      return (await import("./commands/activate.js")).runActivateCommand(rest);
     case "cron":
-      return runCronCommand(rest);
+      return (await import("./commands/cron.js")).runCronCommand(rest);
     case "auth":
-      return runAuthCommand(rest);
+      return (await import("./commands/auth.js")).runAuthCommand(rest);
     case "accounts":
-      return runAccountsCommand(rest);
+      return (await import("./commands/accounts.js")).runAccountsCommand(rest);
     default:
       process.stderr.write(`unknown command: ${cmd}\n`);
       printHelp();
