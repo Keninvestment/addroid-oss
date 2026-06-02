@@ -213,8 +213,8 @@ UI は `apps/web/components` の小さな in-house primitives と
 | 想定要件 | 対応 |
 |---|---|
 | ワーカー水平スケール | 前景実行の `addroid start --foreground --separate-worker` で `apps/worker` を別プロセスとして spawn (web は引き続き CLI 内、worker のみ別プロセス化) |
-| 多人数運用 | the current implementation の範囲外。SSO 等は将来の独立コントラクト |
+| 多人数運用 | 初期 OSS リリースの範囲外。SSO 等は将来の独立コントラクト |
 | 多テナント | 当面 1 ワークスペース 1 ホスト。多テナントは別契約で扱う |
-| Meta sandbox / mock harness | `ADDROID_META_OAUTH_MOCK=1` で `MockMetaAdapter` に固定 (E2E / smoke-test 用) |
+| Meta sandbox / test harness | テスト専用 adapter はリリース設定例には含めず、CI / E2E 側の設定で扱う |
 | LLM / Image Provider 追加 | `packages/llm-provider/factory.ts` / `image-factory.ts` の adapter pattern に従って追加 |
 | Storage backend 切替 | 現状 `LocalDiskStorage` のみ。S3 / GCS は将来コントラクト |

@@ -1,6 +1,6 @@
 # AdDroid OSS — Slack App Manifest (Socket Mode only).
 #
-# このテンプレートは AdDroid OSS the current implementation の Slack 連携 (任意) で利用する
+# このテンプレートは AdDroid OSS の Slack 連携 (任意) で利用する
 # Slack App の "From an app manifest" 用入力です。Slack の管理画面で
 # "Create New App > From an app manifest" を開き、本ファイルの内容を
 # YAML として貼り付けると AdDroid と接続するための Slack App が作られます。

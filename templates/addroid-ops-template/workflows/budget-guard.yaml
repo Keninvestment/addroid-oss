@@ -1,5 +1,5 @@
 version: 1
-# AdDroid OSS — budget_guard policy (this implementation)。
+# AdDroid OSS — budget_guard policy.
 #
 # 5 種類のしきい値を評価する。各値を 0 (もしくは未指定) にするとそのルールは
 # 無効。ファイル全体が存在しない場合は worker 側で **fail-closed** に倒れ、

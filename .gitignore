@@ -31,7 +31,7 @@ secrets.local.yml
 .npmrc
 
 # AdDroid runtime / local state
-.addroid-test-home/
+.addroid-local-home/
 .addroid-local/
 .addroid-ci-home/
 

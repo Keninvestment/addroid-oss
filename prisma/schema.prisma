@@ -1,7 +1,7 @@
-// AdDroid OSS — Prisma schema (the current implementation initial schema).
+// AdDroid OSS — Prisma schema (initial OSS schema).
 //
-// 本ファイルは AdDroid OSS が要求する 12 個の AdDroid テーブルと、the current implementation の
-// skeleton 段階で UI / worker / CLI が直接参照する少数の補助テーブルを定義します。
+// 本ファイルは AdDroid OSS が要求する 12 個の AdDroid テーブルと、初期 OSS リリースで
+// UI / worker / CLI が直接参照する少数の補助テーブルを定義します。
 //
 // 12 必須テーブル (contract acceptance):
 //   1.  workspaces
@@ -17,8 +17,7 @@
 //   11. audit_logs
 //   12. creatives
 //
-// 補助テーブル (skeleton 期間の UI/worker/CLI 表示・状態保持に必要、後続コントラクトで
-// 統合・整理予定):
+// 補助テーブル (初期 OSS リリースの UI/worker/CLI 表示・状態保持に必要):
 //   - github_repos          : ops repo レジストリ (PR/polling から参照)
 //   - github_polling_state  : ETag-aware ポーリングの進捗
 //   - cron_schedules        : pg-boss に登録済みプリセットの UI 表示用ミラー
@@ -46,7 +45,7 @@ datasource db {
 
 // =====================================================================
 // 1) workspaces — ローカルワークスペース (config + ops repo メタ)。
-//    the current implementation はシングルテナント前提で 1 行のみ運用します。
+//    初期 OSS リリースはシングルテナント前提で 1 行のみ運用します。
 // =====================================================================
 model Workspace {
   id                 String   @id @default(uuid())
@@ -56,8 +55,8 @@ model Workspace {
   storageDir         String
   databaseUrlRef     String? // 値そのものではなく、解決元 (例: ".env.local") を記録
   opsRepoId          String?  @unique
-  defaultAdAccountId String?  @unique // the current implementation: 既定の Meta ad_account
-  // Regression fix: workspace 全体の execution mode。
+  defaultAdAccountId String?  @unique // 既定の Meta ad_account
+  // workspace 全体の execution mode。
   //   "report_only" | "proposal" | "auto_apply"
   // worker は cron 起動時にこの値を読み、daily_report / budget_guard /
   // improvement_pr の各呼び出しに渡す。値の制約は @addroid/queue の
@@ -202,7 +201,7 @@ model PerformanceSnapshot {
   clicks      Int      @default(0)
   spendMicros BigInt   @default(0) // Meta は通貨マイクロ単位での扱いが安全
   conversions Int      @default(0)
-  raw         Json? // 取得元レスポンスの保存 (再計算用)。retention: 90d (regression fix)。
+  raw         Json? // 取得元レスポンスの保存 (再計算用)。retention: 90d。
   source      String   @default("meta_ads_cli")
   createdAt   DateTime @default(now())
 
@@ -273,7 +272,7 @@ model InsightRow {
 }
 
 // =====================================================================
-// 6) ai_runs — AI 生成 / 改善提案ジョブの実行記録 (the current implementation 拡張)。
+// 6) ai_runs — AI 生成 / 改善提案ジョブの実行記録。
 //    AI ワークフロー (daily_report / budget_guard / improvement_pr / adhoc) と
 //    8 agent (strategy/copy/image_prompt/creative_qa/analyst/media_buyer/
 //    gitops/audit) のすべての実行が、provider / model / prompt / 入力 / 出力 /
@@ -359,8 +358,8 @@ model GithubPullRequest {
 //    GitOps の境界を audit_logs と二段で記録するため、PR ごとの最終決定が
 //    1:N で残ります (再開・差し戻しを表現)。
 //
-//    this implementation: Activate (Web/Slack/CLI) 操作も同じ 1 行記録に
-//    統一する。Activate は PR を持たないため、`pullRequestId` を nullable に
+//    Activate (Web/Slack/CLI) 操作も同じ 1 行記録に統一する。
+//    Activate は PR を持たないため、`pullRequestId` を nullable に
 //    し、polymorphic な `(targetType, targetId)` 列で対象を識別する。
 //      - PR merge       : targetType="github_pull_request", targetId=<pr id>
 //      - Activate       : targetType="ads_hierarchy",       targetId=<hierarchy id>
@@ -464,8 +463,8 @@ model AuditLog {
 //     LocalDisk storage (`~/.addroid/storage/...`) に保管され、本テーブルは
 //     パスとメタデータのみ保持します (機密データを直書きしない)。
 //
-//     this implementation: 1 行で「生成物 (storagePath / storageRef) +
-//     プロンプト + モデル / プロバイダ + 生成パラメータ + 関連 ai_run /
+//     1 行で「生成物 (storagePath / storageRef) + プロンプト +
+//     モデル / プロバイダ + 生成パラメータ + 関連 ai_run /
 //     creative_qa ai_run / improvement_pr / pull_request」を辿れるようにする。
 //     生成パラメータと QA 結果は creative-storage が書き出す metadata.json と
 //     1:1 対応するので、creatives テーブル単独でも監査・UI 描画が成立する。
@@ -475,15 +474,15 @@ model Creative {
   accountId         String
   hierarchyId       String? // ads_hierarchy.id (campaign / adset / ad)
   aiRunId           String? // image_prompt agent の ai_run.id
-  // this implementation: creative_qa hop の ai_run.id。image_prompt と
-  // creative_qa の二段が同一 creative にぶら下がる。
+  // creative_qa hop の ai_run.id。image_prompt と creative_qa の二段が
+  // 同一 creative にぶら下がる。
   creativeQaAiRunId String?
   // PR が立った後にリンクされる。PR 作成前 / fallback / qa_failed 時は null。
   pullRequestId     String?
   key               String // operations / evidence から参照する安定キー
   displayName       String
   mediaType         String // "image" | "video" | "carousel" | "text"
-  // the current implementation creative_status vocabulary:
+  // creative_status vocabulary:
   //   queued | generating | qa_running | qa_passed | qa_warned | qa_failed |
   //   attached_to_pr | merged | active_on_meta | superseded | fallback_text_only
   status            String   @default("queued")
@@ -519,7 +518,7 @@ model Creative {
 }
 
 // =====================================================================
-// 補助テーブル (the current implementation skeleton 用 — 後続コントラクトで再編成予定)
+// 補助テーブル (初期 OSS リリース用)
 // =====================================================================
 
 // github_repos — ops リポジトリのレジストリ。

@@ -5,7 +5,7 @@
 ## ファイル
 
 - `schema.prisma` — AdDroid 12 必須テーブル + 補助テーブルの定義。
-- `migrations/` — `prisma migrate dev` で生成されるマイグレーション。the current implementation 段階では空 (`db push` を主動線にしています)。
+- `migrations/` — `prisma migrate dev` で生成されるマイグレーション。初期 OSS リリースでは空 (`db push` を主動線にしています)。
 
 ## 12 必須テーブル (contract acceptance)
 
@@ -24,7 +24,7 @@
 | `audit_logs` | 監査ログ (actor / action / target / ref) | `AuditLog` |
 | `creatives` | クリエイティブ資産 (画像/動画/テキスト) | `Creative` |
 
-## 補助テーブル (skeleton 期間のみ、後続コントラクトで再編成予定)
+## 補助テーブル (初期 OSS リリース向け)
 
 | テーブル | 役割 |
 |---|---|
@@ -34,18 +34,18 @@
 | `apply_jobs` | merged PR から enqueue される execute_apply ジョブ記録 |
 | `doctor_results` | `addroid doctor` 直近結果の UI 表示キャッシュ |
 
-これらは the current implementation の skeleton 期間に UI / worker / CLI が直接読むためのもので、
-後続コントラクトで `execution_logs` への統合や Workspace への正規化を行います。
+これらは初期 OSS リリースで UI / worker / CLI が直接読むためのものです。
+将来の拡張で `execution_logs` への統合や Workspace への正規化を検討します。
 
 ## マイグレーションモデル
 
-the current implementation 段階では migration history を作らず `db push` を主動線とし、
+初期 OSS リリースでは migration history を作らず `db push` を主動線とし、
 `prisma/migrations/` は意図的に空 (`.gitkeep` のみ) にしています。
-the current implementation (OSS 公開準備) 時点でのモデルは次のとおりです:
+OSS 公開時点でのモデルは次のとおりです:
 
 | 操作 | 想定環境 | 用途 |
 |---|---|---|
-| `npm run db:push` | 開発 / 単一ホストの self-host 運用 | スキーマ差分を直接反映。履歴を残さない。the current implementation の主動線。 |
+| `npm run db:push` | 開発 / 単一ホストの self-host 運用 | スキーマ差分を直接反映。履歴を残さない。初期 OSS リリースの主動線。 |
 | `npm run db:migrate` (= `prisma migrate dev`) | 開発 (履歴を残したい場合) | 差分から SQL ファイルを生成して `prisma/migrations/` に追加。 |
 | `prisma migrate deploy` | 本番 / CI | 既存の migration ファイルを順に適用するだけ。差分検出は行わない。 |
 
@@ -147,7 +147,7 @@ GitHub / Meta / Slack のトークンを復元できません。
 ## 命名規則
 
 - モデル名は `PascalCase`、テーブル名は `snake_case` (`@@map` で指定)。
-- 列名はキャメルケース (the current implementation 段階では `@map("snake_case")` は付けず Prisma 既定のまま)。
+- 列名はキャメルケース (初期 OSS リリースでは `@map("snake_case")` は付けず Prisma 既定のまま)。
   → 列名のスネーク化は 12 テーブルが安定したあと、別タスクでまとめて適用します。
 - Meta 側 ID 等の外部識別子は `externalId` に統一し、`metaAccountId` 等の専用列は
   ad_accounts のように identity が必要なテーブルに限定して保持します。
