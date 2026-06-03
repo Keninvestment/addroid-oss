@@ -1,4 +1,7 @@
 name: addroid-validate
+# This lightweight PR check gives early feedback in the ops repository.
+# AdDroid validates merged PRs again server-side before Apply, so disabling
+# GitHub Actions does not bypass the runtime safety boundary.
 on:
   pull_request:
     paths:

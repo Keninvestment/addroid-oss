@@ -20,11 +20,18 @@ ops-repo/
 ├── evidence/
 │   └── creatives/          # 生成クリエイティブの監査用参照
 └── .github/
-    └── workflows/          # ops repo 側の CI (任意)
+    └── workflows/          # ops repo 側の PR 構造検証 (任意)
 ```
 
 operation manifest / project.json はすべて `packages/ops-schemas` の Zod スキーマで
 検証され、不正な構造 / 安全でない予算変更 / 初期 active キャンペーン作成は拒否されます。
+
+ops repo に含まれる GitHub Actions (`addroid-validate`) は、PR 時に YAML / JSON の
+構造ミスを早めに見つけるための軽量チェックです。AdDroid は merged PR を検知した後、
+Apply 前にも server-side で同じ安全境界を再検証します。そのため Actions は便利な
+早期フィードバックであり、システムの安全性そのものを Actions だけに依存させません。
+GitHub Actions を無効化した環境でも、merge 後の Apply は AdDroid 側の検証に通らない限り
+Meta へ反映されません。
 
 ---
 

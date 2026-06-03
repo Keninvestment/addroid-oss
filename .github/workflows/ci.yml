@@ -26,6 +26,8 @@
 # 重要:
 #   - 本ワークフローは `npm publish` を実行しない (dry-run のみ)。
 #   - secret や `NPM_TOKEN` への依存はなく、fork からの PR でも完全に走る。
+#   - fork repository への通常 push では走らせない。一般利用者が clone/fork して
+#     ローカル運用するだけなら、この本体 CI は不要。
 #   - `prisma generate` が typecheck の前段で必要 (apps/cli, apps/worker, apps/web は @prisma/client の型に依存)。
 
 name: ci
@@ -47,6 +49,7 @@ concurrency:
 jobs:
   build-test-package:
     name: build / typecheck / test / package
+    if: ${{ github.event_name != 'push' || github.event.repository.fork == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
 

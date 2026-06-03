@@ -625,7 +625,7 @@ test("init --interactive は GitHub client id 未設定時に GitHub CLI browser
           {
             isTTY: true,
             prompt: async (_question, defaultValue = "") => answers.shift() ?? defaultValue,
-            confirm: async () => false,
+            confirm: async () => true,
             runAuthCommand: async (args) => {
               authCalls.push(args);
               return 0;
