@@ -24,6 +24,7 @@ import {
   loadSubmissionGuardsPolicy,
   type SubmissionGuardsYaml,
 } from "@addroid/ops-schemas";
+import { isManagedStorageKey } from "./storage-key-validation.js";
 export type PlanRunSource = "web" | "web-chat" | "slack-chat" | "agent-task" | "ci" | "cli";
 
 export interface PlanCounts {
@@ -395,6 +396,14 @@ function normalizeOperationManifest(
         findings.push({ level: "error", pointer, message });
         return;
       }
+      const storageKey = readString(payload.storageKey);
+      if (storageKey && !isManagedStorageKey(storageKey)) {
+        const message =
+          "storageKey must be a managed AdDroid storage key; local file paths must be imported before creating an ops PR";
+        errors.push({ file, pointer, message });
+        findings.push({ level: "error", pointer, message });
+        return;
+      }
       actions.push({
         kind: "graph_operation",
         account: accountKey ?? "",
@@ -417,6 +426,14 @@ function normalizeOperationManifest(
     const support = isSupportedMetaCliOperation(args);
     if (!support.supported) {
       const message = `unsupported legacy operation: ${resource}:${verb}`;
+      errors.push({ file, pointer, message });
+      findings.push({ level: "error", pointer, message });
+      return;
+    }
+    const invalidStorageFlag = findInvalidStorageFlag(args);
+    if (invalidStorageFlag) {
+      const message =
+        `${invalidStorageFlag.flag} must be a managed AdDroid storage key; local file paths must be imported before creating an ops PR`;
       errors.push({ file, pointer, message });
       findings.push({ level: "error", pointer, message });
       return;
@@ -456,6 +473,19 @@ function isSupportedGraphOperationKind(kind: string): boolean {
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function findInvalidStorageFlag(
+  args: readonly string[]
+): { flag: string; value: string } | null {
+  for (const flag of ["--image", "--video", "--images", "--videos"]) {
+    for (let i = 0; i < args.length - 1; i += 1) {
+      if (args[i] !== flag) continue;
+      const value = readString(args[i + 1]);
+      if (value && !isManagedStorageKey(value)) return { flag, value };
+    }
+  }
+  return null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

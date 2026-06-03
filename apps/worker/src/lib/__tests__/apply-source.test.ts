@@ -82,7 +82,7 @@ const CREATIVE_SUBMISSION_OPERATION = `${JSON.stringify(
           "--page-id",
           "281900655012835",
           "--image",
-          "/tmp/asset.png",
+          "creative-submissions/primary/image-variant-2-submission-9e73c01f/asset.png",
           "--body",
           "body",
           "--title",
@@ -304,7 +304,10 @@ test("loadForApply adapts creative submission operation manifests to Graph apply
     assert.equal(actions[1]?.kind, "create_ad");
     const creative = actions[0] as unknown as Record<string, unknown>;
     assert.equal(creative.creativeId, "image-variant-2-submission-9e73c01f");
-    assert.equal(creative.storageKey, "/tmp/asset.png");
+    assert.equal(
+      creative.storageKey,
+      "creative-submissions/primary/image-variant-2-submission-9e73c01f/asset.png"
+    );
     assert.equal(creative.linkUrl, "http://instagram.com/shishasin2022kumamoto");
     assert.equal(creative.callToAction, "VIEW_INSTAGRAM_PROFILE");
     assert.equal(creative.instagramUserId, "17841465387326763");

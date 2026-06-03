@@ -181,7 +181,7 @@ function planActionToCliArgs(action: ApplyAction, accountCurrency = "USD"): {
       return {
         resource: action.resource,
         verb: action.verb,
-        args: action.args,
+        args: resolveStorageFlagArgs(action.args),
       };
     case "create_campaign":
       return {
@@ -375,16 +375,34 @@ function cliEnum(value: string): string {
 }
 
 function fileArg(value: string): string {
-  if (pathLike(value)) return value;
   try {
     return new LocalDiskStorage().resolve(value);
-  } catch {
-    return value;
+  } catch (err) {
+    throw new MetaGraphApplyError({
+      message:
+        "storageKey must be a managed AdDroid storage key; local file paths must be imported before creating an ops PR",
+      exitClass: "api_error",
+      payload: {
+        reason: "invalid_storage_key",
+        errorName: (err as Error).name,
+      },
+    });
   }
 }
 
-function pathLike(value: string): boolean {
-  return value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || /^[A-Za-z]:[\\/]/.test(value);
+function resolveStorageFlagArgs(args: readonly string[]): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length - 1; i += 1) {
+    if (
+      out[i] === "--image" ||
+      out[i] === "--video" ||
+      out[i] === "--images" ||
+      out[i] === "--videos"
+    ) {
+      out[i + 1] = fileArg(out[i + 1]!);
+    }
+  }
+  return out;
 }
 
 function repeatFlags(flag: string, values: readonly string[] | undefined): string[] {
@@ -484,6 +502,63 @@ class MetaGraphApplyError extends Error {
     this.status = input.status ?? null;
     this.payload = input.payload ?? null;
   }
+}
+
+function statusForExitClass(exitClass: MetaCliExitClass): ExecuteActionResult["status"] {
+  return exitClass === "auth_error"
+    ? "auth_error"
+    : exitClass === "rate_limit_error"
+      ? "rate_limit_error"
+      : exitClass === "api_error"
+        ? "api_error"
+        : exitClass === "success"
+          ? "success"
+          : "unknown_error";
+}
+
+function applyInputErrorResult(input: {
+  action: ApplyAction;
+  context: ExecuteActionInput["context"];
+  error: MetaGraphApplyError;
+  mode: string;
+}): ExecuteActionResult {
+  const ctxApprovalRecordId = input.context.approvalRecordId;
+  const payload = isRecord(input.error.payload) ? input.error.payload : {};
+  const reason =
+    typeof payload.reason === "string" ? payload.reason : "invalid_apply_input";
+  const envelope = prefailedPayloadEnvelope({
+    exitClass: input.error.exitClass,
+    stderr: input.error.message,
+    binary: null,
+    accountKey: input.action.account,
+    sanitizedCommand: "meta-ads-cli",
+    sanitizedArgs: [],
+    pullRequestNumber: input.context.prNumber,
+    ...(typeof ctxApprovalRecordId === "string" && ctxApprovalRecordId.length > 0
+      ? { approvalRecordId: ctxApprovalRecordId }
+      : {}),
+  });
+  const out: ExecuteActionResult = {
+    status: statusForExitClass(input.error.exitClass),
+    message: `apply aborted before spawn: ${input.error.message}`,
+    logPayload: {
+      ...envelope,
+      mode: input.mode,
+      stage: "plan_args",
+      reason,
+      actionKind: input.action.kind,
+      response: input.error.payload,
+    } satisfies JsonValue,
+  };
+  const rec = recommendActionForExit(input.error.exitClass);
+  if (
+    rec.kind === "notify_reauth" ||
+    rec.kind === "notify_api_error" ||
+    rec.kind === "fail_fast_notify"
+  ) {
+    out.notify = { auditAction: rec.auditAction, detail: rec.reason };
+  }
+  return out;
 }
 
 function graphEndpoint(pathname: string): string {
@@ -818,7 +893,20 @@ function deterministicMockExternalId(action: ApplyAction): string | undefined {
  */
 export class MockApplyExecutor implements MetaActionExecutor {
   async executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult> {
-    const args = planActionToCliArgs(input.action);
+    let args: ReturnType<typeof planActionToCliArgs>;
+    try {
+      args = planActionToCliArgs(input.action);
+    } catch (err) {
+      if (err instanceof MetaGraphApplyError) {
+        return applyInputErrorResult({
+          action: input.action,
+          context: input.context,
+          error: err,
+          mode: "mock",
+        });
+      }
+      throw err;
+    }
     if (!args) {
       return {
         status: "skipped",
@@ -885,7 +973,20 @@ export class MockApplyExecutor implements MetaActionExecutor {
  */
 export class FailClosedApplyExecutor implements MetaActionExecutor {
   async executeAction(input: ExecuteActionInput): Promise<ExecuteActionResult> {
-    const args = planActionToCliArgs(input.action);
+    let args: ReturnType<typeof planActionToCliArgs>;
+    try {
+      args = planActionToCliArgs(input.action);
+    } catch (err) {
+      if (err instanceof MetaGraphApplyError) {
+        return applyInputErrorResult({
+          action: input.action,
+          context: input.context,
+          error: err,
+          mode: "fail_closed",
+        });
+      }
+      throw err;
+    }
     if (!args) {
       return {
         status: "skipped",
@@ -965,7 +1066,20 @@ export class CliApplyExecutor implements MetaActionExecutor {
         ? await this.resolveAdAccountCurrency(input.action.account)
         : null) ?? "USD";
     const action = this.rewriteActionRefs(input.action);
-    const args = planActionToCliArgs(action, accountCurrency);
+    let args: ReturnType<typeof planActionToCliArgs>;
+    try {
+      args = planActionToCliArgs(action, accountCurrency);
+    } catch (err) {
+      if (err instanceof MetaGraphApplyError) {
+        return applyInputErrorResult({
+          action,
+          context: input.context,
+          error: err,
+          mode: "cli",
+        });
+      }
+      throw err;
+    }
     if (!args) {
       return {
         status: "skipped",
@@ -1626,6 +1740,9 @@ export class GraphApplyExecutor implements MetaActionExecutor {
     const { action, payload, accessToken, adAccountId } = input;
     const pageId = readGraphString(payload, "pageId");
     const instagramUserId = readGraphString(payload, "instagramUserId");
+    let imageHash = readGraphString(payload, "imageHash");
+    const storageKey = readGraphString(payload, "storageKey");
+    const storagePath = !imageHash && storageKey ? fileArg(storageKey) : undefined;
     const preflight = await fetchMetaAssetReadiness({
       accessToken,
       adAccountId,
@@ -1633,14 +1750,12 @@ export class GraphApplyExecutor implements MetaActionExecutor {
       instagramUserId: instagramUserId ?? undefined,
       limit: 100,
     });
-    let imageHash = readGraphString(payload, "imageHash");
-    const storageKey = readGraphString(payload, "storageKey");
-    if (!imageHash && storageKey) {
+    if (!imageHash && storagePath) {
       const uploaded = await postGraphMultipart(
         `${adAccountId}/adimages`,
         accessToken,
         {},
-        { field: "source", path: fileArg(storageKey) }
+        { field: "source", path: storagePath }
       );
       imageHash = extractImageHash(uploaded.json) ?? undefined;
     }

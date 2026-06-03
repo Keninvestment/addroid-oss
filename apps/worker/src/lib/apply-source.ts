@@ -36,6 +36,7 @@ import type {
   GraphOperationAction,
   MetaCliOperationAction,
 } from "@addroid/queue";
+import { assertManagedStorageKey } from "./storage-key-validation.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -371,6 +372,8 @@ function normalizeGraphOperationAction(accountKey: string, raw: unknown): ApplyA
     throw new Error(`unsupported graph operation kind: ${kind ?? "(missing)"}`);
   }
   const payload = isRecord(raw.payload) ? raw.payload : {};
+  const storageKey = readString(payload.storageKey);
+  if (storageKey) assertManagedStorageKey(storageKey);
   const ref = readString(raw.ref) ?? undefined;
   const dependsOn = Array.isArray(raw.dependsOn)
     ? raw.dependsOn.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
@@ -438,6 +441,7 @@ function normalizeOperationAction(accountKey: string, raw: unknown): ApplyAction
   if (!resource || !verb || args.length === 0) {
     throw new Error("operation action requires resource, verb and args[]");
   }
+  assertManagedStorageFlagValues(args);
   const entity = isRecord(raw.entity) ? (raw.entity as MetaCliOperationAction["entity"]) : undefined;
   const typed = legacySubmissionActionFromOperation({
     accountKey,
@@ -484,6 +488,7 @@ function creativeSubmissionActionFromArgs(
   if (!matchesPrefix(args, ["ads", "creative", "create"])) return null;
   const storageKey = flagValue(args, "--image");
   if (!storageKey) return null;
+  assertManagedStorageKey(storageKey, "--image");
   const creativeId = readString(entity?.nodeKey) ?? flagValue(args, "--name");
   const pageId = flagValue(args, "--page-id");
   const linkUrl = flagValue(args, "--link-url");
@@ -536,6 +541,25 @@ function flagValue(args: readonly string[], flag: string): string | null {
   const index = args.indexOf(flag);
   if (index < 0) return null;
   return readString(args[index + 1]);
+}
+
+function flagValues(args: readonly string[], flag: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] === flag) {
+      const value = readString(args[i + 1]);
+      if (value) out.push(value);
+    }
+  }
+  return out;
+}
+
+function assertManagedStorageFlagValues(args: readonly string[]): void {
+  for (const flag of ["--image", "--video", "--images", "--videos"]) {
+    for (const value of flagValues(args, flag)) {
+      assertManagedStorageKey(value, flag);
+    }
+  }
 }
 
 function cliEnum(value: string | null): string | undefined {

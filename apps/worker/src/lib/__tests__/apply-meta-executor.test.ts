@@ -28,6 +28,7 @@ import type {
   MetaRefreshResult,
 } from "@addroid/meta-adapter";
 import { MetaCliRunner, MetaTokenExpiredError } from "@addroid/meta-adapter";
+import { LocalDiskStorage } from "@addroid/config";
 import type { ApplyAction, ApplyJobContext } from "@addroid/queue";
 
 type CreateCampaignAction = ApplyAction & { kind: "create_campaign" };
@@ -510,11 +511,16 @@ test("CliApplyExecutor.executeAction: rate_limit_error attaches exponential back
 
 test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_id and rewrites following ad creativeRef", async () => {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "addroid-creative-test-"));
-  const imagePath = path.join(tmp, "creative.png");
+  const prevAddroidHome = process.env.ADDROID_HOME;
+  process.env.ADDROID_HOME = tmp;
+  const storageKey = "creative-submissions/act_786887980003986/cr-1/creative.png";
   const originalFetch = globalThis.fetch;
   const calls: Array<{ url: string; method: string; body?: unknown }> = [];
   try {
-    await fs.writeFile(imagePath, Buffer.from("not-a-real-png"));
+    await new LocalDiskStorage({ env: process.env }).write(
+      storageKey,
+      Buffer.from("not-a-real-png")
+    );
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? "GET";
@@ -572,7 +578,7 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
         callToAction: "VIEW_INSTAGRAM_PROFILE",
         instagramUserId: "17841465387326763",
         instagramAppLink: "instagram://user?username=sin&userid=65414107577",
-        storageKey: imagePath,
+        storageKey,
       },
       context: ctx(),
       attempt: 0,
@@ -612,7 +618,50 @@ test("CliApplyExecutor.executeAction: create_creative uses Graph instagram_user_
     assert.ok(calls.some((call) => call.url.includes("/adcreatives")));
   } finally {
     globalThis.fetch = originalFetch;
+    if (prevAddroidHome === undefined) delete process.env.ADDROID_HOME;
+    else process.env.ADDROID_HOME = prevAddroidHome;
     await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("CliApplyExecutor.executeAction: create_creative rejects absolute storageKey before upload", async () => {
+  const originalFetch = globalThis.fetch;
+  const log: SpawnLog[] = [];
+  try {
+    globalThis.fetch = (async () => {
+      throw new Error("fetch must not be called for invalid storageKey");
+    }) as typeof fetch;
+    const runner = makeRunner([], log);
+    const executor = new CliApplyExecutor({
+      runner,
+      metaAdapter: META_ADAPTER,
+      resolveAdAccountId: async () => "act_786887980003986",
+    });
+    const result = await executor.executeAction({
+      action: {
+        kind: "create_creative",
+        account: "act_786887980003986",
+        creativeId: "cr-absolute",
+        name: "Creative absolute",
+        mediaType: "image",
+        pageId: "281900655012835",
+        linkUrl: "https://example.com",
+        storageKey: "/tmp/creative.png",
+      },
+      context: ctx(),
+      attempt: 0,
+    });
+
+    assert.equal(result.status, "api_error");
+    assert.equal(log.length, 0, "invalid storageKey must not spawn the legacy CLI");
+    const payload = result.logPayload as Record<string, unknown>;
+    assert.equal(payload.stage, "plan_args");
+    assert.equal(payload.reason, "invalid_storage_key");
+    assert.equal(payload.actionKind, "create_creative");
+    assert.ok(result.notify, "invalid storageKey should notify as a Meta API input error");
+    assert.equal(result.notify!.auditAction, "meta.api_error");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
@@ -639,7 +688,7 @@ test("CliApplyExecutor.executeAction: meta_cli_operation uses canonical instagra
         "--page-id",
         "281900655012835",
         "--image",
-        "/tmp/creative.png",
+        "creative-submissions/act_786887980003986/cr-1/creative.png",
         "--instagram-actor-id",
         "17841465387326763",
       ],
@@ -658,6 +707,30 @@ test("CliApplyExecutor.executeAction: meta_cli_operation uses canonical instagra
   assert.equal(log.length, 1);
   assert.ok(log[0]!.args.includes("--instagram-actor-id"));
   assert.ok(!log[0]!.args.includes("--instagram-user-id"));
+});
+
+test("CliApplyExecutor.executeAction: meta_cli_operation rejects absolute media flags before spawn", async () => {
+  const log: SpawnLog[] = [];
+  const runner = makeRunner([], log);
+  const executor = new CliApplyExecutor({ runner, metaAdapter: META_ADAPTER });
+
+  const result = await executor.executeAction({
+    action: {
+      kind: "meta_cli_operation",
+      account: "act_786887980003986",
+      resource: "creatives",
+      verb: "create",
+      args: ["ads", "creative", "create", "--image", "/tmp/creative.png"],
+    },
+    context: ctx(),
+    attempt: 0,
+  });
+
+  assert.equal(result.status, "api_error");
+  assert.equal(log.length, 0, "invalid media flag must not spawn the legacy CLI");
+  const payload = result.logPayload as Record<string, unknown>;
+  assert.equal(payload.reason, "invalid_storage_key");
+  assert.equal(payload.actionKind, "meta_cli_operation");
 });
 
 // ---------------------------------------------------------------------

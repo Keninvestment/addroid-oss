@@ -80,6 +80,23 @@ function operationManifest(accountKey: string, actions: unknown[]): string {
   )}\n`;
 }
 
+function legacyOperationManifest(accountKey: string, actions: unknown[]): string {
+  return `${JSON.stringify(
+    {
+      version: 1,
+      accountKey,
+      intent: "other",
+      source: "test",
+      actor: "test",
+      rationale: null,
+      createdAt: "2026-05-17T00:00:00.000Z",
+      actions,
+    },
+    null,
+    2
+  )}\n`;
+}
+
 // ---- runPlanForRoot: success ---------------------------------------
 
 test("runPlanForRoot returns ok=true and risk=ok for a clean repo with paused campaigns", () => {
@@ -156,6 +173,63 @@ test("runPlanForRoot rejects ACTIVE create status inside graphPayload", () => {
     const out = runPlanForRoot({ rootDir: dir });
     assert.equal(out.ok, false);
     assert.ok(out.validationErrors.some((e) => e.message.includes("cannot create ACTIVE")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot rejects absolute graph storageKey before apply", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/create-creative-absolute.json": operationManifest("primary", [
+      {
+        kind: "creative.create",
+        payload: {
+          creativeId: "cr_absolute",
+          name: "Absolute Creative",
+          pageId: "page_1",
+          linkUrl: "https://example.com",
+          storageKey: "/tmp/asset.png",
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, false);
+    assert.ok(out.validationErrors.some((e) => e.message.includes("managed AdDroid storage key")));
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot rejects absolute legacy media flag before apply", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/create-legacy-absolute.json": legacyOperationManifest("primary", [
+      {
+        resource: "creatives",
+        verb: "create",
+        args: [
+          "ads",
+          "creative",
+          "create",
+          "--name",
+          "Absolute Creative",
+          "--page-id",
+          "page_1",
+          "--image",
+          "/tmp/asset.png",
+        ],
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, false);
+    assert.ok(out.validationErrors.some((e) => e.message.includes("--image must be a managed")));
   } finally {
     cleanup();
   }
