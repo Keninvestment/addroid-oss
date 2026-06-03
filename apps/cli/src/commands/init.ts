@@ -418,11 +418,13 @@ async function runReauthOnly(
       out,
       assumeYes: false,
       runAuthCommand: overrides.runAuthCommand,
+      runner: overrides.runCommand ?? defaultRunCommand,
+      confirm: overrides.confirm ?? defaultConfirm,
       env,
       envFile: opts.envFile,
     });
     flush();
-    if (!configured) return 1;
+    if (configured === "error") return 1;
   }
 
   if (opts.reauthGithub) {
@@ -602,6 +604,7 @@ async function runInteractiveInit(
       const configured = await maybeConfigureMetaAccessToken({
         out,
         assumeYes: opts.yes,
+        confirm,
       });
       if (configured && !opts.yes) {
         process.stdout.write(out.join("\n") + "\n");
@@ -619,7 +622,7 @@ async function runInteractiveInit(
       }
     }
 
-    let llmConfigured = true;
+    let llmConfigured: CredentialSetupResult = "configured";
     if (auth.checked && auth.llmProviders.length > 0 && !opts.force && !opts.reauthLlm) {
       llmCredentialReady = true;
       out.push("");
@@ -633,12 +636,14 @@ async function runInteractiveInit(
         out,
         assumeYes: opts.yes,
         runAuthCommand: overrides.runAuthCommand,
+        runner,
+        confirm,
         env,
         envFile: opts.envFile,
       });
-      llmCredentialReady = llmConfigured && !opts.yes;
+      llmCredentialReady = llmConfigured === "configured" && !opts.yes;
     }
-    if (!llmConfigured) {
+    if (llmConfigured === "error") {
       process.stdout.write(out.join("\n") + "\n");
       return 1;
     }
@@ -672,19 +677,25 @@ async function runInteractiveInit(
       }
       process.stdout.write(out.join("\n") + "\n");
       out.length = 0;
-      const runAuthCommand =
-        overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
-      const authArgs = githubOAuth.clientId
-        ? ["github", "--client-id", githubOAuth.clientId]
-        : ["github"];
-      const code = await withRuntimeEnv(env, () => runAuthCommand(authArgs));
-      out.push(`  GitHub       : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
-      githubCredentialReady = code === 0;
-      opsRepoReady = code === 0;
-      if (code !== 0) {
-        out.push("                 実際の入稿には GitHub 認証と ops repository が必須です。`addroid connect github` を再実行してください。");
-        process.stdout.write(out.join("\n") + "\n");
-        return 1;
+      const shouldConfigureGithub = await confirm("GitHub 認証と ops repository 作成を今設定しますか?", true);
+      if (!shouldConfigureGithub) {
+        out.push("  GitHub       : skipped");
+        out.push("                 後で `addroid connect github` を実行してください。");
+      } else {
+        const runAuthCommand =
+          overrides.runAuthCommand ?? (await import("./auth.js")).runAuthCommand;
+        const authArgs = githubOAuth.clientId
+          ? ["github", "--client-id", githubOAuth.clientId]
+          : ["github"];
+        const code = await withRuntimeEnv(env, () => runAuthCommand(authArgs));
+        out.push(`  GitHub       : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
+        githubCredentialReady = code === 0;
+        opsRepoReady = code === 0;
+        if (code !== 0) {
+          out.push("                 実際の入稿には GitHub 認証と ops repository が必須です。`addroid connect github` を再実行してください。");
+          process.stdout.write(out.join("\n") + "\n");
+          return 1;
+        }
       }
     }
   }
@@ -1063,6 +1074,7 @@ function shellQuote(value: string): string {
 async function maybeConfigureMetaAccessToken(opts: {
   out: string[];
   assumeYes: boolean;
+  confirm: ConfirmFn;
 }): Promise<boolean> {
   opts.out.push("");
   opts.out.push("Meta Access Token setup:");
@@ -1075,7 +1087,7 @@ async function maybeConfigureMetaAccessToken(opts: {
   opts.out.push("  token 入力後、AdDroid が取得できる Ad Account を表示し、利用するアカウントを選択します。");
   opts.out.push("  入力値は ENCRYPTION_KEY で暗号化し、平文では保存しません。");
   if (!opts.assumeYes) {
-    opts.out.push("  このまま Meta Access Token の非表示入力に進みます。");
+    opts.out.push("  今設定する場合は、この後の非表示入力に token を貼り付けます。");
   }
   process.stdout.write(opts.out.join("\n") + "\n");
   opts.out.length = 0;
@@ -1085,8 +1097,16 @@ async function maybeConfigureMetaAccessToken(opts: {
     opts.out.push("                  後で `addroid connect meta` を実行してください。");
     return false;
   }
+  const shouldConfigure = await opts.confirm("Meta Access Token を今設定して Ad Account を選択しますか?", true);
+  if (!shouldConfigure) {
+    opts.out.push("  Meta Token    : skipped");
+    opts.out.push("                  後で `addroid connect meta` を実行してください。");
+    return false;
+  }
   return true;
 }
+
+type CredentialSetupResult = "configured" | "skipped" | "error";
 
 async function maybeConfigureLLMProvider(opts: {
   prompt: PromptFn;
@@ -1094,13 +1114,15 @@ async function maybeConfigureLLMProvider(opts: {
   out: string[];
   assumeYes: boolean;
   runAuthCommand?: (args: string[]) => Promise<number>;
+  runner?: CommandRunner;
+  confirm?: ConfirmFn;
   env: NodeJS.ProcessEnv;
   envFile?: string;
-}): Promise<boolean> {
+}): Promise<CredentialSetupResult> {
   if (opts.assumeYes) {
     opts.out.push("  LLM Provider  : skipped (--yes では API key / OAuth 入力を省略)");
     opts.out.push("                  実利用には LLM Provider が必須です。後で `addroid connect ai` を実行してください。");
-    return true;
+    return "skipped";
   }
   opts.out.push("");
   opts.out.push("LLM Provider setup:");
@@ -1127,6 +1149,11 @@ async function maybeConfigureLLMProvider(opts: {
           label: "Codex app-server",
           description: "Codex CLI / ChatGPT の認証状態を使います",
         },
+        {
+          value: "skip",
+          label: "今はスキップ",
+          description: "後で addroid connect ai を実行します",
+        },
       ],
       "openai-api-key"
     )
@@ -1136,23 +1163,38 @@ async function maybeConfigureLLMProvider(opts: {
 
   if (choice === "skip" || choice === "none") {
     opts.out.push("  LLM Provider  : skipped");
-    opts.out.push("                  実利用には LLM Provider が必須です。provider を選び直してください。");
-    return false;
+    opts.out.push("                  実利用には LLM Provider が必須です。後で `addroid connect ai` を実行してください。");
+    return "skipped";
   }
   if (choice === "codex-app-server" || choice === "codex") {
-    const codexCheck = checkCodexCli();
+    let codexCheck = checkCodexCli();
     opts.out.push(`  ${formatCheck(codexCheck).trim()}`);
     if (codexCheck.state === "error") {
-      if (codexCheck.hint) opts.out.push(`                  ${codexCheck.hint}`);
-      opts.out.push("                  Codex app-server を使う場合だけ Codex CLI が必要です。");
-      return false;
+      if (opts.runner) {
+        process.stdout.write(opts.out.join("\n") + "\n");
+        opts.out.length = 0;
+        const installResults = await installMissingDependencies([codexCheck], opts.runner, opts.env, {
+          confirm: opts.confirm,
+        });
+        for (const r of installResults) {
+          opts.out.push(...formatCommandOutcome(r.label, r.outcome));
+          if (!r.outcome.ok) return "error";
+        }
+        codexCheck = checkCodexCli();
+        opts.out.push(`  ${formatCheck(codexCheck).trim()}`);
+      }
+      if (codexCheck.state === "error") {
+        if (codexCheck.hint) opts.out.push(`                  ${codexCheck.hint}`);
+        opts.out.push("                  Codex app-server を使う場合だけ Codex CLI が必要です。");
+        return "error";
+      }
     }
     const codexEnv = await ensureCodexAppServerEnvConfig({
       env: opts.env,
       envFile: opts.envFile,
       out: opts.out,
     });
-    if (!codexEnv) return false;
+    if (!codexEnv) return "error";
     opts.out.push("  LLM Provider  : configuring Codex app-server");
     opts.out.push("                  Codex CLI のログイン状態を確認します。未ログインの場合はブラウザが開きます。");
     process.stdout.write(opts.out.join("\n") + "\n");
@@ -1165,9 +1207,9 @@ async function maybeConfigureLLMProvider(opts: {
     opts.out.push(`  LLM Provider  : ${code === 0 ? "ok" : `skipped/error (exit ${code})`}`);
     if (code !== 0) {
       opts.out.push("                  実利用には LLM Provider が必須です。Codex CLI のログイン状態を確認し、`addroid connect ai --provider codex` を再実行してください。");
-      return false;
+      return "error";
     }
-    return true;
+    return "configured";
   }
 
   const provider =
@@ -1179,7 +1221,7 @@ async function maybeConfigureLLMProvider(opts: {
   if (!provider) {
     opts.out.push(`  LLM Provider  : unknown choice (${choice})`);
     opts.out.push("                  openai-api-key / anthropic-api-key / codex-app-server のいずれかを選んでください。");
-    return false;
+    return "error";
   }
   const defaultModel =
     provider === "anthropic" ? DEFAULT_ANTHROPIC_MODEL : DEFAULT_OPENAI_MODEL;
@@ -1201,9 +1243,9 @@ async function maybeConfigureLLMProvider(opts: {
   }
   if (code !== 0) {
     opts.out.push(`                  実利用には LLM Provider が必須です。API key を確認し、\`addroid connect ai --provider ${provider}\` を再実行してください。`);
-    return false;
+    return "error";
   }
-  return true;
+  return "configured";
 }
 
 async function resolveGithubClientIdForInit(env: NodeJS.ProcessEnv): Promise<{
@@ -1864,11 +1906,11 @@ async function installMissingDependencies(
     if (check.name === "postgres-16") {
       const command =
         process.platform === "darwin"
-          ? "brew install postgresql@16 && brew services start postgresql@16"
+          ? "brew install postgresql@16 && stop older Homebrew PostgreSQL services && brew services start postgresql@16"
           : process.platform === "linux"
             ? "sudo apt-get update && sudo apt-get install -y postgresql-16 postgresql-client-16 (or dnf equivalent)"
             : "install PostgreSQL 16+ with your OS package manager";
-      const approval = await confirmInstallCommand(opts, "PostgreSQL 16+", command, false);
+      const approval = await confirmInstallCommand(opts, "PostgreSQL 16+", command, true);
       if (!approval.ok) {
         out.push({ label: "PostgreSQL 16+", outcome: approval.outcome });
         return out;
@@ -1986,6 +2028,20 @@ function installPostgres(
       { env, timeoutMs: 300_000 }
     );
     if (install.status !== 0) return { ok: false, detail: summarizeCommandFailure(install) };
+    const bin = prependHomebrewPostgres16BinToPath(runner, env);
+    for (const service of runningOlderHomebrewPostgresServices(runner, env)) {
+      const stop = runVisibleCommand(
+        "PostgreSQL 16+",
+        `brew services stop ${service}`,
+        runner,
+        "brew",
+        ["services", "stop", service],
+        { env, timeoutMs: 60_000 }
+      );
+      if (stop.status !== 0) {
+        return { ok: false, detail: `古い PostgreSQL service (${service}) を停止できません: ${summarizeCommandFailure(stop)}` };
+      }
+    }
     const start = runVisibleCommand(
       "PostgreSQL 16+",
       "brew services start postgresql@16",
@@ -1994,7 +2050,21 @@ function installPostgres(
       ["services", "start", "postgresql@16"],
       { env, timeoutMs: 60_000 }
     );
-    return commandOutcome(start, "PostgreSQL service started");
+    if (start.status !== 0) return { ok: false, detail: summarizeCommandFailure(start) };
+    const server = detectLocalPostgresServerMajor(runner, env);
+    if (server.major !== null && server.major < 16) {
+      return {
+        ok: false,
+        detail:
+          `localhost:5432 ではまだ PostgreSQL ${server.major} が応答しています。` +
+          " Homebrew 以外で起動した古い PostgreSQL を停止し、postgresql@16 を起動してから再実行してください。",
+      };
+    }
+    const pathNote = bin ? `; PATH updated for this init (${bin})` : "";
+    return {
+      ok: true,
+      detail: `PostgreSQL service started${server.major ? ` (server ${server.major})` : ""}${pathNote}`,
+    };
   }
   if (process.platform === "linux") {
     const apt = runner("sh", ["-c", "command -v apt-get >/dev/null 2>&1"], { env, timeoutMs: 10_000 });
@@ -2026,6 +2096,62 @@ function installPostgres(
     }
   }
   return { ok: false, detail: "このOSでは PostgreSQL の自動インストール手順を判定できませんでした。" };
+}
+
+function prependHomebrewPostgres16BinToPath(
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): string | null {
+  const prefix = runner("brew", ["--prefix", "postgresql@16"], { env, timeoutMs: 10_000 });
+  const root = prefix.stdout.trim();
+  if (prefix.status !== 0 || !root) return null;
+  const bin = path.join(root, "bin");
+  const current = env.PATH ?? "";
+  const entries = current.split(path.delimiter).filter(Boolean);
+  if (!entries.some((entry) => path.resolve(entry) === path.resolve(bin))) {
+    env.PATH = [bin, ...entries].join(path.delimiter);
+  }
+  return bin;
+}
+
+function runningOlderHomebrewPostgresServices(
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): string[] {
+  const list = runner("brew", ["services", "list"], { env, timeoutMs: 20_000 });
+  if (list.status !== 0) return [];
+  return list.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/))
+    .filter(([name, status]) =>
+      Boolean(
+        name &&
+          status === "started" &&
+          /^postgresql(?:@\d+)?$/.test(name) &&
+          name !== "postgresql@16"
+      )
+    )
+    .map(([name]) => name!);
+}
+
+function detectLocalPostgresServerMajor(
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): { major: number | null; detail: string } {
+  const r = runner("psql", [
+    "-d",
+    "postgres",
+    "-Atc",
+    "select current_setting('server_version_num')",
+  ], {
+    env,
+    timeoutMs: 10_000,
+  });
+  if (r.status !== 0) return { major: null, detail: summarizeCommandFailure(r) };
+  const num = Number(r.stdout.trim());
+  const major = Math.floor(num / 10000);
+  if (!Number.isFinite(major) || major <= 0) return { major: null, detail: r.stdout.trim() };
+  return { major, detail: r.stdout.trim() };
 }
 
 function runVisibleCommand(

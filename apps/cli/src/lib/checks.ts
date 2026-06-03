@@ -270,6 +270,36 @@ export function checkCodexCli(): CheckResult {
 }
 
 export function checkPostgresVersion(): CheckResult {
+  const server = runVersion("psql", [
+    "-d",
+    "postgres",
+    "-Atc",
+    "select current_setting('server_version_num'), version()",
+  ]);
+  if (server.found && server.status === 0) {
+    const out = server.stdout || server.stderr;
+    const parts = out.split("|");
+    const rawNum = parts[0] ?? "";
+    const full = parts[1] ?? "";
+    const num = Number(rawNum);
+    const major = Math.floor(num / 10000);
+    if (Number.isFinite(major) && major > 0) {
+      if (major < 16) {
+        return {
+          name: "postgres-16",
+          state: "error",
+          message: `接続中の PostgreSQL server は ${major} (16+ 必須)。`,
+          hint: "PostgreSQL 16 以上にアップグレードしてください。",
+        };
+      }
+      return {
+        name: "postgres-16",
+        state: "ok",
+        message: full ? full.split(" on ")[0] ?? `PostgreSQL server ${major}` : `PostgreSQL server ${major}`,
+      };
+    }
+  }
+
   const r = runVersion("psql", ["--version"]);
   if (!r.found) {
     return {
@@ -293,8 +323,8 @@ export function checkPostgresVersion(): CheckResult {
     return {
       name: "postgres-16",
       state: "error",
-      message: `PostgreSQL ${major} を検出 (16+ 必須)。`,
-      hint: "PostgreSQL 16 以上にアップグレードしてください。",
+      message: `psql client ${major} を検出。PostgreSQL server 16+ への接続確認はまだできていません。`,
+      hint: "PostgreSQL 16 以上を起動してください。macOS では `addroid init --install-deps` が Homebrew 経由でセットアップできます。",
     };
   }
   return { name: "postgres-16", state: "ok", message: out };

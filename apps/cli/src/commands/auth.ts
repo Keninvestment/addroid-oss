@@ -644,6 +644,14 @@ function promptPlain(question: string, defaultValue = ""): Promise<string> {
   });
 }
 
+async function confirmPlain(question: string, defaultYes = true): Promise<boolean> {
+  const answer = (await promptPlain(`${question} ${defaultYes ? "Y/n" : "y/N"}`))
+    .trim()
+    .toLowerCase();
+  if (!answer) return defaultYes;
+  return answer === "y" || answer === "yes" || answer === "はい";
+}
+
 async function runAuthLlm(
   parsed: ParsedLlmArgs,
   opts: SlackAuthRunOptions
@@ -1151,6 +1159,21 @@ async function authenticateGithubWithGhCli(opts: {
       code: 1,
       message: `[addroid auth github] GitHub user の取得に失敗しました: ${summarizeGhFailure(userResult)}\n`,
     };
+  }
+  if (!opts.parsed.asJson && process.stdin.isTTY && process.stdout.isTTY) {
+    const approved = await confirmPlain(
+      `GitHub account '${login}' で AdDroid を接続しますか?`,
+      true
+    );
+    if (!approved) {
+      return {
+        ok: false,
+        code: 2,
+        message:
+          "[addroid auth github] GitHub account selection was cancelled.\n" +
+          "  別アカウントを使う場合は `gh auth switch -h github.com -u <username>` を実行してから `addroid connect github` を再実行してください。\n",
+      };
+    }
   }
 
   const connectedAt = opts.now?.() ?? new Date();

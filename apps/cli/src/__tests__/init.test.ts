@@ -523,17 +523,15 @@ test("init --interactive は prompt の回答で .env / config を作る", async
       assert.match(out.stdout, /OAuth callback ではなく Access Token 入力方式/);
       assert.match(out.stdout, /HTTPS callback URL を用意する必要はありません/);
       assert.match(out.stdout, /token 入力後.*Ad Account.*選択/);
+      assert.match(out.stdout, /Meta Token\s+: skipped/);
       assert.deepEqual(authCalls, [
-        ["meta"],
         ["llm", "--provider", "codex"],
       ]);
-      assert.doesNotMatch(out.stdout, /Meta Access Token を今ここで設定しますか/);
-      assert.doesNotMatch(out.stdout, /Meta Access Token を入力して Ad Account を選択しますか/);
       assert.match(out.stdout, /LLM Provider setup:/);
       assert.doesNotMatch(out.stdout, /LLM Provider を初期設定しますか/);
       assert.match(out.stdout, /Ready\./);
       assert.match(out.stdout, /addroid start/);
-      assert.doesNotMatch(out.stdout, /addroid connect meta/);
+      assert.match(out.stdout, /addroid connect meta/);
       assert.doesNotMatch(out.stdout, /addroid accounts select/);
       assert.doesNotMatch(out.stdout, /addroid auth llm --provider openai/);
       assert.doesNotMatch(out.stdout, /addroid init --interactive --reauth-llm/);
@@ -786,7 +784,7 @@ test("init --interactive は Meta Access Token 入力方式を案内し OAuth se
           env,
           isTTY: true,
           prompt: async () => answers.shift() ?? "",
-          confirm: async () => false,
+          confirm: async (question) => question.includes("Meta Access Token"),
           runAuthCommand: async (args) => {
             if (args[0] === "meta") {
               metaRuntimeEnv.push({
@@ -950,6 +948,19 @@ test("init --non-interactive --install-deps は Meta Ads CLI を標準セット�
           runCommand: (cmd, args) => {
             const line = [cmd, ...args].join(" ");
             calls.push(line);
+            if (cmd === "brew" && line === "brew --version") {
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            if (cmd === "brew" && line === "brew --prefix postgresql@16") {
+              return { status: 0, stdout: "/opt/homebrew/opt/postgresql@16\n", stderr: "" };
+            }
+            if (cmd === "brew" && line === "brew services list") {
+              return {
+                status: 0,
+                stdout: "Name          Status  User File\npostgresql@14 started inaba ~/Library/LaunchAgents/homebrew.mxcl.postgresql@14.plist\n",
+                stderr: "",
+              };
+            }
             if (cmd === "brew") {
               return { status: 0, stdout: "", stderr: "" };
             }
@@ -963,7 +974,7 @@ test("init --non-interactive --install-deps は Meta Ads CLI を標準セット�
               return { status: 1, stdout: "", stderr: "" };
             }
             if (cmd === "psql") {
-              return { status: 0, stdout: "", stderr: "" };
+              return { status: 0, stdout: "160010\n", stderr: "" };
             }
             return { status: 1, stdout: "", stderr: "not found" };
           },
@@ -973,6 +984,11 @@ test("init --non-interactive --install-deps は Meta Ads CLI を標準セット�
 
     assert.equal(code, 0, out.stdout + out.stderr);
     assert.match(out.stdout, /Dependency setup:/);
+    if (process.platform === "darwin") {
+      assert.ok(calls.some((c) => c === "brew services stop postgresql@14"));
+      assert.ok(calls.some((c) => c === "brew services start postgresql@16"));
+      assert.match(env.PATH ?? "", /postgresql@16\/bin/);
+    }
     assert.ok(!calls.some((c) => c.includes("tool install meta-ads")));
     assert.doesNotMatch(out.stdout, /Meta Ads CLI/);
     assert.doesNotMatch(fs.readFileSync(envFile, "utf8"), /ADDROID_META_CLI_BIN=/);

@@ -1,14 +1,8 @@
-import {
-  readAddroidConfig,
-  resolveAddroidLanguage,
-  translateMessage,
-  type AddroidLanguage,
-  type AddroidMessageDictionary,
-} from "@addroid/config";
+export type WebLanguage = "ja" | "en";
 
-export type WebLanguage = AddroidLanguage;
+type WebMessageDictionary = Record<WebLanguage, Record<string, string>>;
 
-const WEB_MESSAGES: AddroidMessageDictionary = {
+const WEB_MESSAGES: WebMessageDictionary = {
   ja: {
     "nav.group.overview": "全体",
     "nav.home": "ホーム",
@@ -197,7 +191,12 @@ export function webT(
   key: string,
   values?: Record<string, string | number | null | undefined>
 ): string {
-  return translateMessage(WEB_MESSAGES, language, key, values);
+  const template = WEB_MESSAGES[language]?.[key] ?? WEB_MESSAGES.ja[key] ?? key;
+  if (!values) return template;
+  return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, name) => {
+    const value = values[name];
+    return value === null || value === undefined ? "" : String(value);
+  });
 }
 
 export function webLiteral(language: WebLanguage, value: string): string {
@@ -210,6 +209,7 @@ export function webLiteral(language: WebLanguage, value: string): string {
 export async function resolveWebLanguage(
   acceptLanguage?: string | null
 ): Promise<WebLanguage> {
+  const { readAddroidConfig, resolveAddroidLanguage } = await import("@addroid/config");
   const config = await readAddroidConfig().catch(() => null);
   return resolveAddroidLanguage({
     preference: config?.ui.language,

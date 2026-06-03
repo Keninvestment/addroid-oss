@@ -186,25 +186,33 @@ OSS 利用では token 入力方式を使ってください。
 
 ## クイックスタート
 
+最初に必要なのは Node.js / npm と、この repository checkout だけです。
+`addroid init` は PostgreSQL 16+ / GitHub CLI / Codex CLI などを診断し、
+不足している場合は実行するコマンドを表示してから `Y/n` で確認します。
+推奨設定で進める場合は、内容を確認して Enter または `Y` を押してください。
+
+Meta Access Token、GitHub 認証、LLM Provider は実利用に必要ですが、手元に
+token や API key がない場合はセットアップ中に `n` でスキップできます。
+スキップした接続は後から `addroid connect ...` で追加できます。
+
 ```bash
 # 1. 依存をインストール
 npm install
 
 # 2. 初回セットアップ
-#    PostgreSQL と、Meta / GitHub / LLM Provider の接続を案内します。
+#    PostgreSQL と、Meta / GitHub / LLM Provider の接続を順番に案内します。
 #    初回は repository の local bin 経由で起動し、init 中に `addroid` command wrapper を作成します。
 npm run addroid -- init
 
 # 3. init 後はチャットに自然文で依頼できます
 addroid chat
 
-# 4. init で接続をスキップした場合だけ、後から個別に接続
+# 4. init で接続をスキップした場合だけ、後から個別に接続します
 #    Meta は Ad Account 選択、GitHub は ops repository 作成まで行います。
 #    AI は chat / 改善提案 / 自然言語タスクに必要です。
 addroid connect meta
 addroid connect github
 addroid connect ai
-```
 
 # 5. Web UI や自動実行が動いていない場合だけ、常駐サービスを起動・修復
 addroid start
