@@ -48,7 +48,7 @@ concurrency:
 
 jobs:
   build-test-package:
-    name: build / typecheck / test / package
+    name: ci
     if: ${{ github.event_name != 'push' || github.event.repository.fork == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
