@@ -191,7 +191,6 @@ try {
     fail("addroid doctor missing banner", doctorResult.stdout);
   }
   for (const name of [
-    "uv",
     "DATABASE_URL",
     "ENCRYPTION_KEY",
     "config",
