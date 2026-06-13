@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added — パフォーマンスメトリクス拡充
+
+- `performance_snapshots` に reach / frequency / link click / video view / ranking diagnostics を nullable 指標として追加。
+- `daily_report` / `today_report` の Meta insights 取得・保存・Analyst 入力・日次レポート画面に CTR / CPM / frequency などの拡張メトリクスを追加。
+
 ### Added — 既存環境の簡単アップデート
 
 - `addroid update` コマンドを追加。`git pull` で新しいバージョンを取り込んだあと、
