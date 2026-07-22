@@ -7,6 +7,8 @@ import { resolveAddroidLanguage, resolveAddroidPaths, readAddroidConfig } from "
 import net from "node:net";
 import { formatRss, isProcessAlive, readProcessRssKb, readUpState } from "../lib/processes.js";
 import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
+import { findApplyExecutionLogs, findLatestApplyJob, findLatestErrorLog } from "../lib/apply-db.js";
+import { extractMetaErrorSummary, formatMetaErrorLine } from "../lib/apply-errors.js";
 
 interface DoctorRow {
   ranAt: Date;
@@ -125,8 +127,51 @@ export async function runStatus(args: string[]): Promise<number> {
     lines.push(`  last doctor   : ${language === "en" ? "(no record — run `addroid doctor` to create one)" : "(記録なし — `addroid doctor` を実行すると残ります)"}`);
   }
   lines.push("");
+
+  lines.push(...(await formatLastApplyLines(language)));
+  lines.push("");
   process.stdout.write(lines.join("\n"));
   return 0;
+}
+
+/**
+ * regression fix (#3844): apply_job 失敗時に Meta エラー詳細 (code /
+ * error_subcode / message) を DB 直読なしで確認できるようにする。最新の
+ * apply_job 1 件のサマリと、失敗時は execution_logs から拾った 1 行サマリを表示する。
+ * 詳細な JSON 全文は `addroid logs --apply-job <id>` を案内する。
+ */
+async function formatLastApplyLines(language: "en" | "ja"): Promise<string[]> {
+  const job = await findLatestApplyJob();
+  if (!job) {
+    return [
+      `  last apply    : ${
+        language === "en"
+          ? "(no record — apply_jobs table empty or DB unreachable)"
+          : "(記録なし — apply_jobs 未生成 or DB 未接続)"
+      }`,
+    ];
+  }
+  const lines: string[] = [];
+  const when = (job.finishedAt ?? job.startedAt ?? job.enqueuedAt).toISOString();
+  lines.push(`  last apply    : ${job.id}  state=${job.state}  (${when})`);
+  if (job.state === "failed") {
+    const logs = await findApplyExecutionLogs(job.id);
+    const errorLog = logs ? findLatestErrorLog(logs) : null;
+    const summary = errorLog ? extractMetaErrorSummary(errorLog.payload) : null;
+    if (summary) {
+      lines.push(`                  ${formatMetaErrorLine(summary)}`);
+    } else if (job.errorMessage) {
+      lines.push(`                  ${job.errorMessage}`);
+    }
+    lines.push(
+      `                  ${
+        language === "en"
+          ? `(full detail: \`addroid logs --apply-job ${job.id}\`)`
+          : `(全文: \`addroid logs --apply-job ${job.id}\`)`
+      }`
+    );
+  }
+  return lines;
 }
 
 async function canConnectToWeb(rawUrl: string): Promise<boolean> {
