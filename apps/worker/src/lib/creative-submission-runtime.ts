@@ -124,6 +124,7 @@ export interface CreativeSubmissionInput {
   campaignStartTime?: string;
   campaignStopTime?: string;
   specialAdCategoryCountry?: string[];
+  specialAdCategories?: string[];
   isAdsetBudgetSharingEnabled?: boolean;
   campaignPacingType?: string[];
   smartPromotionType?: string;
@@ -1055,6 +1056,7 @@ export function normalizeCreativeSubmissionInput(args: Record<string, unknown>):
     campaignStartTime: readString(args.campaignStartTime ?? args.campaign_start_time) ?? undefined,
     campaignStopTime: readString(args.campaignStopTime ?? args.campaign_stop_time) ?? undefined,
     specialAdCategoryCountry: readCountries(args.specialAdCategoryCountry ?? args.special_ad_category_country),
+    specialAdCategories: readStringArray(args.specialAdCategories ?? args.special_ad_categories),
     isAdsetBudgetSharingEnabled: readBoolean(args.isAdsetBudgetSharingEnabled ?? args.is_adset_budget_sharing_enabled) ?? undefined,
     campaignPacingType: readStringArray(args.campaignPacingType ?? args.campaign_pacing_type),
     smartPromotionType: readMetaEnumToken(args.smartPromotionType ?? args.smart_promotion_type) ?? undefined,
@@ -2614,10 +2616,20 @@ function buildCreativeSubmissionOperations(input: {
         objective: input.input.objective,
         status: "PAUSED",
         specialAdCategoryCountry: input.input.specialAdCategoryCountry,
+        // Meta の campaign.create は special_ad_categories を必須パラメータとして
+        // 要求する (regulated categories 対応の申告)。cmopk 経由の入稿は住宅/雇用/
+        // 信用等の規制カテゴリを扱わないため、明示指定が無ければ "NONE" 相当の
+        // 空配列を既定値とする (未指定=フィールド欠落だと Meta 側が (#100) invalid
+        // parameter で campaign.create を拒否する)。
+        specialAdCategories: input.input.specialAdCategories ?? [],
         dailyBudget: campaignDailyBudget(input.input),
         lifetimeBudget: campaignLifetimeBudget(input.input),
         adsetBudgetSharing: input.input.adsetBudgetSharing,
-        bidStrategy: input.input.campaignBidStrategy,
+        // 未指定時、Meta は LOWEST_COST_WITH_BID_CAP / TARGET_COST 相当の既定へ倒し
+        // adset.create で bid_amount 必須エラー (#100 subcode=1815857) になる。
+        // 既存の類似キャンペーン (PWS Page Like JP 202606 VALUE-PLDR) と同じ
+        // bid_amount 不要の戦略を明示既定値にする。
+        bidStrategy: input.input.campaignBidStrategy ?? "LOWEST_COST_WITHOUT_CAP",
         spendCap: input.input.campaignSpendCap,
         startTime: input.input.campaignStartTime,
         stopTime: input.input.campaignStopTime,
@@ -2662,8 +2674,21 @@ function buildCreativeSubmissionOperations(input: {
         targeting: buildSubmissionTargeting(input.input),
         pixelId: input.input.pixelId,
         customEventType: input.input.customEventType,
+        // apply-meta-executor の graphAdsetCreatePayload は payload.promotedObject が
+        // 無ければ pixelId/customEventType/pageId から buildPromotedObject() で
+        // promoted_object を合成する。pageId 自体をここで渡していなかったため、
+        // PAGE_LIKES 等 Page 起点の最適化目標で Meta が「広告セットの宣伝対象物が
+        // 未選択」(#100 subcode=1815430) を返して ad.create が失敗していた。
+        pageId: input.input.pageId,
         attributionSpec: input.input.attributionSpec,
-        destinationType: input.input.destinationType,
+        // Meta は PAGE_LIKES 最適化の adset に対し destination_type 未指定だと
+        // 「このキャンペーンの目的では選択されたパフォーマンス目標を使用できません」
+        // (#100 subcode=2490408, blame=optimization_goal) を返す。既存の類似
+        // adset (PWS Page Like JP 28-55 Japanese 202606) は destination_type=ON_PAGE
+        // を明示しているため、PAGE_LIKES 最適化時のみ同じ既定値を補う。
+        destinationType:
+          input.input.destinationType ??
+          (input.input.optimizationGoal === "PAGE_LIKES" ? "ON_PAGE" : undefined),
         frequencyControlSpecs: input.input.frequencyControlSpecs,
         adsetSchedule: input.input.adsetSchedule,
         pacingType: input.input.adsetPacingType,
