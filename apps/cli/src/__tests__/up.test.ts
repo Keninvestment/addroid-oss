@@ -29,6 +29,7 @@ const HERE = path.dirname(__filename);
 const FIXTURES_DIR = path.join(HERE, "fixtures");
 const FAKE_WORKER = path.join(FIXTURES_DIR, "up-fake-worker.mjs");
 const FAKE_NEXT = path.join(FIXTURES_DIR, "up-fake-next.mjs");
+const FAKE_SUPERVISED_WORKER = path.join(FIXTURES_DIR, "up-fake-supervised-worker.mjs");
 // 子プロセスから src/index.ts を tsx 経由で起動する。bin/addroid.cjs を
 // 経由すると `dist/index.mjs` が古いままだとテスト中の `src/commands/up.ts`
 // 変更が反映されないため、本テストは tsx で TypeScript ソースを直接実行する。
@@ -154,6 +155,118 @@ describe("addroid up", () => {
       assert.match(out.stdout, /Usage:\s+addroid up/);
     });
   });
+
+  it("startup guard blocks a new run when health owns a live generation-2 PID", async () => {
+    await withCleanHome(
+      { DATABASE_URL: "postgres://fixture.invalid/addroid" },
+      async (home) => {
+        fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+        const runDir = path.join(home, "run");
+        fs.mkdirSync(runDir, { recursive: true });
+        const deadParentPid = 99_999_991;
+        fs.writeFileSync(
+          path.join(runDir, "up.json"),
+          JSON.stringify({
+            startedAt: new Date().toISOString(),
+            parentPid: deadParentPid,
+            workerPid: 99_999_992,
+            webUrl: "http://127.0.0.1:1",
+            cwd: process.cwd(),
+            mode: "separate-worker",
+            webStatus: "running",
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(
+          path.join(runDir, "worker-health.json"),
+          JSON.stringify({
+            version: 1,
+            phase: "ready",
+            supervisorPid: deadParentPid,
+            generation: 2,
+            workerPid: process.pid,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            lastAttemptAt: new Date().toISOString(),
+            readyAt: new Date().toISOString(),
+            lastHeartbeatAt: new Date().toISOString(),
+            restartAttempts: 1,
+            maxRestartAttempts: 5,
+            heartbeatTimeoutMs: 20_000,
+            nextRestartAt: null,
+            lastFailure: null,
+          }),
+          "utf8"
+        );
+
+        const { code, out } = await capture(() => runUp([]));
+        assert.equal(code, 1);
+        assert.match(out.stderr, /既に起動済み/);
+        assert.match(out.stderr, new RegExp(`worker pid: ${process.pid}`));
+        const retained = JSON.parse(fs.readFileSync(path.join(runDir, "up.json"), "utf8"));
+        assert.equal(retained.workerPid, 99_999_992, "guard must not rewrite state on read");
+      }
+    );
+  });
+
+  it("startup guard falls back to a live retained PID when matching backoff health has no worker PID", async () => {
+    await withCleanHome(
+      { DATABASE_URL: "postgres://fixture.invalid/addroid" },
+      async (home) => {
+        fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+        const runDir = path.join(home, "run");
+        fs.mkdirSync(runDir, { recursive: true });
+        const deadParentPid = 99_999_991;
+        fs.writeFileSync(
+          path.join(runDir, "up.json"),
+          JSON.stringify({
+            startedAt: new Date().toISOString(),
+            parentPid: deadParentPid,
+            workerPid: process.pid,
+            webUrl: "http://127.0.0.1:1",
+            cwd: process.cwd(),
+            mode: "separate-worker",
+            webStatus: "running",
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(
+          path.join(runDir, "worker-health.json"),
+          JSON.stringify({
+            version: 1,
+            phase: "backoff",
+            supervisorPid: deadParentPid,
+            generation: 2,
+            workerPid: null,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            lastAttemptAt: new Date().toISOString(),
+            readyAt: null,
+            lastHeartbeatAt: null,
+            restartAttempts: 1,
+            maxRestartAttempts: 5,
+            heartbeatTimeoutMs: 20_000,
+            nextRestartAt: new Date(Date.now() + 1_000).toISOString(),
+            lastFailure: {
+              at: new Date().toISOString(),
+              reason: "ready-timeout",
+              message: "fixture worker is retiring",
+              exitCode: null,
+              signal: "SIGTERM",
+            },
+          }),
+          "utf8"
+        );
+
+        const { code, out } = await capture(() => runUp([]));
+        assert.equal(code, 1);
+        assert.match(out.stderr, /既に起動済み/);
+        assert.match(out.stderr, new RegExp(`worker pid: ${process.pid}`));
+        const retained = JSON.parse(fs.readFileSync(path.join(runDir, "up.json"), "utf8"));
+        assert.equal(retained.workerPid, process.pid, "guard must preserve the live retiring PID");
+      }
+    );
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -208,10 +321,10 @@ interface SpawnedUp {
   stderr: { value: string };
 }
 
-function spawnUp(env: NodeJS.ProcessEnv): SpawnedUp {
+function spawnUp(env: NodeJS.ProcessEnv, extraArgs: string[] = []): SpawnedUp {
   const stdout = { value: "" };
   const stderr = { value: "" };
-  const child = spawn(TSX_BIN, [SRC_ENTRY, "up"], {
+  const child = spawn(TSX_BIN, [SRC_ENTRY, "up", ...extraArgs], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -342,6 +455,89 @@ describe("addroid up — worker startup + shutdown smoke", () => {
             /* ignore */
           }
         }
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    }
+  );
+});
+
+describe("addroid up --separate-worker — supervised runtime fixture", () => {
+  it(
+    "direct runtime death is detected, generation 2 recovers, and one scheduled fixture completion is recorded",
+    { timeout: 60_000 },
+    async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-up-supervisor-"));
+      const pidFile = path.join(home, "run", "up.json");
+      const healthFile = path.join(home, "run", "worker-health.json");
+      const eventsFile = path.join(home, "worker-events.jsonl");
+      const jobEvidenceFile = path.join(home, "scheduled-job.json");
+      const port = await pickFreePort();
+      fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ADDROID_HOME: home,
+        DATABASE_URL: "postgres://fixture.invalid/addroid", // fixture never connects
+        ADDROID_WEB_HOSTNAME: "127.0.0.1",
+        ADDROID_WEB_PORT: String(port),
+        ADDROID_TEST_NEXT_FACTORY_PATH: FAKE_NEXT,
+        ADDROID_TEST_WORKER_ENTRY_PATH: FAKE_SUPERVISED_WORKER,
+        ADDROID_TEST_SUPERVISOR_EVENTS: eventsFile,
+        ADDROID_TEST_SCHEDULED_JOB_EVIDENCE: jobEvidenceFile,
+        ADDROID_TEST_DIE_FIRST_GENERATION: "1",
+        ADDROID_WORKER_READY_TIMEOUT_MS: "500",
+        ADDROID_WORKER_HEARTBEAT_TIMEOUT_MS: "500",
+        ADDROID_WORKER_RESTART_BACKOFF_BASE_MS: "20",
+        ADDROID_WORKER_RESTART_BACKOFF_MAX_MS: "20",
+        ADDROID_WORKER_MAX_RESTART_ATTEMPTS: "3",
+        ADDROID_WORKER_STABLE_RESET_MS: "1000",
+      };
+      const up = spawnUp(env, ["--separate-worker"]);
+      try {
+        const health = await waitFor(
+          () => {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(healthFile, "utf8")) as {
+                generation?: number;
+                phase?: string;
+                workerPid?: number;
+              };
+              return parsed.generation === 2 && parsed.phase === "ready" ? parsed : null;
+            } catch {
+              return null;
+            }
+          },
+          { timeoutMs: 30_000, label: "generation 2 ready" }
+        );
+        const pidState = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
+          parentPid: number;
+          workerPid?: number;
+          mode: string;
+        };
+        assert.equal(pidState.mode, "separate-worker");
+        assert.ok(health.workerPid && health.workerPid > 0);
+        assert.notEqual(health.workerPid, pidState.parentPid, "worker PID must be the direct runtime");
+
+        const job = JSON.parse(fs.readFileSync(jobEvidenceFile, "utf8")) as {
+          jobId: string;
+          generation: number;
+          status: string;
+        };
+        assert.deepEqual(job, {
+          jobId: "scheduled-fixture-1",
+          generation: 2,
+          status: "completed",
+        });
+        const events = fs.readFileSync(eventsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        assert.equal(events.filter((event) => event.event === "scheduled-job-completed").length, 1);
+
+        process.kill(pidState.parentPid, "SIGTERM");
+        const exit = await up.exited;
+        assert.equal(exit.code, 0, `stdout:\n${up.stdout.value}\nstderr:\n${up.stderr.value}`);
+        assert.equal(fs.existsSync(pidFile), false);
+        const stopped = JSON.parse(fs.readFileSync(healthFile, "utf8")) as { phase: string };
+        assert.equal(stopped.phase, "stopped");
+      } finally {
+        if (up.child.exitCode === null && up.child.signalCode === null) up.child.kill("SIGKILL");
         fs.rmSync(home, { recursive: true, force: true });
       }
     }

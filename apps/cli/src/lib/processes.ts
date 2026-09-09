@@ -45,10 +45,12 @@ export async function writeUpState(
   paths: AddroidPaths = resolveAddroidPaths()
 ): Promise<void> {
   await fs.mkdir(path.dirname(paths.pidFile), { recursive: true });
-  await fs.writeFile(paths.pidFile, JSON.stringify(state, null, 2), {
+  const temporary = `${paths.pidFile}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(state, null, 2), {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fs.rename(temporary, paths.pidFile);
 }
 
 export async function clearUpState(
