@@ -1359,6 +1359,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
           jobId: job.id,
           insightsProvider: dailyReportInsights,
           mutationExecutor: automationMutationSelection.executor,
+          githubAdapter: getGithubAdapter(),
           env: process.env,
           fallbackTimeZone: userTimeZone,
         });
