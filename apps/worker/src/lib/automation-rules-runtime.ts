@@ -48,6 +48,7 @@ export interface RunAutomationRulesOnceOptions {
   fallbackTimeZone?: string | null;
   ruleKey?: string;
   now?: Date;
+  scheduledFor?: string;
 }
 
 export interface ScheduledAutomationRulePayload {
@@ -55,6 +56,7 @@ export interface ScheduledAutomationRulePayload {
   ruleKey?: string;
   requestedBy?: string;
   requestedAt?: string;
+  scheduledFor: string;
 }
 
 export interface AutomationRulesRunSummary {
@@ -404,6 +406,7 @@ export async function scheduleAutomationRuleNextRun(opts: {
       ruleKey: rule.key,
       requestedBy: "system:automation-rule-scheduler",
       requestedAt: new Date().toISOString(),
+      scheduledFor: nextRunAt.toISOString(),
     } satisfies ScheduledAutomationRulePayload,
     { startAfter: nextRunAt, singletonKey: rule.id }
   );
@@ -609,15 +612,14 @@ function isProposalActionType(actionType: string): boolean {
 function proposalOperationIdentity(
   rule: AutomationRuleYaml,
   accountKey: string,
-  now: Date,
+  scheduledForValue?: string,
 ): { key: string; scheduledFor: Date } {
-  let scheduledFor = new Date(now);
-  scheduledFor.setSeconds(0, 0);
-  if (rule.schedule) {
-    scheduledFor = cronParser.parseExpression(rule.schedule, {
-      currentDate: new Date(now.getTime() + 60_000),
-      tz: resolveCronScheduleTimeZone(),
-    }).prev().toDate();
+  if (!scheduledForValue) {
+    throw new Error("automation proposal scheduledFor is required for retry identity");
+  }
+  const scheduledFor = new Date(scheduledForValue);
+  if (Number.isNaN(scheduledFor.getTime())) {
+    throw new Error("automation proposal scheduledFor is invalid");
   }
   return {
     key: createHash("sha256")
@@ -761,7 +763,11 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
       if (!input.githubAdapter) {
         throw new Error("automation proposal GitHub adapter is not configured");
       }
-      const operation = proposalOperationIdentity(input.rule, account.key, input.now);
+      const operation = proposalOperationIdentity(
+        input.rule,
+        account.key,
+        input.scheduledFor,
+      );
       const receipt = await createAutomationProposal({
         prisma: input.prisma,
         githubAdapter: input.githubAdapter,
@@ -872,6 +878,16 @@ async function loadSubjectsForRule(input: {
     input.fallbackTimeZone,
   );
   const metricDates = metricDatesForWindow(input.rule, input.now ?? new Date(), timeZone);
+  if (metricDates.length > 1) {
+    const nonAdditiveFields = Object.values(input.rule.metrics ?? {})
+      .map((metric) => metric.field)
+      .filter((field) => field === "frequency" || field === "reach");
+    if (nonAdditiveFields.length > 0) {
+      throw new Error(
+        `multi-day automation window does not support non-additive metric: ${[...new Set(nonAdditiveFields)].join(", ")}`,
+      );
+    }
+  }
   const fetched = await Promise.all(metricDates.map((metricDate) =>
     input.insightsProvider.fetchInsights({
       accountKey: input.account.key,
@@ -926,18 +942,14 @@ function aggregateInsightsRows(rows: DailyReportInsightsRow[]): DailyReportInsig
       continue;
     }
     const totalImpressions = current.impressions + row.impressions;
-    const frequency = totalImpressions > 0
-      ? (((current.frequency ?? 0) * current.impressions) +
-          ((row.frequency ?? 0) * row.impressions)) / totalImpressions
-      : null;
     grouped.set(key, {
       ...current,
       spendMicros: current.spendMicros + row.spendMicros,
       impressions: totalImpressions,
       clicks: current.clicks + row.clicks,
       conversions: current.conversions + row.conversions,
-      frequency,
-      reach: sumNullable(current.reach, row.reach),
+      frequency: null,
+      reach: null,
       linkClicks: sumNullable(current.linkClicks, row.linkClicks),
       videoThruPlays: sumNullable(current.videoThruPlays, row.videoThruPlays),
       video3SecViews: sumNullable(current.video3SecViews, row.video3SecViews),
