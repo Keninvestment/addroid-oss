@@ -125,8 +125,11 @@ export async function runUp(args: string[]): Promise<number> {
     ? await readWorkerHealth(paths)
     : null;
   const effectiveWorkerPid =
-    existingHealth && existing && existingHealth.supervisorPid === existing.parentPid
-      ? existingHealth.workerPid ?? undefined
+    existingHealth &&
+    existing &&
+    existingHealth.supervisorPid === existing.parentPid &&
+    existingHealth.workerPid
+      ? existingHealth.workerPid
       : existing?.workerPid;
   if (
     existing &&

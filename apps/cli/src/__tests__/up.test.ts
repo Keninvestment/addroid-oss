@@ -208,6 +208,65 @@ describe("addroid up", () => {
       }
     );
   });
+
+  it("startup guard falls back to a live retained PID when matching backoff health has no worker PID", async () => {
+    await withCleanHome(
+      { DATABASE_URL: "postgres://fixture.invalid/addroid" },
+      async (home) => {
+        fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+        const runDir = path.join(home, "run");
+        fs.mkdirSync(runDir, { recursive: true });
+        const deadParentPid = 99_999_991;
+        fs.writeFileSync(
+          path.join(runDir, "up.json"),
+          JSON.stringify({
+            startedAt: new Date().toISOString(),
+            parentPid: deadParentPid,
+            workerPid: process.pid,
+            webUrl: "http://127.0.0.1:1",
+            cwd: process.cwd(),
+            mode: "separate-worker",
+            webStatus: "running",
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(
+          path.join(runDir, "worker-health.json"),
+          JSON.stringify({
+            version: 1,
+            phase: "backoff",
+            supervisorPid: deadParentPid,
+            generation: 2,
+            workerPid: null,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            lastAttemptAt: new Date().toISOString(),
+            readyAt: null,
+            lastHeartbeatAt: null,
+            restartAttempts: 1,
+            maxRestartAttempts: 5,
+            heartbeatTimeoutMs: 20_000,
+            nextRestartAt: new Date(Date.now() + 1_000).toISOString(),
+            lastFailure: {
+              at: new Date().toISOString(),
+              reason: "ready-timeout",
+              message: "fixture worker is retiring",
+              exitCode: null,
+              signal: "SIGTERM",
+            },
+          }),
+          "utf8"
+        );
+
+        const { code, out } = await capture(() => runUp([]));
+        assert.equal(code, 1);
+        assert.match(out.stderr, /既に起動済み/);
+        assert.match(out.stderr, new RegExp(`worker pid: ${process.pid}`));
+        const retained = JSON.parse(fs.readFileSync(path.join(runDir, "up.json"), "utf8"));
+        assert.equal(retained.workerPid, process.pid, "guard must preserve the live retiring PID");
+      }
+    );
+  });
 });
 
 // -----------------------------------------------------------------------------

@@ -504,12 +504,14 @@ export class WorkerSupervisor {
     if (this.heartbeatTimer) this.timers.clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = null;
     const failedChild = this.child;
+    let retiringWorkerPid: number | null = null;
     if (
       failedChild &&
       failedChild.exitCode === null &&
       failedChild.signalCode === null &&
       failedChild.pid
     ) {
+      retiringWorkerPid = failedChild.pid;
       this.retiringChild = failedChild;
       this.retireDeadlineMs = this.now() + this.config.shutdownTimeoutMs;
       this.retireKillSent = false;
@@ -534,7 +536,7 @@ export class WorkerSupervisor {
     if (previousAttempts >= this.config.maxRestartAttempts) {
       this.setSnapshot({
         phase: "exhausted",
-        workerPid: null,
+        workerPid: retiringWorkerPid,
         restartAttempts: previousAttempts,
         nextRestartAt: null,
         lastFailure: failure,
@@ -545,7 +547,7 @@ export class WorkerSupervisor {
     const delayMs = restartBackoffMs(attempts, this.config);
     this.setSnapshot({
       phase: "backoff",
-      workerPid: null,
+      workerPid: retiringWorkerPid,
       restartAttempts: attempts,
       nextRestartAt: new Date(atMs + delayMs).toISOString(),
       lastFailure: failure,

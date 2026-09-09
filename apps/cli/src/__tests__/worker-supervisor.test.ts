@@ -204,6 +204,7 @@ describe("worker supervisor", () => {
       await h.supervisor.start();
       h.clock.advance(100);
       assert.equal(h.supervisor.getSnapshot().lastFailure?.reason, "ready-timeout");
+      assert.equal(h.supervisor.getSnapshot().workerPid, h.children[0]!.pid);
       assert.deepEqual(h.children[0]!.killCalls, ["SIGTERM"]);
       h.children[0]!.exit(null, "SIGTERM");
       h.clock.advance(10);
