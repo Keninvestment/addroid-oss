@@ -4,6 +4,7 @@ import type {
   CreatePullRequestFile,
   GithubAdapter,
 } from "@addroid/github-adapter";
+import { createHash } from "node:crypto";
 import type { AutomationMetricSubject } from "@addroid/queue";
 import type { AutomationRuleYaml } from "@addroid/ops-schemas";
 
@@ -70,7 +71,6 @@ export async function createAutomationProposal(opts: {
     proposalOnly: true,
     autoApply: false,
     autoMerge: false,
-    runId: opts.runId,
     operationKey: opts.operationKey,
     ruleId: opts.rule.id,
     actionType: opts.rule.action.type,
@@ -89,9 +89,10 @@ export async function createAutomationProposal(opts: {
     })),
   };
   const content = `${JSON.stringify(proposal, null, 2)}\n`;
+  const artifactDigest = createHash("sha256").update(content).digest("hex").slice(0, 20);
   const diff = fullFileDiff(content);
   const file: CreatePullRequestFile = { path: filePath, action: "create", diff };
-  const title = proposalTitle(opts.rule, opts.accountKey, opts.operationKey);
+  const title = proposalTitle(opts.rule, opts.accountKey, opts.operationKey, artifactDigest);
   const request: CreatePullRequestInput = {
     spec: {
       owner: repo.owner,
@@ -107,13 +108,29 @@ export async function createAutomationProposal(opts: {
   const existing = await findExistingProposal(
     opts.githubAdapter,
     request.spec,
+    opts.operationKey,
     title,
   );
   const created = existing ?? await opts.githubAdapter.createPullRequest(request).catch(async (error) => {
-    const recovered = await findExistingProposal(opts.githubAdapter, request.spec, title);
+    const recovered = await findExistingProposal(
+      opts.githubAdapter,
+      request.spec,
+      opts.operationKey,
+      title,
+    );
     if (recovered) return recovered;
     throw error;
   });
+
+  const stored = await opts.prisma.githubPullRequest.findUnique({
+    where: { repoId_number: { repoId: repo.id, number: created.number } },
+    select: { headSha: true },
+  });
+  if (stored?.headSha && stored.headSha !== created.headSha) {
+    throw new Error(
+      `automation proposal existing PR head changed: expected ${stored.headSha}, got ${created.headSha}`,
+    );
+  }
 
   const preview = {
     files: [
@@ -181,17 +198,35 @@ function proposalTitle(
   rule: AutomationRuleYaml,
   accountKey: string,
   operationKey: string,
+  artifactDigest: string,
 ): string {
-  return `[addroid] Automation proposal: ${rule.id} (${accountKey}) [op:${operationKey}]`;
+  return `[addroid] Automation proposal: ${rule.id} (${accountKey}) [op:${operationKey}] [artifact:${artifactDigest}]`;
 }
 
 async function findExistingProposal(
   adapter: GithubAdapter,
   spec: { owner: string; name: string; defaultBranch: string },
-  title: string,
+  operationKey: string,
+  expectedTitle: string,
 ): Promise<{ number: number; htmlUrl: string; headSha: string } | null> {
   const result = await adapter.pollPullRequests(spec, {});
-  return result.pullRequests.find((pr) => pr.title === title) ?? null;
+  const operationMarker = `[op:${operationKey}]`;
+  const matches = result.pullRequests.filter((pr) => pr.title.includes(operationMarker));
+  if (matches.length === 0) return null;
+  if (matches.length !== 1) {
+    throw new Error(`automation proposal operation has ${matches.length} matching PRs`);
+  }
+  const [match] = matches;
+  if (!match || match.state !== "open") {
+    throw new Error(`automation proposal existing PR is not open`);
+  }
+  if (match.title !== expectedTitle) {
+    throw new Error("automation proposal existing PR artifact does not match current evaluation");
+  }
+  if (!match.headSha.trim()) {
+    throw new Error("automation proposal existing PR has no head SHA");
+  }
+  return match;
 }
 
 function proposalBody(

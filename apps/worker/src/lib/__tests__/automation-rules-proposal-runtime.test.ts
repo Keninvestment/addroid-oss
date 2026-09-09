@@ -3,10 +3,54 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CreatePullRequestInput, GithubAdapter } from "@addroid/github-adapter";
-import { runAutomationRulesOnce } from "../automation-rules-runtime.js";
+import type {
+  CreatePullRequestInput,
+  GithubAdapter,
+  PullRequestSummary,
+} from "@addroid/github-adapter";
+import {
+  runAutomationRulesOnce,
+  scheduleAutomationRuleNextRun,
+} from "../automation-rules-runtime.js";
 
 const NOW = new Date("2026-09-09T06:00:00.000Z");
+
+test("scheduler persists the exact planned slot in the retry payload", async () => {
+  const sends: Array<{ payload: Record<string, unknown>; startAfter: Date }> = [];
+  const prisma = {
+    automationRule: {
+      async findFirst() {
+        return {
+          id: "rule_1",
+          key: "rule_key",
+          enabled: true,
+          schedule: "*/15 * * * *",
+          scheduledJobId: null,
+        };
+      },
+      async update() {},
+    },
+  };
+  const boss = {
+    async send(_name: string, payload: Record<string, unknown>, options: { startAfter: Date }) {
+      sends.push({ payload, startAfter: options.startAfter });
+      return "job_1";
+    },
+    async cancel() {},
+  };
+
+  const result = await scheduleAutomationRuleNextRun({
+    prisma: prisma as never,
+    boss: boss as never,
+    workspaceId: "ws_1",
+    ruleId: "rule_1",
+    now: new Date("2026-09-09T06:07:12.000Z"),
+  });
+
+  assert.ok(result);
+  assert.equal(sends[0]?.payload.scheduledFor, result.nextRunAt.toISOString());
+  assert.equal(sends[0]?.startAfter.toISOString(), result.nextRunAt.toISOString());
+});
 
 test("proposal rule creates one proposal-only GitOps PR and stores a receipt", async () => {
   const fixture = makeFixture("proposal_pr", 1500);
@@ -26,6 +70,7 @@ test("proposal rule creates one proposal-only GitOps PR and stores a receipt", a
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -66,6 +111,7 @@ test("proposal rule with no matching target records valid no_target without a PR
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -91,6 +137,7 @@ test("unknown action remains an audited unsupported skipped run", async () => {
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -115,6 +162,7 @@ test("GitHub failure is proposal_failed and never becomes false success", async 
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "failed");
@@ -140,6 +188,7 @@ test("proposal cooldown suppresses a duplicate target and records reasoned no_ta
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -178,6 +227,7 @@ test("proposal target limit is applied before creating the single PR", async () 
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.actionsPlanned, 2);
@@ -209,6 +259,7 @@ test("report_only proposal action never opens a GitHub PR", async () => {
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -233,6 +284,7 @@ test("last_7d fetches and aggregates all seven dates before proposing", async ()
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     });
 
     assert.equal(summary.status, "succeeded");
@@ -265,6 +317,7 @@ test("stable operation key recovers GitHub success after DB receipt failure with
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: "2026-09-09T06:00:00.000Z",
     };
 
     const first = await runAutomationRulesOnce(options);
@@ -275,6 +328,175 @@ test("stable operation key recovers GitHub success after DB receipt failure with
     assert.equal(github.created.length, 1);
     const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
     assert.equal(evaluation.outcome, "proposal_created");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("scheduled slot keeps recovery identity stable when retry time crosses a minute", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    let failUpsert = true;
+    fixture.prisma.githubPullRequest.upsert = async () => {
+      if (failUpsert) {
+        failUpsert = false;
+        throw new Error("fixture DB receipt failure");
+      }
+      return { id: "pr_1" };
+    };
+    const github = new FakeGithubAdapter();
+    const base = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      scheduledFor: "2026-09-09T06:00:00.000Z",
+    };
+
+    const first = await runAutomationRulesOnce({ ...base, now: new Date("2026-09-09T06:00:00.000Z") });
+    const second = await runAutomationRulesOnce({ ...base, now: new Date("2026-09-09T06:01:01.000Z") });
+
+    assert.equal(first.status, "failed");
+    assert.equal(second.status, "succeeded");
+    assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing operation PR with different proposal artifact fails closed", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+      scheduledFor: NOW.toISOString(),
+    };
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    fixture.insightsProvider.fetchInsights = async () => ({
+      current: [insightRow("campaign_1", 2500)],
+      prior: [],
+    });
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /artifact does not match/);
+    assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("closed or merged operation PR cannot be recovered as an open proposal", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+      scheduledFor: NOW.toISOString(),
+    };
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    for (const state of ["closed", "merged"] as const) {
+      github.state = state;
+      const retry = await runAutomationRulesOnce(options);
+      assert.equal(retry.status, "failed");
+      assert.match(retry.errors.join("\n"), /existing PR is not open/);
+    }
+    assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("proposal execution without a persisted scheduled slot fails closed", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce({
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    });
+
+    assert.equal(summary.status, "failed");
+    assert.match(summary.errors.join("\n"), /scheduledFor is required for retry identity/);
+    assert.equal(github.created.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing operation PR head drift from stored receipt fails closed", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+      scheduledFor: NOW.toISOString(),
+    };
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    fixture.prisma.githubPullRequest.findUnique = async () => ({ headSha: "old-head-sha" });
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /existing PR head changed/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("multi-day frequency rule fails closed instead of aggregating daily frequency", async () => {
+  const fixture = makeFixture("proposal_pr", 1500, "last_7d");
+  try {
+    const rulePath = path.join(fixture.rootDir, "workflows/automation-rules.yaml");
+    fs.writeFileSync(
+      rulePath,
+      fs.readFileSync(rulePath, "utf8")
+        .replace("field: spend", "field: frequency")
+        .replace("metric: spend", "metric: spend"),
+      "utf8",
+    );
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce({
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    });
+
+    assert.equal(summary.status, "failed");
+    assert.match(summary.errors.join("\n"), /non-additive metric: frequency/);
+    assert.equal(fixture.state.requestedDates.length, 0);
+    assert.equal(github.created.length, 0);
   } finally {
     fixture.cleanup();
   }
@@ -292,6 +514,7 @@ test("concurrent runs for the same scheduled slot converge on one proposal PR", 
       githubAdapter: github as unknown as GithubAdapter,
       env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
       now: NOW,
+      scheduledFor: NOW.toISOString(),
     };
 
     const [left, right] = await Promise.all([
@@ -405,6 +628,9 @@ rules:
       },
     },
     githubPullRequest: {
+      async findUnique(): Promise<{ headSha: string } | null> {
+        return null;
+      },
       async upsert() {
         return { id: "pr_1" };
       },
@@ -448,6 +674,7 @@ function insightRow(nodeKey: string, spend: number) {
 
 class FakeGithubAdapter {
   readonly created: CreatePullRequestInput[] = [];
+  state: PullRequestSummary["state"] = "open";
   constructor(private readonly error?: Error) {}
 
   async pollPullRequests() {
@@ -456,7 +683,7 @@ class FakeGithubAdapter {
       pullRequests: this.created.map((pr, index) => ({
         number: 42 + index,
         title: pr.title,
-        state: "open" as const,
+        state: this.state,
         headSha: `abc${index}`,
         baseRef: pr.baseRef ?? pr.spec.defaultBranch,
         htmlUrl: `https://github.com/${pr.spec.owner}/${pr.spec.name}/pull/${42 + index}`,
