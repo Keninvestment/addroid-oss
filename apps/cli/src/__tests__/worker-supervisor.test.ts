@@ -486,12 +486,24 @@ describe("worker supervisor", () => {
       assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
       assert.equal(h.supervisor.getSnapshot().workerPid, initialPid);
 
+      const retainedHealth = fixtureSnapshot({
+        supervisorPid: process.pid,
+        generation: 2,
+        workerPid: process.pid,
+        phase: "exhausted",
+      });
+      fs.writeFileSync(h.paths.workerHealthFile, JSON.stringify(retainedHealth), { mode: 0o600 });
+
       process.stderr.write = ((chunk: string | Uint8Array) => {
         stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
         return true;
       }) as typeof process.stderr.write;
       assert.equal(await finalizeSeparateWorkerState(h.paths, stopped, 0), 1);
       assert.equal(fs.existsSync(h.paths.pidFile), true);
+      const retainedState = JSON.parse(fs.readFileSync(h.paths.pidFile, "utf8")) as {
+        workerPid?: number;
+      };
+      assert.equal(retainedState.workerPid, process.pid);
       assert.match(stderr, /preserving pid\/health state/);
     } finally {
       process.stderr.write = originalWrite;

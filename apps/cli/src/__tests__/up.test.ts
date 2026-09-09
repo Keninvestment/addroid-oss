@@ -155,6 +155,59 @@ describe("addroid up", () => {
       assert.match(out.stdout, /Usage:\s+addroid up/);
     });
   });
+
+  it("startup guard blocks a new run when health owns a live generation-2 PID", async () => {
+    await withCleanHome(
+      { DATABASE_URL: "postgres://fixture.invalid/addroid" },
+      async (home) => {
+        fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+        const runDir = path.join(home, "run");
+        fs.mkdirSync(runDir, { recursive: true });
+        const deadParentPid = 99_999_991;
+        fs.writeFileSync(
+          path.join(runDir, "up.json"),
+          JSON.stringify({
+            startedAt: new Date().toISOString(),
+            parentPid: deadParentPid,
+            workerPid: 99_999_992,
+            webUrl: "http://127.0.0.1:1",
+            cwd: process.cwd(),
+            mode: "separate-worker",
+            webStatus: "running",
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(
+          path.join(runDir, "worker-health.json"),
+          JSON.stringify({
+            version: 1,
+            phase: "ready",
+            supervisorPid: deadParentPid,
+            generation: 2,
+            workerPid: process.pid,
+            startedAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            lastAttemptAt: new Date().toISOString(),
+            readyAt: new Date().toISOString(),
+            lastHeartbeatAt: new Date().toISOString(),
+            restartAttempts: 1,
+            maxRestartAttempts: 5,
+            heartbeatTimeoutMs: 20_000,
+            nextRestartAt: null,
+            lastFailure: null,
+          }),
+          "utf8"
+        );
+
+        const { code, out } = await capture(() => runUp([]));
+        assert.equal(code, 1);
+        assert.match(out.stderr, /既に起動済み/);
+        assert.match(out.stderr, new RegExp(`worker pid: ${process.pid}`));
+        const retained = JSON.parse(fs.readFileSync(path.join(runDir, "up.json"), "utf8"));
+        assert.equal(retained.workerPid, 99_999_992, "guard must not rewrite state on read");
+      }
+    );
+  });
 });
 
 // -----------------------------------------------------------------------------

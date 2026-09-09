@@ -34,7 +34,7 @@ import {
   type UpMode,
   type UpState,
 } from "../lib/processes.js";
-import { WorkerSupervisor } from "../lib/worker-supervisor.js";
+import { WorkerSupervisor, readWorkerHealth } from "../lib/worker-supervisor.js";
 
 interface ParsedArgs {
   mode: UpMode;
@@ -121,7 +121,19 @@ export async function runUp(args: string[]): Promise<number> {
   }
 
   const existing = await readUpState(paths);
-  if (existing && (isProcessAlive(existing.parentPid) || isProcessAlive(existing.webPid) || isProcessAlive(existing.workerPid))) {
+  const existingHealth = existing?.mode === "separate-worker"
+    ? await readWorkerHealth(paths)
+    : null;
+  const effectiveWorkerPid =
+    existingHealth && existing && existingHealth.supervisorPid === existing.parentPid
+      ? existingHealth.workerPid ?? undefined
+      : existing?.workerPid;
+  if (
+    existing &&
+    (isProcessAlive(existing.parentPid) ||
+      isProcessAlive(existing.webPid) ||
+      isProcessAlive(effectiveWorkerPid))
+  ) {
     process.stderr.write(
       [
         "[addroid up] 既に起動済みです。",
@@ -133,8 +145,8 @@ export async function runUp(args: string[]): Promise<number> {
         `  web pid   : ${existing.webPid ?? "(in parent)"}${
           existing.webPid && !isProcessAlive(existing.webPid) ? " (not running)" : ""
         }`,
-        `  worker pid: ${existing.workerPid ?? "(in parent)"}${
-          existing.workerPid && !isProcessAlive(existing.workerPid) ? " (not running)" : ""
+        `  worker pid: ${effectiveWorkerPid ?? "(in parent)"}${
+          effectiveWorkerPid && !isProcessAlive(effectiveWorkerPid) ? " (not running)" : ""
         }`,
         "  停止するには別ターミナルで `addroid down` を実行してください。",
         "",
@@ -628,6 +640,20 @@ export async function finalizeSeparateWorkerState(
   requestedExitCode: number
 ): Promise<number> {
   if (!workerStopped) {
+    const [retainedState, retainedHealth] = await Promise.all([
+      readUpState(paths).catch(() => null),
+      readWorkerHealth(paths),
+    ]);
+    if (
+      retainedState?.mode === "separate-worker" &&
+      retainedHealth?.supervisorPid === retainedState.parentPid &&
+      retainedHealth.workerPid
+    ) {
+      await writeUpState(
+        { ...retainedState, workerPid: retainedHealth.workerPid },
+        paths
+      ).catch(() => undefined);
+    }
     process.stderr.write(
       "[addroid up] worker stop could not be confirmed; preserving pid/health state for readback.\n"
     );
