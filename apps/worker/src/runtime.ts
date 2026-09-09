@@ -149,6 +149,8 @@ export interface StartWorkerOptions {
    * 共有モードでは CLI 側がシグナルを管理するので `false`。
    */
   installSignalHandlers?: boolean;
+  /** PgBoss runtime errors are reported here so a supervisor can restart the process. */
+  onFatalError?: (error: Error) => void;
 }
 
 export interface WorkerLogger {
@@ -180,6 +182,16 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
 
   log.info("[worker] starting pg-boss…");
   const boss = await bootPgBoss({ databaseUrl });
+  // PgBoss emits EventEmitter `error` events for connection loss. The
+  // supervised entrypoint turns this into an intentional, observable fatal
+  // exit. Shared mode preserves the existing fail-fast owner semantics.
+  if (opts.onFatalError) {
+    boss.on("error", (raw: unknown) => {
+      const error = raw instanceof Error ? raw : new Error(String(raw));
+      log.error("[worker] pg-boss runtime error; supervisor restart requested");
+      opts.onFatalError?.(error);
+    });
+  }
 
   const paths = await ensureAddroidPaths();
   const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();

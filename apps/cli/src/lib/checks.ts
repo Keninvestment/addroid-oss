@@ -15,6 +15,8 @@ import {
   type AddroidPaths,
 } from "@addroid/config";
 import { resolveRepoRoot } from "./paths.js";
+import { isProcessAlive, readUpState } from "./processes.js";
+import { evaluateWorkerHealth, readWorkerHealth } from "./worker-supervisor.js";
 
 export type CheckState = "ok" | "warn" | "error" | "skipped";
 
@@ -31,6 +33,29 @@ export function summarizeOverall(checks: CheckResult[]): DoctorOverall {
   if (checks.some((c) => c.state === "error")) return "error";
   if (checks.some((c) => c.state === "warn")) return "warn";
   return "ok";
+}
+
+export async function checkWorkerRuntime(paths: AddroidPaths): Promise<CheckResult> {
+  const upState = await readUpState(paths).catch(() => null);
+  const snapshot = await readWorkerHealth(paths);
+  const assessment = evaluateWorkerHealth({
+    upState,
+    snapshot,
+    nowMs: Date.now(),
+    parentAlive: isProcessAlive(upState?.parentPid),
+    workerAlive: isProcessAlive(snapshot?.workerPid),
+  });
+  if (assessment.state === "skipped") {
+    return { name: "worker-runtime", state: "skipped", message: assessment.message };
+  }
+  return {
+    name: "worker-runtime",
+    state: assessment.healthy ? "ok" : "error",
+    message: assessment.message,
+    ...(!assessment.healthy
+      ? { hint: "`addroid status` で再起動試行・最終エラー・heartbeat を確認してください。" }
+      : {}),
+  };
 }
 
 interface VersionRun {

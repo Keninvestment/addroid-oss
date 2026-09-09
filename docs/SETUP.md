@@ -144,6 +144,10 @@ export してから起動してください。
 | `ADDROID_WEB_HOSTNAME` | 任意。Web UI バインドアドレス。既定: `127.0.0.1` |
 | `ADDROID_WEB_PORT` | 任意。Web UI ポート。既定: `3000` |
 | `ADDROID_USER_TIMEZONE` | 任意。標準 cron の実行時刻と、Meta ad account の `timezone_name` が無い場合の report 取得日を決める IANA timezone。未設定時は `TZ` / 実行環境 timezone / UTC の順にフォールバック |
+| `ADDROID_WORKER_MAX_RESTART_ATTEMPTS` | 任意。`--separate-worker` の連続失敗上限。既定: `5` |
+| `ADDROID_WORKER_RESTART_BACKOFF_BASE_MS` / `ADDROID_WORKER_RESTART_BACKOFF_MAX_MS` | 任意。worker 再起動の exponential backoff。既定: `1000` / `30000` ms |
+| `ADDROID_WORKER_READY_TIMEOUT_MS` / `ADDROID_WORKER_HEARTBEAT_TIMEOUT_MS` | 任意。worker runtime の ready / heartbeat timeout。既定: `15000` / `20000` ms |
+| `ADDROID_WORKER_STABLE_RESET_MS` | 任意。連続失敗回数を 0 に戻すまでの安定稼働時間。既定: `60000` ms |
 
 `ENCRYPTION_KEY` の生成例:
 
@@ -245,6 +249,10 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 
 `--separate-worker` モードで worker のみ別ホストに移すときの分離境界は
 この個別起動経路と同じです。
+同モードでは CLI が worker runtime を直接監督し、`~/.addroid/run/worker-health.json`
+へ generation・ready・heartbeat・再起動試行・最終失敗を atomic に記録します。
+上限到達後は web を残したまま worker を `exhausted` とし、`addroid status` と
+`addroid doctor` は非正常を返します。
 
 ### 起動後の確認
 

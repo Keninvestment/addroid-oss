@@ -7,6 +7,7 @@ import { resolveAddroidLanguage, resolveAddroidPaths, readAddroidConfig } from "
 import net from "node:net";
 import { isProcessAlive, readUpState } from "../lib/processes.js";
 import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
+import { evaluateWorkerHealth, readWorkerHealth } from "../lib/worker-supervisor.js";
 
 interface DoctorRow {
   ranAt: Date;
@@ -42,6 +43,7 @@ export async function runStatus(args: string[]): Promise<number> {
   }
   const paths = resolveAddroidPaths();
   const lines: string[] = [];
+  let exitCode = 0;
   lines.push("[addroid status]");
   lines.push("");
 
@@ -98,7 +100,17 @@ export async function runStatus(args: string[]): Promise<number> {
           : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web/worker    : ${webLabel}`);
     } else {
-      const workerAlive = isProcessAlive(state.workerPid);
+      const snapshot = await readWorkerHealth(paths);
+      const runtimePid = snapshot?.workerPid ?? null;
+      const workerAlive = isProcessAlive(runtimePid);
+      const health = evaluateWorkerHealth({
+        upState: state,
+        snapshot,
+        nowMs: Date.now(),
+        parentAlive,
+        workerAlive,
+      });
+      if (!health.healthy) exitCode = 1;
       const webLabel = webFailed
         ? `not running (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
         : webUnreachable
@@ -106,10 +118,11 @@ export async function runStatus(args: string[]): Promise<number> {
           : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web           : ${webLabel}`);
       lines.push(
-        `  worker pid    : ${state.workerPid ?? "(none)"} ${
-          state.workerPid ? (workerAlive ? "[ ok  ]" : "[stopped]") : "[absent]"
+        `  worker pid    : ${runtimePid ?? "(none)"} ${
+          runtimePid ? (health.healthy ? "[ ok  ]" : "[error]") : "[absent]"
         }`
       );
+      lines.push(`  worker health : ${health.healthy ? "[ ok  ]" : "[error]"} ${health.message}`);
     }
   }
   lines.push("");
@@ -122,7 +135,7 @@ export async function runStatus(args: string[]): Promise<number> {
   }
   lines.push("");
   process.stdout.write(lines.join("\n"));
-  return 0;
+  return exitCode;
 }
 
 async function canConnectToWeb(rawUrl: string): Promise<boolean> {

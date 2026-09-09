@@ -1553,7 +1553,9 @@ async function stopServicesTool(display: string): Promise<WebAgentExecution> {
     if (state.webPid && state.webPid !== state.parentPid) {
       targets.push({ label: "web", pid: state.webPid });
     }
-    if (state.workerPid) targets.push({ label: "worker", pid: state.workerPid });
+    // The parent supervisor owns the current worker generation. up.json keeps
+    // only the initial compatibility PID, which may be stale after a restart;
+    // never signal that PID directly because it could have been reused.
   }
   targets.push({ label: "addroid up parent", pid: state.parentPid });
   const uniqueTargets = targets.filter(

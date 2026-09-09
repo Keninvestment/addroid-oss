@@ -29,6 +29,7 @@ const HERE = path.dirname(__filename);
 const FIXTURES_DIR = path.join(HERE, "fixtures");
 const FAKE_WORKER = path.join(FIXTURES_DIR, "up-fake-worker.mjs");
 const FAKE_NEXT = path.join(FIXTURES_DIR, "up-fake-next.mjs");
+const FAKE_SUPERVISED_WORKER = path.join(FIXTURES_DIR, "up-fake-supervised-worker.mjs");
 // 子プロセスから src/index.ts を tsx 経由で起動する。bin/addroid.cjs を
 // 経由すると `dist/index.mjs` が古いままだとテスト中の `src/commands/up.ts`
 // 変更が反映されないため、本テストは tsx で TypeScript ソースを直接実行する。
@@ -208,10 +209,10 @@ interface SpawnedUp {
   stderr: { value: string };
 }
 
-function spawnUp(env: NodeJS.ProcessEnv): SpawnedUp {
+function spawnUp(env: NodeJS.ProcessEnv, extraArgs: string[] = []): SpawnedUp {
   const stdout = { value: "" };
   const stderr = { value: "" };
-  const child = spawn(TSX_BIN, [SRC_ENTRY, "up"], {
+  const child = spawn(TSX_BIN, [SRC_ENTRY, "up", ...extraArgs], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -342,6 +343,89 @@ describe("addroid up — worker startup + shutdown smoke", () => {
             /* ignore */
           }
         }
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    }
+  );
+});
+
+describe("addroid up --separate-worker — supervised runtime fixture", () => {
+  it(
+    "direct runtime death is detected, generation 2 recovers, and one scheduled fixture completion is recorded",
+    { timeout: 60_000 },
+    async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-up-supervisor-"));
+      const pidFile = path.join(home, "run", "up.json");
+      const healthFile = path.join(home, "run", "worker-health.json");
+      const eventsFile = path.join(home, "worker-events.jsonl");
+      const jobEvidenceFile = path.join(home, "scheduled-job.json");
+      const port = await pickFreePort();
+      fs.writeFileSync(path.join(home, "config.yaml"), STUB_CONFIG_YAML, "utf8");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ADDROID_HOME: home,
+        DATABASE_URL: "postgres://fixture.invalid/addroid", // fixture never connects
+        ADDROID_WEB_HOSTNAME: "127.0.0.1",
+        ADDROID_WEB_PORT: String(port),
+        ADDROID_TEST_NEXT_FACTORY_PATH: FAKE_NEXT,
+        ADDROID_TEST_WORKER_ENTRY_PATH: FAKE_SUPERVISED_WORKER,
+        ADDROID_TEST_SUPERVISOR_EVENTS: eventsFile,
+        ADDROID_TEST_SCHEDULED_JOB_EVIDENCE: jobEvidenceFile,
+        ADDROID_TEST_DIE_FIRST_GENERATION: "1",
+        ADDROID_WORKER_READY_TIMEOUT_MS: "500",
+        ADDROID_WORKER_HEARTBEAT_TIMEOUT_MS: "500",
+        ADDROID_WORKER_RESTART_BACKOFF_BASE_MS: "20",
+        ADDROID_WORKER_RESTART_BACKOFF_MAX_MS: "20",
+        ADDROID_WORKER_MAX_RESTART_ATTEMPTS: "3",
+        ADDROID_WORKER_STABLE_RESET_MS: "1000",
+      };
+      const up = spawnUp(env, ["--separate-worker"]);
+      try {
+        const health = await waitFor(
+          () => {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(healthFile, "utf8")) as {
+                generation?: number;
+                phase?: string;
+                workerPid?: number;
+              };
+              return parsed.generation === 2 && parsed.phase === "ready" ? parsed : null;
+            } catch {
+              return null;
+            }
+          },
+          { timeoutMs: 30_000, label: "generation 2 ready" }
+        );
+        const pidState = JSON.parse(fs.readFileSync(pidFile, "utf8")) as {
+          parentPid: number;
+          workerPid?: number;
+          mode: string;
+        };
+        assert.equal(pidState.mode, "separate-worker");
+        assert.ok(health.workerPid && health.workerPid > 0);
+        assert.notEqual(health.workerPid, pidState.parentPid, "worker PID must be the direct runtime");
+
+        const job = JSON.parse(fs.readFileSync(jobEvidenceFile, "utf8")) as {
+          jobId: string;
+          generation: number;
+          status: string;
+        };
+        assert.deepEqual(job, {
+          jobId: "scheduled-fixture-1",
+          generation: 2,
+          status: "completed",
+        });
+        const events = fs.readFileSync(eventsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        assert.equal(events.filter((event) => event.event === "scheduled-job-completed").length, 1);
+
+        process.kill(pidState.parentPid, "SIGTERM");
+        const exit = await up.exited;
+        assert.equal(exit.code, 0, `stdout:\n${up.stdout.value}\nstderr:\n${up.stderr.value}`);
+        assert.equal(fs.existsSync(pidFile), false);
+        const stopped = JSON.parse(fs.readFileSync(healthFile, "utf8")) as { phase: string };
+        assert.equal(stopped.phase, "stopped");
+      } finally {
+        if (up.child.exitCode === null && up.child.signalCode === null) up.child.kill("SIGKILL");
         fs.rmSync(home, { recursive: true, force: true });
       }
     }
