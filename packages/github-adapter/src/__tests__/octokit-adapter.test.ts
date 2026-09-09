@@ -5,6 +5,7 @@ import {
   GithubOAuthStateMismatchError,
   InMemoryOAuthTokenStore,
   OctokitGithubAdapter,
+  wrapOctokitAsApiClient,
   type GithubApiClient,
   type CryptoEncryptDecrypt,
   type OAuthClientConfig,
@@ -43,10 +44,12 @@ interface FakeApiCalls {
     message: string;
   }[];
   polls: { owner: string; repo: string; etag?: string }[];
+  reads: { owner: string; repo: string; path: string; ref: string }[];
+  fileLists: { owner: string; repo: string; number: number }[];
 }
 
 class FakeApiClient implements GithubApiClient {
-  calls: FakeApiCalls = { templateCommits: [], polls: [] };
+  calls: FakeApiCalls = { templateCommits: [], polls: [], reads: [], fileLists: [] };
   constructor(
     private readonly accessToken: string,
     private readonly login: string,
@@ -97,6 +100,16 @@ class FakeApiClient implements GithubApiClient {
       htmlUrl: `https://addroid.invalid/${input.owner}/${input.repo}/pull/1`,
       headSha: "fake-pr-head-sha",
     };
+  }
+
+  async readFileAtRef(input: { owner: string; repo: string; path: string; ref: string }) {
+    this.calls.reads.push(input);
+    return { content: "exact proposal bytes\n" };
+  }
+
+  async listPullRequestFiles(input: { owner: string; repo: string; number: number }) {
+    this.calls.fileLists.push(input);
+    return [{ path: "proposals/automation/rule/proposal.json", status: "added" as const }];
   }
 
   async mergePullRequest(input: {
@@ -303,4 +316,89 @@ test("OctokitGithubAdapter.pollPullRequests refuses without a token", async () =
       ),
     GithubAdapterUnauthenticatedError
   );
+});
+
+test("OctokitGithubAdapter reads proposal bytes from the exact requested PR head", async () => {
+  const { adapter, getLastApi } = makeAdapter({ login: "octo-test-user" });
+  const begin = await adapter.beginOAuth();
+  await adapter.completeOAuth({ code: "c", state: begin.state });
+
+  const result = await adapter.readPullRequestSnapshot({
+    spec: { owner: "octo-test-user", name: "addroid-ops", defaultBranch: "main" },
+    number: 17,
+    artifactPath: "proposals/automation/rule/proposal.json",
+    expectedHeadSha: "exact-head-sha",
+  });
+
+  assert.deepEqual(result, {
+    artifactContent: "exact proposal bytes\n",
+    changedFiles: [{ path: "proposals/automation/rule/proposal.json", status: "added" }],
+    headSha: "exact-head-sha",
+  });
+  assert.deepEqual(getLastApi()?.calls.reads, [{
+    owner: "octo-test-user",
+    repo: "addroid-ops",
+    path: "proposals/automation/rule/proposal.json",
+    ref: "exact-head-sha",
+  }]);
+});
+
+test("production API client paginates beyond the first hundred pull requests", async () => {
+  const pages: number[] = [];
+  const rawPull = (number: number) => ({
+    number,
+    title: `PR ${number}`,
+    state: "closed",
+    head: { sha: `sha-${number}`, ref: `branch-${number}` },
+    base: { ref: "main" },
+    html_url: `https://example.invalid/${number}`,
+    merged_at: null,
+  });
+  const api = wrapOctokitAsApiClient({
+    async request(_route: string, params: Record<string, unknown>) {
+      const page = Number(params.page);
+      pages.push(page);
+      return {
+        status: 200,
+        headers: {},
+        data: page === 1
+          ? Array.from({ length: 100 }, (_, index) => rawPull(index + 1))
+          : [rawPull(101)],
+      };
+    },
+    rest: {},
+  });
+
+  const result = await api.listPullRequests({ owner: "owner", repo: "repo" });
+
+  assert.equal(result.pullRequests.length, 101);
+  assert.deepEqual(pages, [1, 2]);
+  assert.equal(result.pullRequests[100]?.number, 101);
+});
+
+test("production API client paginates the complete PR changed-file set", async () => {
+  const pages: number[] = [];
+  const api = wrapOctokitAsApiClient({
+    async request(_route: string, params: Record<string, unknown>) {
+      const page = Number(params.page);
+      pages.push(page);
+      return {
+        status: 200,
+        headers: {},
+        data: page === 1
+          ? Array.from({ length: 100 }, (_, index) => ({
+              filename: `file-${index}.json`,
+              status: "added",
+            }))
+          : [{ filename: "file-100.json", status: "removed" }],
+      };
+    },
+    rest: {},
+  });
+
+  const result = await api.listPullRequestFiles?.({ owner: "owner", repo: "repo", number: 7 });
+
+  assert.equal(result?.length, 101);
+  assert.deepEqual(pages, [1, 2]);
+  assert.deepEqual(result?.[100], { path: "file-100.json", status: "removed" });
 });

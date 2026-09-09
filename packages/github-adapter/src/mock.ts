@@ -23,6 +23,8 @@ import {
   type OpsRepoSpec,
   type PullRequestPollResult,
   type PullRequestSummary,
+  type ReadPullRequestSnapshotInput,
+  type ReadPullRequestSnapshotResult,
 } from "./types.js";
 import {
   ADDROID_REQUIRED_SCOPES,
@@ -171,6 +173,32 @@ export class MockGithubAdapter implements GithubAdapter {
       htmlUrl,
     });
     return { number, htmlUrl, headSha };
+  }
+
+  async readPullRequestSnapshot(
+    input: ReadPullRequestSnapshotInput,
+  ): Promise<ReadPullRequestSnapshotResult> {
+    const created = this.createdPullRequests.find((pr) => pr.number === input.number);
+    if (!created || created.headSha !== input.expectedHeadSha) {
+      throw new Error(`mock: PR #${input.number} content is unavailable at requested HEAD`);
+    }
+    const file = created.files.find((candidate) => candidate.path === input.artifactPath);
+    if (!file || file.action !== "create") {
+      throw new Error(`mock: PR #${input.number} file is unavailable: ${input.artifactPath}`);
+    }
+    const lines = file.diff.split("\n").slice(1);
+    if (lines.some((line) => !line.startsWith("+"))) {
+      throw new Error(`mock: PR #${input.number} file diff is not a full-file create`);
+    }
+    return {
+      artifactContent: `${lines.map((line) => line.slice(1)).join("\n")}\n`,
+      headSha: created.headSha,
+      changedFiles: created.files.map((candidate) => ({
+        path: candidate.path,
+        status: candidate.action === "create" ? "added"
+          : candidate.action === "delete" ? "removed" : "modified",
+      })),
+    };
   }
 
   async mergePullRequest(

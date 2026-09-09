@@ -9,6 +9,8 @@ export interface PullRequestSummary {
   title: string;
   state: "open" | "closed" | "merged";
   headSha: string;
+  /** PR head branch name. Older fixtures may omit it; security-sensitive recovery must reject omission. */
+  headRef?: string;
   baseRef: string;
   htmlUrl: string;
   mergedAt: string | null;
@@ -100,6 +102,25 @@ export interface CreatePullRequestResult {
   headSha: string;
 }
 
+export interface ReadPullRequestSnapshotInput {
+  spec: OpsRepoSpec;
+  number: number;
+  artifactPath: string;
+  expectedHeadSha: string;
+}
+
+export interface PullRequestChangedFile {
+  path: string;
+  status: "added" | "modified" | "removed" | "renamed" | "copied" | "changed" | "unchanged";
+  previousPath?: string;
+}
+
+export interface ReadPullRequestSnapshotResult {
+  artifactContent: string;
+  headSha: string;
+  changedFiles: PullRequestChangedFile[];
+}
+
 export interface MergePullRequestInput {
   spec: OpsRepoSpec;
   /** 対象 PR 番号。 */
@@ -163,6 +184,9 @@ export interface GithubAdapter {
    * `baseRef` に対して PR を開く。失敗時は throw する。
    */
   createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult>;
+
+  /** Read the complete changed-file set and proposal artifact at the exact PR head. */
+  readPullRequestSnapshot?(input: ReadPullRequestSnapshotInput): Promise<ReadPullRequestSnapshotResult>;
 
   /**
    * Web UI からの "PR をマージする (Web UI)" 操作で呼ばれる。GitHub merge API

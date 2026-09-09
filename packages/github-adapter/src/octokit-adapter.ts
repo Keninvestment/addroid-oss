@@ -39,6 +39,9 @@ import {
   type OpsRepoSpec,
   type PullRequestPollResult,
   type PullRequestSummary,
+  type PullRequestChangedFile,
+  type ReadPullRequestSnapshotInput,
+  type ReadPullRequestSnapshotResult,
 } from "./types.js";
 
 /**
@@ -100,6 +103,17 @@ export interface GithubApiClient {
     files: CreatePullRequestFile[];
     commitMessage: string;
   }): Promise<{ number: number; htmlUrl: string; headSha: string }>;
+  readFileAtRef?(input: {
+    owner: string;
+    repo: string;
+    path: string;
+    ref: string;
+  }): Promise<{ content: string }>;
+  listPullRequestFiles?(input: {
+    owner: string;
+    repo: string;
+    number: number;
+  }): Promise<PullRequestChangedFile[]>;
   /**
    * Web UI からのマージで使う。GitHub merge API (PUT
    * /repos/{owner}/{repo}/pulls/{number}/merge) を 1 度だけ呼ぶ。
@@ -249,6 +263,33 @@ export class OctokitGithubAdapter implements GithubAdapter {
       files: input.files,
       commitMessage,
     });
+  }
+
+  async readPullRequestSnapshot(
+    input: ReadPullRequestSnapshotInput,
+  ): Promise<ReadPullRequestSnapshotResult> {
+    const api = await this.getAuthenticatedClient("read pull request file");
+    if (!api.readFileAtRef || !api.listPullRequestFiles) {
+      throw new GithubAdapterNotImplementedError("readPullRequestSnapshot");
+    }
+    const [file, changedFiles] = await Promise.all([
+      api.readFileAtRef({
+        owner: input.spec.owner,
+        repo: input.spec.name,
+        path: input.artifactPath,
+        ref: input.expectedHeadSha,
+      }),
+      api.listPullRequestFiles({
+        owner: input.spec.owner,
+        repo: input.spec.name,
+        number: input.number,
+      }),
+    ]);
+    return {
+      artifactContent: file.content,
+      changedFiles,
+      headSha: input.expectedHeadSha,
+    };
   }
 
   async mergePullRequest(
@@ -551,24 +592,31 @@ class OctokitApiClient implements GithubApiClient {
     const headers: Record<string, string> = {};
     if (input.etag) headers["If-None-Match"] = input.etag;
     try {
-      const res = await this.octokit.request(`GET /repos/{owner}/{repo}/pulls`, {
-        owner: input.owner,
-        repo: input.repo,
-        state: "all",
-        per_page: 50,
-        sort: "updated",
-        direction: "desc",
-        headers,
+      const first = await this.octokit.request(`GET /repos/{owner}/{repo}/pulls`, {
+        owner: input.owner, repo: input.repo, state: "all", per_page: 100,
+        page: 1, sort: "updated", direction: "desc", headers,
       });
+      const res = first;
       const status = res.status;
       const etag = headerString(res.headers["etag"]) ?? headerString(res.headers["ETag"]);
       const lastModified = headerString(res.headers["last-modified"]);
-      const data = Array.isArray(res.data) ? (res.data as Record<string, unknown>[]) : [];
+      const data = Array.isArray(res.data) ? [...(res.data as Record<string, unknown>[])] : [];
+      for (let page = 2; data.length === (page - 1) * 100; page += 1) {
+        if (page > 100) throw new Error("GitHub PR pagination exceeded 100 pages");
+        const next = await this.octokit.request(`GET /repos/{owner}/{repo}/pulls`, {
+          owner: input.owner, repo: input.repo, state: "all", per_page: 100,
+          page, sort: "updated", direction: "desc",
+        });
+        const pageData = Array.isArray(next.data) ? next.data as Record<string, unknown>[] : [];
+        data.push(...pageData);
+        if (pageData.length < 100) break;
+      }
       const pullRequests: PullRequestSummary[] = data.map((pr) => ({
         number: Number(pr["number"]),
         title: String(pr["title"] ?? ""),
         state: normalizeState(pr),
         headSha: String((pr["head"] as Record<string, unknown> | undefined)?.["sha"] ?? ""),
+        headRef: String((pr["head"] as Record<string, unknown> | undefined)?.["ref"] ?? ""),
         baseRef: String((pr["base"] as Record<string, unknown> | undefined)?.["ref"] ?? "main"),
         htmlUrl: String(pr["html_url"] ?? ""),
         mergedAt: (pr["merged_at"] as string | null) ?? null,
@@ -603,6 +651,55 @@ class OctokitApiClient implements GithubApiClient {
         return out;
       }
       throw err;
+    }
+  }
+
+  async readFileAtRef(input: {
+    owner: string;
+    repo: string;
+    path: string;
+    ref: string;
+  }): Promise<{ content: string }> {
+    const response = await this.octokit.rest.repos.getContent(input);
+    const data = response.data as Record<string, unknown>;
+    if (data["type"] !== "file" || data["encoding"] !== "base64" || typeof data["content"] !== "string") {
+      throw new Error(`GitHub path is not a base64 file: ${input.path}`);
+    }
+    return {
+      content: Buffer.from(data["content"].replace(/\s/g, ""), "base64").toString("utf8"),
+    };
+  }
+
+  async listPullRequestFiles(input: {
+    owner: string;
+    repo: string;
+    number: number;
+  }): Promise<PullRequestChangedFile[]> {
+    const files: PullRequestChangedFile[] = [];
+    for (let page = 1; ; page += 1) {
+      if (page > 100) throw new Error("GitHub PR file pagination exceeded 100 pages");
+      const response = await this.octokit.request(`GET /repos/{owner}/{repo}/pulls/{pull_number}/files`, {
+        owner: input.owner,
+        repo: input.repo,
+        pull_number: input.number,
+        per_page: 100,
+        page,
+      });
+      const data = Array.isArray(response.data) ? response.data as Record<string, unknown>[] : [];
+      for (const file of data) {
+        const status = String(file["status"] ?? "");
+        if (!["added", "modified", "removed", "renamed", "copied", "changed", "unchanged"].includes(status)) {
+          throw new Error(`GitHub returned unsupported PR file status: ${status || "missing"}`);
+        }
+        files.push({
+          path: String(file["filename"] ?? ""),
+          status: status as PullRequestChangedFile["status"],
+          ...(typeof file["previous_filename"] === "string"
+            ? { previousPath: file["previous_filename"] }
+            : {}),
+        });
+      }
+      if (data.length < 100) return files;
     }
   }
 
