@@ -164,6 +164,17 @@ class LazyGithubApiClient implements GithubApiClient {
     }
     return client.readFileAtRef(input);
   }
+  async listPullRequestFiles(input: {
+    owner: string;
+    repo: string;
+    number: number;
+  }) {
+    const client = await this.resolve();
+    if (!client.listPullRequestFiles) {
+      throw new Error("GitHub API client cannot list complete PR files");
+    }
+    return client.listPullRequestFiles(input);
+  }
   async mergePullRequest(input: {
     owner: string;
     repo: string;

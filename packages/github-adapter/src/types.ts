@@ -102,16 +102,23 @@ export interface CreatePullRequestResult {
   headSha: string;
 }
 
-export interface ReadPullRequestFileInput {
+export interface ReadPullRequestSnapshotInput {
   spec: OpsRepoSpec;
   number: number;
-  path: string;
+  artifactPath: string;
   expectedHeadSha: string;
 }
 
-export interface ReadPullRequestFileResult {
-  content: string;
+export interface PullRequestChangedFile {
+  path: string;
+  status: "added" | "modified" | "removed" | "renamed" | "copied" | "changed" | "unchanged";
+  previousPath?: string;
+}
+
+export interface ReadPullRequestSnapshotResult {
+  artifactContent: string;
   headSha: string;
+  changedFiles: PullRequestChangedFile[];
 }
 
 export interface MergePullRequestInput {
@@ -178,8 +185,8 @@ export interface GithubAdapter {
    */
   createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult>;
 
-  /** Read one file from the exact PR head commit. Missing capability must fail closed at callers. */
-  readPullRequestFile?(input: ReadPullRequestFileInput): Promise<ReadPullRequestFileResult>;
+  /** Read the complete changed-file set and proposal artifact at the exact PR head. */
+  readPullRequestSnapshot?(input: ReadPullRequestSnapshotInput): Promise<ReadPullRequestSnapshotResult>;
 
   /**
    * Web UI からの "PR をマージする (Web UI)" 操作で呼ばれる。GitHub merge API

@@ -178,7 +178,7 @@ test("GitHub failure is proposal_failed and never becomes false success", async 
 test("proposal cooldown suppresses a duplicate target and records reasoned no_target", async () => {
   const fixture = makeFixture("proposal_pr", 1500);
   try {
-    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target" });
+    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target", metadata: null });
     const github = new FakeGithubAdapter();
     const summary = await runAutomationRulesOnce({
       prisma: fixture.prisma as never,
@@ -441,12 +441,100 @@ test("existing PR recovery fails closed without exact content-read capability", 
     const github = new FakeGithubAdapter();
     const options = proposalOptions(fixture, github);
     assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
-    (github as { readPullRequestFile?: unknown }).readPullRequestFile = undefined;
+    (github as { readPullRequestSnapshot?: unknown }).readPullRequestSnapshot = undefined;
 
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /content-read capability is unavailable/);
+    assert.match(retry.errors.join("\n"), /snapshot capability is unavailable/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("DB receipt failure recovery rejects an extra operation file and changed remote head", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    let failUpsert = true;
+    fixture.prisma.githubPullRequest.upsert = async () => {
+      if (failUpsert) {
+        failUpsert = false;
+        throw new Error("fixture DB receipt failure");
+      }
+      return { id: "pr_1" };
+    };
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "failed");
+    github.headShaOverride = "changed-remote-head";
+    github.extraChangedFiles = [{ path: "operations/primary/unapproved.json", status: "added" }];
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /changed-file set is not exactly one/);
+    assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("DB receipt failure recovery rejects changed head despite unchanged artifact", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    let failUpsert = true;
+    fixture.prisma.githubPullRequest.upsert = async () => {
+      if (failUpsert) {
+        failUpsert = false;
+        throw new Error("fixture DB receipt failure");
+      }
+      return { id: "pr_1" };
+    };
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "failed");
+    github.headShaOverride = "changed-remote-head";
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /differs from accepted remote-creation checkpoint/);
+    assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("recovery rejects removed and renamed proposal artifact states", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    for (const status of ["removed", "renamed"] as const) {
+      github.primaryStatus = status;
+      github.primaryPreviousPath = status === "renamed" ? "proposals/old.json" : null;
+      const retry = await runAutomationRulesOnce(options);
+      assert.equal(retry.status, "failed");
+      assert.match(retry.errors.join("\n"), /changed-file set is not exactly one/);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("recovery finds the operation PR beyond fifty older pull requests", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    github.decoyCount = 60;
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "succeeded");
+    assert.equal(github.created.length, 1);
   } finally {
     fixture.cleanup();
   }
@@ -538,7 +626,7 @@ test("same-slot retry revalidates a closed PR before cooldown can report no_targ
     const options = proposalOptions(fixture, github);
     assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
     github.state = "closed";
-    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target" });
+    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target", metadata: null });
 
     const retry = await runAutomationRulesOnce(options);
 
@@ -748,6 +836,7 @@ rules:
     actions: [] as Array<Record<string, unknown>>,
     actionUpdates: [] as Array<Record<string, unknown>>,
     requestedDates: [] as string[],
+    auditLogs: [] as Array<Record<string, unknown>>,
   };
   const prisma = {
     workspace: {
@@ -810,8 +899,17 @@ rules:
     },
     approvalRecord: { async create() { return { id: "approval_1" }; } },
     auditLog: {
-      async findFirst(): Promise<{ id: string } | null> { return null; },
-      async create() { return { id: "audit_1" }; },
+      async findFirst(args?: { where?: { action?: string; target?: string } }) {
+        const row = [...state.auditLogs].reverse().find((entry) =>
+          (!args?.where?.action || entry.action === args.where.action) &&
+          (!args?.where?.target || entry.target === args.where.target)
+        );
+        return row ? { id: "audit_1", metadata: row.metadata } : null;
+      },
+      async create(args?: { data?: Record<string, unknown> }) {
+        if (args?.data) state.auditLogs.push(args.data);
+        return { id: "audit_1" };
+      },
     },
     executionLog: { async create() { return { id: "log_1" }; } },
   };
@@ -869,6 +967,14 @@ class FakeGithubAdapter {
   headShaOverride: string | null = null;
   contentOverride: string | null = null;
   changeHeadAfterRead = false;
+  extraChangedFiles: Array<{
+    path: string;
+    status: "added" | "modified" | "removed" | "renamed";
+    previousPath?: string;
+  }> = [];
+  decoyCount = 0;
+  primaryStatus: "added" | "modified" | "removed" | "renamed" = "added";
+  primaryPreviousPath: string | null = null;
   pollCount = 0;
   constructor(private readonly error?: Error) {}
 
@@ -876,16 +982,28 @@ class FakeGithubAdapter {
     this.pollCount += 1;
     return {
       notModified: false,
-      pullRequests: this.created.map((pr, index) => ({
-        number: 42 + index,
-        title: pr.title,
-        state: this.state,
-        headSha: this.headShaOverride ?? (index === 0 ? "abc123" : `abc${index}`),
-        headRef: this.headRefOverride ?? pr.branchName,
-        baseRef: this.baseRefOverride ?? pr.baseRef ?? pr.spec.defaultBranch,
-        htmlUrl: `https://github.com/${pr.spec.owner}/${pr.spec.name}/pull/${42 + index}`,
-        mergedAt: null,
-      })),
+      pullRequests: [
+        ...Array.from({ length: this.decoyCount }, (_, index) => ({
+          number: 1000 + index,
+          title: `unrelated PR ${index}`,
+          state: "closed" as const,
+          headSha: `decoy-${index}`,
+          headRef: `decoy-${index}`,
+          baseRef: "main",
+          htmlUrl: `https://github.com/Keninvestment/addroid-ops/pull/${1000 + index}`,
+          mergedAt: null,
+        })),
+        ...this.created.map((pr, index) => ({
+          number: 42 + index,
+          title: pr.title,
+          state: this.state,
+          headSha: this.headShaOverride ?? (index === 0 ? "abc123" : `abc${index}`),
+          headRef: this.headRefOverride ?? pr.branchName,
+          baseRef: this.baseRefOverride ?? pr.baseRef ?? pr.spec.defaultBranch,
+          htmlUrl: `https://github.com/${pr.spec.owner}/${pr.spec.name}/pull/${42 + index}`,
+          mergedAt: null,
+        })),
+      ],
     };
   }
 
@@ -902,18 +1020,29 @@ class FakeGithubAdapter {
     };
   }
 
-  async readPullRequestFile(input: {
+  async readPullRequestSnapshot(input: {
     number: number;
-    path: string;
+    artifactPath: string;
     expectedHeadSha: string;
   }) {
     const created = this.created[input.number - 42];
-    const file = created?.files.find((candidate) => candidate.path === input.path);
+    const file = created?.files.find((candidate) => candidate.path === input.artifactPath);
     if (!file) throw new Error("fixture proposal content unavailable");
     const content = this.contentOverride ?? `${file.diff.split("\n").slice(1)
       .map((line) => line.slice(1)).join("\n")}\n`;
     const headSha = input.expectedHeadSha;
     if (this.changeHeadAfterRead) this.headShaOverride = `${input.expectedHeadSha}-changed`;
-    return { content, headSha };
+    return {
+      artifactContent: content,
+      headSha,
+      changedFiles: [
+        {
+          path: input.artifactPath,
+          status: this.primaryStatus,
+          ...(this.primaryPreviousPath ? { previousPath: this.primaryPreviousPath } : {}),
+        },
+        ...this.extraChangedFiles,
+      ],
+    };
   }
 }

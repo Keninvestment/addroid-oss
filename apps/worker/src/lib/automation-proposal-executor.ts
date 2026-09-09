@@ -106,6 +106,7 @@ export async function createAutomationProposal(opts: {
     files: [file],
     baseRef: repo.defaultBranch,
   };
+  const filesChangedCount = request.files.length;
   const existing = await findExistingProposal(
     opts.githubAdapter,
     request.spec,
@@ -116,8 +117,46 @@ export async function createAutomationProposal(opts: {
     content,
   );
   if (!existing && opts.createIfMissing === false) return null;
-  const created = existing ?? await opts.githubAdapter.createPullRequest(request).catch(async (error) => {
-    const recovered = await findExistingProposal(
+  let createdFresh = false;
+  let created = existing ?? await opts.githubAdapter.createPullRequest(request)
+    .then((result) => {
+      createdFresh = true;
+      return result;
+    })
+    .catch(async (error) => {
+      const recovered = await findExistingProposal(
+        opts.githubAdapter,
+        request.spec,
+        opts.operationKey,
+        title,
+        branchName,
+        filePath,
+        content,
+      );
+      if (recovered) return recovered;
+      throw error;
+    });
+
+  const checkpointTarget = `automation_proposal_operation:${opts.operationKey}`;
+  if (createdFresh) {
+    await opts.prisma.auditLog.create({
+      data: {
+        workspaceId: opts.workspaceId,
+        actor: "cron:automation_rules",
+        action: "automation.proposal.remote_created",
+        target: checkpointTarget,
+        ref: opts.rule.id,
+        metadata: {
+          prNumber: created.number,
+          headSha: created.headSha,
+          baseRef: repo.defaultBranch,
+          branchName,
+          filePath,
+          artifactDigest,
+        } as Prisma.InputJsonValue,
+      },
+    });
+    const verified = await findExistingProposal(
       opts.githubAdapter,
       request.spec,
       opts.operationKey,
@@ -126,9 +165,11 @@ export async function createAutomationProposal(opts: {
       filePath,
       content,
     );
-    if (recovered) return recovered;
-    throw error;
-  });
+    if (!verified || verified.number !== created.number || verified.headSha !== created.headSha) {
+      throw new Error("automation proposal newly created PR failed exact remote verification");
+    }
+    created = verified;
+  }
 
   const stored = await opts.prisma.githubPullRequest.findUnique({
     where: { repoId_number: { repoId: repo.id, number: created.number } },
@@ -138,6 +179,35 @@ export async function createAutomationProposal(opts: {
     throw new Error(
       `automation proposal existing PR head changed: expected ${stored.headSha}, got ${created.headSha}`,
     );
+  }
+  if (!createdFresh) {
+    const checkpoint = await opts.prisma.auditLog.findFirst({
+      where: {
+        workspaceId: opts.workspaceId,
+        action: "automation.proposal.remote_created",
+        target: checkpointTarget,
+        ref: opts.rule.id,
+      },
+      orderBy: { createdAt: "desc" },
+      select: { metadata: true },
+    });
+    const metadata = checkpoint?.metadata;
+    if ((!metadata || typeof metadata !== "object" || Array.isArray(metadata)) && !stored?.headSha) {
+      throw new Error("automation proposal existing PR has no accepted remote-creation checkpoint");
+    }
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      const accepted = metadata as Record<string, unknown>;
+      if (
+        accepted["prNumber"] !== created.number ||
+        accepted["headSha"] !== created.headSha ||
+        accepted["baseRef"] !== repo.defaultBranch ||
+        accepted["branchName"] !== branchName ||
+        accepted["filePath"] !== filePath ||
+        accepted["artifactDigest"] !== artifactDigest
+      ) {
+        throw new Error("automation proposal existing PR differs from accepted remote-creation checkpoint");
+      }
+    }
   }
 
   const preview = {
@@ -153,7 +223,7 @@ export async function createAutomationProposal(opts: {
       },
     ],
     truncatedFileCount: 0,
-    totalFileCount: 1,
+    totalFileCount: filesChangedCount,
   };
   const prRow = await opts.prisma.githubPullRequest.upsert({
     where: { repoId_number: { repoId: repo.id, number: created.number } },
@@ -165,7 +235,7 @@ export async function createAutomationProposal(opts: {
       htmlUrl: created.htmlUrl,
       body: proposalBody(opts.rule, opts.accountKey, opts.targets, filePath),
       filesChangedJson: preview as unknown as Prisma.InputJsonValue,
-      filesChangedCount: 1,
+      filesChangedCount,
       previewSource: "automation_proposal",
       previewUpdatedAt: now,
     },
@@ -179,7 +249,7 @@ export async function createAutomationProposal(opts: {
       htmlUrl: created.htmlUrl,
       body: proposalBody(opts.rule, opts.accountKey, opts.targets, filePath),
       filesChangedJson: preview as unknown as Prisma.InputJsonValue,
-      filesChangedCount: 1,
+      filesChangedCount,
       previewSource: "automation_proposal",
       previewUpdatedAt: now,
     },
@@ -193,7 +263,7 @@ export async function createAutomationProposal(opts: {
     pullRequestId: prRow.id,
     headSha: created.headSha,
     filePath,
-    filesChanged: 1,
+    filesChanged: filesChangedCount,
     targets: opts.targets.map((target) => ({
       level: target.level,
       targetKey: target.targetKey,
@@ -228,21 +298,29 @@ async function findExistingProposal(
     expectedBase: spec.defaultBranch,
   });
   if (!match) return null;
-  if (!adapter.readPullRequestFile) {
-    throw new Error("automation proposal existing PR content-read capability is unavailable");
+  if (!adapter.readPullRequestSnapshot) {
+    throw new Error("automation proposal existing PR snapshot capability is unavailable");
   }
-  const file = await adapter.readPullRequestFile({
+  const snapshot = await adapter.readPullRequestSnapshot({
     spec,
     number: match.number,
-    path: filePath,
+    artifactPath: filePath,
     expectedHeadSha: match.headSha,
   });
-  if (file.headSha !== match.headSha) {
+  if (snapshot.headSha !== match.headSha) {
     throw new Error("automation proposal existing PR content HEAD does not match polled HEAD");
   }
-  const actualDigest = createHash("sha256").update(file.content).digest("hex").slice(0, 20);
+  if (
+    snapshot.changedFiles.length !== 1 ||
+    snapshot.changedFiles[0]?.path !== filePath ||
+    snapshot.changedFiles[0]?.status !== "added" ||
+    snapshot.changedFiles[0]?.previousPath !== undefined
+  ) {
+    throw new Error("automation proposal existing PR changed-file set is not exactly one added proposal artifact");
+  }
+  const actualDigest = createHash("sha256").update(snapshot.artifactContent).digest("hex").slice(0, 20);
   const expectedDigest = createHash("sha256").update(expectedContent).digest("hex").slice(0, 20);
-  if (file.content !== expectedContent || actualDigest !== expectedDigest) {
+  if (snapshot.artifactContent !== expectedContent || actualDigest !== expectedDigest) {
     throw new Error("automation proposal existing PR file content does not match current evaluation");
   }
 
