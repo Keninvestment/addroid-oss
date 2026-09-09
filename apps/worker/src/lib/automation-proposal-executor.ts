@@ -1,5 +1,6 @@
 import { Prisma, type PrismaClient } from "@addroid/db";
 import type {
+  CreatePullRequestInput,
   CreatePullRequestFile,
   GithubAdapter,
 } from "@addroid/github-adapter";
@@ -34,6 +35,7 @@ export async function createAutomationProposal(opts: {
   githubAdapter: GithubAdapter;
   workspaceId: string;
   runId: string;
+  operationKey: string;
   rule: AutomationRuleYaml;
   accountKey: string;
   targets: AutomationProposalTarget[];
@@ -57,11 +59,11 @@ export async function createAutomationProposal(opts: {
   const now = opts.now ?? new Date();
   const safeRuleId = safeSegment(opts.rule.id);
   const safeAccountKey = safeSegment(opts.accountKey);
-  const safeRunId = safeSegment(opts.runId);
-  const branchName = `addroid/automation-proposal-${safeRuleId}-${safeRunId}`;
+  const safeOperationKey = safeSegment(opts.operationKey);
+  const branchName = `addroid/automation-proposal-${safeRuleId}-${safeOperationKey}`;
   const filePath =
     `proposals/automation/${safeRuleId}/` +
-    `${now.toISOString().replace(/[:.]/g, "-")}-${safeAccountKey}-${safeRunId}.json`;
+    `${now.toISOString().replace(/[:.]/g, "-")}-${safeAccountKey}-${safeOperationKey}.json`;
   const proposal = {
     version: 1,
     kind: "automation_proposal",
@@ -69,6 +71,7 @@ export async function createAutomationProposal(opts: {
     autoApply: false,
     autoMerge: false,
     runId: opts.runId,
+    operationKey: opts.operationKey,
     ruleId: opts.rule.id,
     actionType: opts.rule.action.type,
     accountKey: opts.accountKey,
@@ -88,17 +91,28 @@ export async function createAutomationProposal(opts: {
   const content = `${JSON.stringify(proposal, null, 2)}\n`;
   const diff = fullFileDiff(content);
   const file: CreatePullRequestFile = { path: filePath, action: "create", diff };
-  const created = await opts.githubAdapter.createPullRequest({
+  const title = proposalTitle(opts.rule, opts.accountKey, opts.operationKey);
+  const request: CreatePullRequestInput = {
     spec: {
       owner: repo.owner,
       name: repo.name,
       defaultBranch: repo.defaultBranch,
     },
-    title: `[addroid] Automation proposal: ${opts.rule.id} (${opts.accountKey})`,
+    title,
     body: proposalBody(opts.rule, opts.accountKey, opts.targets, filePath),
     branchName,
     files: [file],
     baseRef: repo.defaultBranch,
+  };
+  const existing = await findExistingProposal(
+    opts.githubAdapter,
+    request.spec,
+    title,
+  );
+  const created = existing ?? await opts.githubAdapter.createPullRequest(request).catch(async (error) => {
+    const recovered = await findExistingProposal(opts.githubAdapter, request.spec, title);
+    if (recovered) return recovered;
+    throw error;
   });
 
   const preview = {
@@ -119,7 +133,7 @@ export async function createAutomationProposal(opts: {
   const prRow = await opts.prisma.githubPullRequest.upsert({
     where: { repoId_number: { repoId: repo.id, number: created.number } },
     update: {
-      title: `[addroid] Automation proposal: ${opts.rule.id} (${opts.accountKey})`,
+      title,
       state: "open",
       headSha: created.headSha,
       baseRef: repo.defaultBranch,
@@ -133,7 +147,7 @@ export async function createAutomationProposal(opts: {
     create: {
       repoId: repo.id,
       number: created.number,
-      title: `[addroid] Automation proposal: ${opts.rule.id} (${opts.accountKey})`,
+      title,
       state: "open",
       headSha: created.headSha,
       baseRef: repo.defaultBranch,
@@ -146,25 +160,6 @@ export async function createAutomationProposal(opts: {
     },
     select: { id: true },
   });
-  await opts.prisma.approvalRecord.create({
-    data: {
-      workspaceId: opts.workspaceId,
-      pullRequestId: prRow.id,
-      targetType: "github_pull_request",
-      targetId: prRow.id,
-      approvedBy: "addroid",
-      decision: "approval_required",
-      comment: "Automation proposal requires human review and merge; it is never auto-applied.",
-      metadata: {
-        source: "automation_proposal",
-        ruleId: opts.rule.id,
-        runId: opts.runId,
-        proposalOnly: true,
-        autoApply: false,
-      } as Prisma.InputJsonValue,
-    },
-  });
-
   return {
     repository: `${repo.owner}/${repo.name}`,
     branchName,
@@ -180,6 +175,23 @@ export async function createAutomationProposal(opts: {
     })),
     diff,
   };
+}
+
+function proposalTitle(
+  rule: AutomationRuleYaml,
+  accountKey: string,
+  operationKey: string,
+): string {
+  return `[addroid] Automation proposal: ${rule.id} (${accountKey}) [op:${operationKey}]`;
+}
+
+async function findExistingProposal(
+  adapter: GithubAdapter,
+  spec: { owner: string; name: string; defaultBranch: string },
+  title: string,
+): Promise<{ number: number; htmlUrl: string; headSha: string } | null> {
+  const result = await adapter.pollPullRequests(spec, {});
+  return result.pullRequests.find((pr) => pr.title === title) ?? null;
 }
 
 function proposalBody(
