@@ -43,10 +43,11 @@ interface FakeApiCalls {
     message: string;
   }[];
   polls: { owner: string; repo: string; etag?: string }[];
+  reads: { owner: string; repo: string; path: string; ref: string }[];
 }
 
 class FakeApiClient implements GithubApiClient {
-  calls: FakeApiCalls = { templateCommits: [], polls: [] };
+  calls: FakeApiCalls = { templateCommits: [], polls: [], reads: [] };
   constructor(
     private readonly accessToken: string,
     private readonly login: string,
@@ -97,6 +98,11 @@ class FakeApiClient implements GithubApiClient {
       htmlUrl: `https://addroid.invalid/${input.owner}/${input.repo}/pull/1`,
       headSha: "fake-pr-head-sha",
     };
+  }
+
+  async readFileAtRef(input: { owner: string; repo: string; path: string; ref: string }) {
+    this.calls.reads.push(input);
+    return { content: "exact proposal bytes\n" };
   }
 
   async mergePullRequest(input: {
@@ -303,4 +309,25 @@ test("OctokitGithubAdapter.pollPullRequests refuses without a token", async () =
       ),
     GithubAdapterUnauthenticatedError
   );
+});
+
+test("OctokitGithubAdapter reads proposal bytes from the exact requested PR head", async () => {
+  const { adapter, getLastApi } = makeAdapter({ login: "octo-test-user" });
+  const begin = await adapter.beginOAuth();
+  await adapter.completeOAuth({ code: "c", state: begin.state });
+
+  const result = await adapter.readPullRequestFile({
+    spec: { owner: "octo-test-user", name: "addroid-ops", defaultBranch: "main" },
+    number: 17,
+    path: "proposals/automation/rule/proposal.json",
+    expectedHeadSha: "exact-head-sha",
+  });
+
+  assert.deepEqual(result, { content: "exact proposal bytes\n", headSha: "exact-head-sha" });
+  assert.deepEqual(getLastApi()?.calls.reads, [{
+    owner: "octo-test-user",
+    repo: "addroid-ops",
+    path: "proposals/automation/rule/proposal.json",
+    ref: "exact-head-sha",
+  }]);
 });
