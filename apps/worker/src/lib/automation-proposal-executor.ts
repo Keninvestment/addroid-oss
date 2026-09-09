@@ -31,6 +31,15 @@ export interface AutomationProposalReceipt {
   diff: string;
 }
 
+interface AutomationProposalCheckpoint {
+  prNumber: number;
+  headSha: string;
+  baseRef: string;
+  branchName: string;
+  filePath: string;
+  artifactDigest: string;
+}
+
 export async function createAutomationProposal(opts: {
   prisma: PrismaClient;
   githubAdapter: GithubAdapter;
@@ -107,6 +116,21 @@ export async function createAutomationProposal(opts: {
     baseRef: repo.defaultBranch,
   };
   const filesChangedCount = request.files.length;
+  const checkpointTarget = `automation_proposal_operation:${opts.operationKey}`;
+  let acceptedCheckpoint = await loadOperationCheckpoint({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    ruleId: opts.rule.id,
+    target: checkpointTarget,
+  });
+  if (acceptedCheckpoint) {
+    validateCheckpointExpectation(acceptedCheckpoint, {
+      baseRef: repo.defaultBranch,
+      branchName,
+      filePath,
+      artifactDigest,
+    });
+  }
   const existing = await findExistingProposal(
     opts.githubAdapter,
     request.spec,
@@ -115,6 +139,7 @@ export async function createAutomationProposal(opts: {
     branchName,
     filePath,
     content,
+    acceptedCheckpoint,
   );
   if (!existing && opts.createIfMissing === false) return null;
   let createdFresh = false;
@@ -124,6 +149,20 @@ export async function createAutomationProposal(opts: {
       return result;
     })
     .catch(async (error) => {
+      acceptedCheckpoint = await loadOperationCheckpoint({
+        prisma: opts.prisma,
+        workspaceId: opts.workspaceId,
+        ruleId: opts.rule.id,
+        target: checkpointTarget,
+      });
+      if (acceptedCheckpoint) {
+        validateCheckpointExpectation(acceptedCheckpoint, {
+          baseRef: repo.defaultBranch,
+          branchName,
+          filePath,
+          artifactDigest,
+        });
+      }
       const recovered = await findExistingProposal(
         opts.githubAdapter,
         request.spec,
@@ -132,13 +171,21 @@ export async function createAutomationProposal(opts: {
         branchName,
         filePath,
         content,
+        acceptedCheckpoint,
       );
       if (recovered) return recovered;
       throw error;
     });
 
-  const checkpointTarget = `automation_proposal_operation:${opts.operationKey}`;
   if (createdFresh) {
+    acceptedCheckpoint = {
+      prNumber: created.number,
+      headSha: created.headSha,
+      baseRef: repo.defaultBranch,
+      branchName,
+      filePath,
+      artifactDigest,
+    };
     await opts.prisma.auditLog.create({
       data: {
         workspaceId: opts.workspaceId,
@@ -146,14 +193,7 @@ export async function createAutomationProposal(opts: {
         action: "automation.proposal.remote_created",
         target: checkpointTarget,
         ref: opts.rule.id,
-        metadata: {
-          prNumber: created.number,
-          headSha: created.headSha,
-          baseRef: repo.defaultBranch,
-          branchName,
-          filePath,
-          artifactDigest,
-        } as Prisma.InputJsonValue,
+        metadata: acceptedCheckpoint as unknown as Prisma.InputJsonValue,
       },
     });
     const verified = await findExistingProposal(
@@ -164,6 +204,7 @@ export async function createAutomationProposal(opts: {
       branchName,
       filePath,
       content,
+      acceptedCheckpoint,
     );
     if (!verified || verified.number !== created.number || verified.headSha !== created.headSha) {
       throw new Error("automation proposal newly created PR failed exact remote verification");
@@ -181,32 +222,20 @@ export async function createAutomationProposal(opts: {
     );
   }
   if (!createdFresh) {
-    const checkpoint = await opts.prisma.auditLog.findFirst({
-      where: {
-        workspaceId: opts.workspaceId,
-        action: "automation.proposal.remote_created",
-        target: checkpointTarget,
-        ref: opts.rule.id,
-      },
-      orderBy: { createdAt: "desc" },
-      select: { metadata: true },
+    acceptedCheckpoint ??= await loadOperationCheckpoint({
+      prisma: opts.prisma,
+      workspaceId: opts.workspaceId,
+      ruleId: opts.rule.id,
+      target: checkpointTarget,
     });
-    const metadata = checkpoint?.metadata;
-    if ((!metadata || typeof metadata !== "object" || Array.isArray(metadata)) && !stored?.headSha) {
+    if (!acceptedCheckpoint && !stored?.headSha) {
       throw new Error("automation proposal existing PR has no accepted remote-creation checkpoint");
     }
-    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
-      const accepted = metadata as Record<string, unknown>;
-      if (
-        accepted["prNumber"] !== created.number ||
-        accepted["headSha"] !== created.headSha ||
-        accepted["baseRef"] !== repo.defaultBranch ||
-        accepted["branchName"] !== branchName ||
-        accepted["filePath"] !== filePath ||
-        accepted["artifactDigest"] !== artifactDigest
-      ) {
-        throw new Error("automation proposal existing PR differs from accepted remote-creation checkpoint");
-      }
+    if (acceptedCheckpoint && (
+      acceptedCheckpoint.prNumber !== created.number ||
+      acceptedCheckpoint.headSha !== created.headSha
+    )) {
+      throw new Error("automation proposal existing PR differs from accepted remote-creation checkpoint");
     }
   }
 
@@ -272,6 +301,55 @@ export async function createAutomationProposal(opts: {
   };
 }
 
+async function loadOperationCheckpoint(input: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  ruleId: string;
+  target: string;
+}): Promise<AutomationProposalCheckpoint | null> {
+  const row = await input.prisma.auditLog.findFirst({
+    where: {
+      workspaceId: input.workspaceId,
+      action: "automation.proposal.remote_created",
+      target: input.target,
+      ref: input.ruleId,
+    },
+    orderBy: { createdAt: "desc" },
+    select: { metadata: true },
+  });
+  if (!row) return null;
+  const value = row.metadata;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("automation proposal remote-creation checkpoint is malformed");
+  }
+  const metadata = value as Record<string, unknown>;
+  if (
+    typeof metadata["prNumber"] !== "number" || !Number.isInteger(metadata["prNumber"]) ||
+    typeof metadata["headSha"] !== "string" || !metadata["headSha"].trim() ||
+    typeof metadata["baseRef"] !== "string" || !metadata["baseRef"].trim() ||
+    typeof metadata["branchName"] !== "string" || !metadata["branchName"].trim() ||
+    typeof metadata["filePath"] !== "string" || !metadata["filePath"].trim() ||
+    typeof metadata["artifactDigest"] !== "string" || !metadata["artifactDigest"].trim()
+  ) {
+    throw new Error("automation proposal remote-creation checkpoint is malformed");
+  }
+  return metadata as unknown as AutomationProposalCheckpoint;
+}
+
+function validateCheckpointExpectation(
+  checkpoint: AutomationProposalCheckpoint,
+  expected: Omit<AutomationProposalCheckpoint, "prNumber" | "headSha">,
+): void {
+  if (
+    checkpoint.baseRef !== expected.baseRef ||
+    checkpoint.branchName !== expected.branchName ||
+    checkpoint.filePath !== expected.filePath ||
+    checkpoint.artifactDigest !== expected.artifactDigest
+  ) {
+    throw new Error("automation proposal checkpoint does not match current evaluation");
+  }
+}
+
 function proposalTitle(
   rule: AutomationRuleYaml,
   accountKey: string,
@@ -289,6 +367,7 @@ async function findExistingProposal(
   expectedBranch: string,
   filePath: string,
   expectedContent: string,
+  acceptedCheckpoint: AutomationProposalCheckpoint | null,
 ): Promise<{ number: number; htmlUrl: string; headSha: string } | null> {
   const result = await adapter.pollPullRequests(spec, {});
   const operationMarker = `[op:${operationKey}]`;
@@ -296,6 +375,8 @@ async function findExistingProposal(
     expectedTitle,
     expectedBranch,
     expectedBase: spec.defaultBranch,
+    expectedNumber: acceptedCheckpoint?.prNumber,
+    expectedHeadSha: acceptedCheckpoint?.headSha,
   });
   if (!match) return null;
   if (!adapter.readPullRequestSnapshot) {
@@ -331,6 +412,8 @@ async function findExistingProposal(
     expectedTitle,
     expectedBranch,
     expectedBase: spec.defaultBranch,
+    expectedNumber: acceptedCheckpoint?.prNumber,
+    expectedHeadSha: acceptedCheckpoint?.headSha,
   });
   if (!verified || verified.number !== match.number || verified.headSha !== match.headSha) {
     throw new Error("automation proposal existing PR changed during content verification");
@@ -341,14 +424,34 @@ async function findExistingProposal(
 function selectExistingProposal(
   pullRequests: Awaited<ReturnType<GithubAdapter["pollPullRequests"]>>["pullRequests"],
   operationMarker: string,
-  expected: { expectedTitle: string; expectedBranch: string; expectedBase: string },
+  expected: {
+    expectedTitle: string;
+    expectedBranch: string;
+    expectedBase: string;
+    expectedNumber?: number;
+    expectedHeadSha?: string;
+  },
 ) {
-  const matches = pullRequests.filter((pr) => pr.title.includes(operationMarker));
-  if (matches.length === 0) return null;
+  const markerMatches = pullRequests.filter((pr) => pr.title.includes(operationMarker));
+  const matches = expected.expectedNumber === undefined
+    ? markerMatches
+    : pullRequests.filter((pr) => pr.number === expected.expectedNumber);
+  if (matches.length === 0) {
+    if (expected.expectedNumber !== undefined) {
+      throw new Error("automation proposal checkpoint-bound PR is missing");
+    }
+    return null;
+  }
   if (matches.length !== 1) {
     throw new Error(`automation proposal operation has ${matches.length} matching PRs`);
   }
   const [match] = matches;
+  if (
+    expected.expectedNumber !== undefined &&
+    markerMatches.some((candidate) => candidate.number !== expected.expectedNumber)
+  ) {
+    throw new Error("automation proposal operation has multiple matching PRs");
+  }
   if (!match || match.state !== "open") {
     throw new Error("automation proposal existing PR is not open");
   }
@@ -363,6 +466,9 @@ function selectExistingProposal(
   }
   if (!match.headSha.trim()) {
     throw new Error("automation proposal existing PR has no head SHA");
+  }
+  if (expected.expectedHeadSha !== undefined && match.headSha !== expected.expectedHeadSha) {
+    throw new Error("automation proposal checkpoint-bound PR head changed");
   }
   return match;
 }

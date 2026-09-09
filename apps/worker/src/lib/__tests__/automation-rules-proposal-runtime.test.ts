@@ -178,7 +178,11 @@ test("GitHub failure is proposal_failed and never becomes false success", async 
 test("proposal cooldown suppresses a duplicate target and records reasoned no_target", async () => {
   const fixture = makeFixture("proposal_pr", 1500);
   try {
-    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target", metadata: null });
+    const findCheckpoint = fixture.prisma.auditLog.findFirst;
+    fixture.prisma.auditLog.findFirst = async (args) =>
+      args?.where?.action === "automation.proposal.remote_created"
+        ? findCheckpoint(args)
+        : { id: "prior_proposal_target", metadata: null };
     const github = new FakeGithubAdapter();
     const summary = await runAutomationRulesOnce({
       prisma: fixture.prisma as never,
@@ -389,7 +393,7 @@ test("existing operation PR with different proposal artifact fails closed", asyn
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /artifact does not match/);
+    assert.match(retry.errors.join("\n"), /checkpoint does not match current evaluation/);
     assert.equal(github.created.length, 1);
   } finally {
     fixture.cleanup();
@@ -410,7 +414,7 @@ test("same-slot reevaluation to no_target cannot bypass existing PR validation",
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /artifact does not match/);
+    assert.match(retry.errors.join("\n"), /checkpoint does not match current evaluation/);
     const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
     assert.equal(evaluation.outcome, "proposal_failed");
   } finally {
@@ -472,7 +476,7 @@ test("DB receipt failure recovery rejects an extra operation file and changed re
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /changed-file set is not exactly one/);
+    assert.match(retry.errors.join("\n"), /checkpoint-bound PR head changed/);
     assert.equal(github.created.length, 1);
   } finally {
     fixture.cleanup();
@@ -498,10 +502,58 @@ test("DB receipt failure recovery rejects changed head despite unchanged artifac
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /differs from accepted remote-creation checkpoint/);
+    assert.match(retry.errors.join("\n"), /checkpoint-bound PR head changed/);
     assert.equal(github.created.length, 1);
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("checkpoint-bound operation never creates a replacement after the original PR is altered", async () => {
+  const scenarios = [
+    {
+      name: "title marker removed, PR closed, and branch deleted",
+      mutate: (github: FakeGithubAdapter) => {
+        github.titleOverride = "renamed PR";
+        github.state = "closed";
+        github.headRefOverride = "";
+      },
+      error: /is not open/,
+    },
+    { name: "renamed", mutate: (github: FakeGithubAdapter) => { github.titleOverride = "renamed PR"; }, error: /artifact does not match/ },
+    { name: "closed", mutate: (github: FakeGithubAdapter) => { github.state = "closed"; }, error: /is not open/ },
+    { name: "deleted", mutate: (github: FakeGithubAdapter) => { github.omitCreatedPr = true; }, error: /checkpoint-bound PR is missing/ },
+    { name: "branch deleted", mutate: (github: FakeGithubAdapter) => { github.headRefOverride = ""; }, error: /branch does not match/ },
+  ];
+  for (const scenario of scenarios) {
+    const fixture = makeFixture("proposal_pr", 1500);
+    try {
+      let failUpsert = true;
+      fixture.prisma.githubPullRequest.upsert = async () => {
+        if (failUpsert) {
+          failUpsert = false;
+          throw new Error("fixture DB receipt failure");
+        }
+        return { id: "pr_1" };
+      };
+      const github = new FakeGithubAdapter();
+      const options = proposalOptions(fixture, github);
+      assert.equal((await runAutomationRulesOnce(options)).status, "failed", scenario.name);
+      scenario.mutate(github);
+
+      const retry = await runAutomationRulesOnce(options);
+
+      assert.equal(retry.status, "failed", scenario.name);
+      assert.match(retry.errors.join("\n"), scenario.error, scenario.name);
+      assert.equal(github.created.length, 1, scenario.name);
+      assert.equal(
+        fixture.state.auditLogs.filter((row) => row.action === "automation.proposal.remote_created").length,
+        1,
+        scenario.name,
+      );
+    } finally {
+      fixture.cleanup();
+    }
   }
 });
 
@@ -586,7 +638,7 @@ test("existing PR changed between content read and reread fails even without a D
     const retry = await runAutomationRulesOnce(options);
 
     assert.equal(retry.status, "failed");
-    assert.match(retry.errors.join("\n"), /changed during content verification/);
+    assert.match(retry.errors.join("\n"), /checkpoint-bound PR head changed/);
   } finally {
     fixture.cleanup();
   }
@@ -626,7 +678,11 @@ test("same-slot retry revalidates a closed PR before cooldown can report no_targ
     const options = proposalOptions(fixture, github);
     assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
     github.state = "closed";
-    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target", metadata: null });
+    const findCheckpoint = fixture.prisma.auditLog.findFirst;
+    fixture.prisma.auditLog.findFirst = async (args) =>
+      args?.where?.action === "automation.proposal.remote_created"
+        ? findCheckpoint(args)
+        : { id: "prior_proposal_target", metadata: null };
 
     const retry = await runAutomationRulesOnce(options);
 
@@ -965,6 +1021,7 @@ class FakeGithubAdapter {
   baseRefOverride: string | null = null;
   headRefOverride: string | null = null;
   headShaOverride: string | null = null;
+  titleOverride: string | null = null;
   contentOverride: string | null = null;
   changeHeadAfterRead = false;
   extraChangedFiles: Array<{
@@ -975,6 +1032,7 @@ class FakeGithubAdapter {
   decoyCount = 0;
   primaryStatus: "added" | "modified" | "removed" | "renamed" = "added";
   primaryPreviousPath: string | null = null;
+  omitCreatedPr = false;
   pollCount = 0;
   constructor(private readonly error?: Error) {}
 
@@ -993,9 +1051,9 @@ class FakeGithubAdapter {
           htmlUrl: `https://github.com/Keninvestment/addroid-ops/pull/${1000 + index}`,
           mergedAt: null,
         })),
-        ...this.created.map((pr, index) => ({
+        ...this.created.filter(() => !this.omitCreatedPr).map((pr, index) => ({
           number: 42 + index,
-          title: pr.title,
+          title: this.titleOverride ?? pr.title,
           state: this.state,
           headSha: this.headShaOverride ?? (index === 0 ? "abc123" : `abc${index}`),
           headRef: this.headRefOverride ?? pr.branchName,
