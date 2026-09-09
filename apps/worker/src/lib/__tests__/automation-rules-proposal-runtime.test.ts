@@ -37,7 +37,7 @@ test("proposal rule creates one proposal-only GitOps PR and stores a receipt", a
       name: "addroid-ops",
       defaultBranch: "main",
     });
-    assert.match(pr.branchName, /^addroid\/automation-proposal-budget_consumption_daily-run_1$/);
+    assert.match(pr.branchName, /^addroid\/automation-proposal-budget_consumption_daily-[a-f0-9]{20}$/);
     assert.equal(pr.files.length, 1);
     assert.match(pr.files[0]!.path, /^proposals\/automation\/budget_consumption_daily\//);
     assert.match(pr.files[0]!.diff, /"proposalOnly": true/);
@@ -47,9 +47,8 @@ test("proposal rule creates one proposal-only GitOps PR and stores a receipt", a
     assert.equal(evaluation.outcome, "proposal_created");
     const receipt = evaluation.proposal as Record<string, unknown>;
     assert.equal(receipt.repository, "Keninvestment/addroid-ops");
-    assert.equal(receipt.prUrl, "https://github.example/Keninvestment/addroid-ops/pull/42");
-    assert.equal(fixture.state.actions.length, 1);
-    assert.equal(fixture.state.actions[0]!.status, "planned");
+    assert.equal(receipt.prUrl, "https://github.com/Keninvestment/addroid-ops/pull/42");
+    assert.equal(fixture.state.actions.length, 0);
   } finally {
     fixture.cleanup();
   }
@@ -122,7 +121,7 @@ test("GitHub failure is proposal_failed and never becomes false success", async 
     const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
     assert.equal(evaluation.outcome, "proposal_failed");
     assert.match(String(evaluation.reason), /fixture github failure/);
-    assert.equal(fixture.state.actionUpdates.at(-1)?.status, "failed");
+    assert.equal(fixture.state.actions.length, 0);
   } finally {
     fixture.cleanup();
   }
@@ -131,7 +130,7 @@ test("GitHub failure is proposal_failed and never becomes false success", async 
 test("proposal cooldown suppresses a duplicate target and records reasoned no_target", async () => {
   const fixture = makeFixture("proposal_pr", 1500);
   try {
-    fixture.prisma.automationAction.findFirst = async () => ({ id: "prior_planned_action" });
+    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target" });
     const github = new FakeGithubAdapter();
     const summary = await runAutomationRulesOnce({
       prisma: fixture.prisma as never,
@@ -184,7 +183,7 @@ test("proposal target limit is applied before creating the single PR", async () 
     assert.equal(summary.actionsPlanned, 2);
     assert.equal(summary.actionsBlocked, 1);
     assert.equal(github.created.length, 1);
-    assert.equal(fixture.state.actions.length, 1);
+    assert.equal(fixture.state.actions.length, 0);
     assert.match(github.created[0]!.files[0]!.diff, /"targetKey": "campaign_1"/);
     assert.doesNotMatch(github.created[0]!.files[0]!.diff, /"targetKey": "campaign_2"/);
   } finally {
@@ -192,7 +191,127 @@ test("proposal target limit is applied before creating the single PR", async () 
   }
 });
 
-function makeFixture(actionType: string, spend: number) {
+test("report_only proposal action never opens a GitHub PR", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const rulePath = path.join(fixture.rootDir, "workflows/automation-rules.yaml");
+    fs.writeFileSync(
+      rulePath,
+      fs.readFileSync(rulePath, "utf8").replace("mode: proposal", "mode: report_only"),
+      "utf8",
+    );
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce({
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    });
+
+    assert.equal(summary.status, "succeeded");
+    assert.equal(github.created.length, 0);
+    const evaluation = fixture.state.runCreates.at(-1)?.evaluation as Record<string, unknown>;
+    assert.equal(evaluation.outcome, "unsupported");
+    assert.match(String(evaluation.reason), /requires proposal mode/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("last_7d fetches and aggregates all seven dates before proposing", async () => {
+  const fixture = makeFixture("proposal_pr", 200, "last_7d");
+  try {
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce({
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    });
+
+    assert.equal(summary.status, "succeeded");
+    assert.equal(fixture.state.requestedDates.length, 7);
+    assert.equal(new Set(fixture.state.requestedDates).size, 7);
+    assert.equal(github.created.length, 1);
+    assert.match(github.created[0]!.files[0]!.diff, /"spend": 1400/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("stable operation key recovers GitHub success after DB receipt failure without duplicate PR", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    let failUpsert = true;
+    fixture.prisma.githubPullRequest.upsert = async () => {
+      if (failUpsert) {
+        failUpsert = false;
+        throw new Error("fixture DB receipt failure");
+      }
+      return { id: "pr_1" };
+    };
+    const github = new FakeGithubAdapter();
+    const options = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    };
+
+    const first = await runAutomationRulesOnce(options);
+    const second = await runAutomationRulesOnce(options);
+
+    assert.equal(first.status, "failed");
+    assert.equal(second.status, "succeeded");
+    assert.equal(github.created.length, 1);
+    const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
+    assert.equal(evaluation.outcome, "proposal_created");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("concurrent runs for the same scheduled slot converge on one proposal PR", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = {
+      prisma: fixture.prisma as never,
+      workspaceId: "ws_1",
+      insightsProvider: fixture.insightsProvider as never,
+      mutationExecutor: null,
+      githubAdapter: github as unknown as GithubAdapter,
+      env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+      now: NOW,
+    };
+
+    const [left, right] = await Promise.all([
+      runAutomationRulesOnce(options),
+      runAutomationRulesOnce(options),
+    ]);
+
+    assert.equal(left.status, "succeeded");
+    assert.equal(right.status, "succeeded");
+    assert.equal(github.created.length, 1);
+    const receipts = fixture.state.runUpdates
+      .map((update) => update.evaluation as Record<string, unknown> | undefined)
+      .filter((evaluation) => evaluation?.outcome === "proposal_created");
+    assert.equal(receipts.length, 2);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+function makeFixture(actionType: string, spend: number, windowPreset = "today") {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-automation-proposal-"));
   fs.mkdirSync(path.join(rootDir, "workflows"), { recursive: true });
   fs.writeFileSync(
@@ -206,7 +325,7 @@ rules:
     scope:
       level: campaign
     window:
-      preset: today
+      preset: ${windowPreset}
       timezone: account
     metrics:
       spend:
@@ -232,6 +351,7 @@ rules:
     runUpdates: [] as Array<Record<string, unknown>>,
     actions: [] as Array<Record<string, unknown>>,
     actionUpdates: [] as Array<Record<string, unknown>>,
+    requestedDates: [] as string[],
   };
   const prisma = {
     workspace: {
@@ -290,11 +410,15 @@ rules:
       },
     },
     approvalRecord: { async create() { return { id: "approval_1" }; } },
-    auditLog: { async create() { return { id: "audit_1" }; } },
+    auditLog: {
+      async findFirst(): Promise<{ id: string } | null> { return null; },
+      async create() { return { id: "audit_1" }; },
+    },
     executionLog: { async create() { return { id: "log_1" }; } },
   };
   const insightsProvider = {
-    async fetchInsights() {
+    async fetchInsights(input?: { metricDate?: string }) {
+      if (input?.metricDate) state.requestedDates.push(input.metricDate);
       return {
         current: [insightRow("campaign_1", spend)],
         prior: [],
@@ -326,12 +450,30 @@ class FakeGithubAdapter {
   readonly created: CreatePullRequestInput[] = [];
   constructor(private readonly error?: Error) {}
 
+  async pollPullRequests() {
+    return {
+      notModified: false,
+      pullRequests: this.created.map((pr, index) => ({
+        number: 42 + index,
+        title: pr.title,
+        state: "open" as const,
+        headSha: `abc${index}`,
+        baseRef: pr.baseRef ?? pr.spec.defaultBranch,
+        htmlUrl: `https://github.com/${pr.spec.owner}/${pr.spec.name}/pull/${42 + index}`,
+        mergedAt: null,
+      })),
+    };
+  }
+
   async createPullRequest(input: CreatePullRequestInput) {
-    this.created.push(input);
     if (this.error) throw this.error;
+    if (this.created.some((pr) => pr.branchName === input.branchName)) {
+      throw new Error("branch already exists");
+    }
+    this.created.push(input);
     return {
       number: 42,
-      htmlUrl: "https://github.example/Keninvestment/addroid-ops/pull/42",
+      htmlUrl: "https://github.com/Keninvestment/addroid-ops/pull/42",
       headSha: "abc123",
     };
   }
