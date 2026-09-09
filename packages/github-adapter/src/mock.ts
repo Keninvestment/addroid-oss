@@ -23,6 +23,8 @@ import {
   type OpsRepoSpec,
   type PullRequestPollResult,
   type PullRequestSummary,
+  type ReadPullRequestFileInput,
+  type ReadPullRequestFileResult,
 } from "./types.js";
 import {
   ADDROID_REQUIRED_SCOPES,
@@ -171,6 +173,27 @@ export class MockGithubAdapter implements GithubAdapter {
       htmlUrl,
     });
     return { number, htmlUrl, headSha };
+  }
+
+  async readPullRequestFile(
+    input: ReadPullRequestFileInput,
+  ): Promise<ReadPullRequestFileResult> {
+    const created = this.createdPullRequests.find((pr) => pr.number === input.number);
+    if (!created || created.headSha !== input.expectedHeadSha) {
+      throw new Error(`mock: PR #${input.number} content is unavailable at requested HEAD`);
+    }
+    const file = created.files.find((candidate) => candidate.path === input.path);
+    if (!file || file.action !== "create") {
+      throw new Error(`mock: PR #${input.number} file is unavailable: ${input.path}`);
+    }
+    const lines = file.diff.split("\n").slice(1);
+    if (lines.some((line) => !line.startsWith("+"))) {
+      throw new Error(`mock: PR #${input.number} file diff is not a full-file create`);
+    }
+    return {
+      content: `${lines.map((line) => line.slice(1)).join("\n")}\n`,
+      headSha: created.headSha,
+    };
   }
 
   async mergePullRequest(

@@ -41,7 +41,8 @@ export async function createAutomationProposal(opts: {
   accountKey: string;
   targets: AutomationProposalTarget[];
   now?: Date;
-}): Promise<AutomationProposalReceipt> {
+  createIfMissing?: boolean;
+}): Promise<AutomationProposalReceipt | null> {
   const workspace = await opts.prisma.workspace.findUnique({
     where: { id: opts.workspaceId },
     select: { opsRepoId: true },
@@ -110,13 +111,20 @@ export async function createAutomationProposal(opts: {
     request.spec,
     opts.operationKey,
     title,
+    branchName,
+    filePath,
+    content,
   );
+  if (!existing && opts.createIfMissing === false) return null;
   const created = existing ?? await opts.githubAdapter.createPullRequest(request).catch(async (error) => {
     const recovered = await findExistingProposal(
       opts.githubAdapter,
       request.spec,
       opts.operationKey,
       title,
+      branchName,
+      filePath,
+      content,
     );
     if (recovered) return recovered;
     throw error;
@@ -208,20 +216,72 @@ async function findExistingProposal(
   spec: { owner: string; name: string; defaultBranch: string },
   operationKey: string,
   expectedTitle: string,
+  expectedBranch: string,
+  filePath: string,
+  expectedContent: string,
 ): Promise<{ number: number; htmlUrl: string; headSha: string } | null> {
   const result = await adapter.pollPullRequests(spec, {});
   const operationMarker = `[op:${operationKey}]`;
-  const matches = result.pullRequests.filter((pr) => pr.title.includes(operationMarker));
+  const match = selectExistingProposal(result.pullRequests, operationMarker, {
+    expectedTitle,
+    expectedBranch,
+    expectedBase: spec.defaultBranch,
+  });
+  if (!match) return null;
+  if (!adapter.readPullRequestFile) {
+    throw new Error("automation proposal existing PR content-read capability is unavailable");
+  }
+  const file = await adapter.readPullRequestFile({
+    spec,
+    number: match.number,
+    path: filePath,
+    expectedHeadSha: match.headSha,
+  });
+  if (file.headSha !== match.headSha) {
+    throw new Error("automation proposal existing PR content HEAD does not match polled HEAD");
+  }
+  const actualDigest = createHash("sha256").update(file.content).digest("hex").slice(0, 20);
+  const expectedDigest = createHash("sha256").update(expectedContent).digest("hex").slice(0, 20);
+  if (file.content !== expectedContent || actualDigest !== expectedDigest) {
+    throw new Error("automation proposal existing PR file content does not match current evaluation");
+  }
+
+  // Re-read after fetching bytes so a concurrent close, retarget, or force-push
+  // cannot be accepted using the earlier summary.
+  const reread = await adapter.pollPullRequests(spec, {});
+  const verified = selectExistingProposal(reread.pullRequests, operationMarker, {
+    expectedTitle,
+    expectedBranch,
+    expectedBase: spec.defaultBranch,
+  });
+  if (!verified || verified.number !== match.number || verified.headSha !== match.headSha) {
+    throw new Error("automation proposal existing PR changed during content verification");
+  }
+  return verified;
+}
+
+function selectExistingProposal(
+  pullRequests: Awaited<ReturnType<GithubAdapter["pollPullRequests"]>>["pullRequests"],
+  operationMarker: string,
+  expected: { expectedTitle: string; expectedBranch: string; expectedBase: string },
+) {
+  const matches = pullRequests.filter((pr) => pr.title.includes(operationMarker));
   if (matches.length === 0) return null;
   if (matches.length !== 1) {
     throw new Error(`automation proposal operation has ${matches.length} matching PRs`);
   }
   const [match] = matches;
   if (!match || match.state !== "open") {
-    throw new Error(`automation proposal existing PR is not open`);
+    throw new Error("automation proposal existing PR is not open");
   }
-  if (match.title !== expectedTitle) {
+  if (match.title !== expected.expectedTitle) {
     throw new Error("automation proposal existing PR artifact does not match current evaluation");
+  }
+  if (match.baseRef !== expected.expectedBase) {
+    throw new Error("automation proposal existing PR base does not match configured default branch");
+  }
+  if (match.headRef !== expected.expectedBranch) {
+    throw new Error("automation proposal existing PR branch does not match deterministic branch");
   }
   if (!match.headSha.trim()) {
     throw new Error("automation proposal existing PR has no head SHA");

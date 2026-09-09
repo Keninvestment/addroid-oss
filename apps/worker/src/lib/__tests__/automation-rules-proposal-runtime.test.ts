@@ -396,6 +396,114 @@ test("existing operation PR with different proposal artifact fails closed", asyn
   }
 });
 
+test("same-slot reevaluation to no_target cannot bypass existing PR validation", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    fixture.insightsProvider.fetchInsights = async () => ({
+      current: [insightRow("campaign_1", 100)],
+      prior: [],
+    });
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /artifact does not match/);
+    const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
+    assert.equal(evaluation.outcome, "proposal_failed");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing PR title digest cannot substitute for reading its actual artifact bytes", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    github.contentOverride = "{\"tampered\":true}\n";
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /file content does not match/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing PR recovery fails closed without exact content-read capability", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    (github as { readPullRequestFile?: unknown }).readPullRequestFile = undefined;
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /content-read capability is unavailable/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing PR with malicious base ref fails closed", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    github.baseRefOverride = "attacker-base";
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /base does not match/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing PR with malicious head branch fails closed", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    github.headRefOverride = "attacker-branch";
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /branch does not match/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("existing PR changed between content read and reread fails even without a DB receipt", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    fixture.prisma.githubPullRequest.findUnique = async () => null;
+    github.changeHeadAfterRead = true;
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /changed during content verification/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("closed or merged operation PR cannot be recovered as an open proposal", async () => {
   const fixture = makeFixture("proposal_pr", 1500);
   try {
@@ -418,6 +526,26 @@ test("closed or merged operation PR cannot be recovered as an open proposal", as
       assert.match(retry.errors.join("\n"), /existing PR is not open/);
     }
     assert.equal(github.created.length, 1);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("same-slot retry revalidates a closed PR before cooldown can report no_target", async () => {
+  const fixture = makeFixture("proposal_pr", 1500);
+  try {
+    const github = new FakeGithubAdapter();
+    const options = proposalOptions(fixture, github);
+    assert.equal((await runAutomationRulesOnce(options)).status, "succeeded");
+    github.state = "closed";
+    fixture.prisma.auditLog.findFirst = async () => ({ id: "prior_proposal_target" });
+
+    const retry = await runAutomationRulesOnce(options);
+
+    assert.equal(retry.status, "failed");
+    assert.match(retry.errors.join("\n"), /existing PR is not open/);
+    const evaluation = fixture.state.runUpdates.at(-1)?.evaluation as Record<string, unknown>;
+    assert.equal(evaluation.outcome, "proposal_failed");
   } finally {
     fixture.cleanup();
   }
@@ -497,6 +625,51 @@ test("multi-day frequency rule fails closed instead of aggregating daily frequen
     assert.match(summary.errors.join("\n"), /non-additive metric: frequency/);
     assert.equal(fixture.state.requestedDates.length, 0);
     assert.equal(github.created.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("last_7d expression referencing frequency fails even when declaration says spend", async () => {
+  const fixture = makeFixture("proposal_pr", 1500, "last_7d");
+  try {
+    const rulePath = path.join(fixture.rootDir, "workflows/automation-rules.yaml");
+    fs.writeFileSync(
+      rulePath,
+      fs.readFileSync(rulePath, "utf8").replace("metric: spend", "metric: frequency"),
+      "utf8",
+    );
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce(proposalOptions(fixture, github));
+
+    assert.equal(summary.status, "failed");
+    assert.match(summary.errors.join("\n"), /non-additive metric: frequency/);
+    assert.equal(fixture.state.requestedDates.length, 0);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("last_7d frequency fails closed even when provider would return only one row", async () => {
+  const fixture = makeFixture("proposal_pr", 1500, "last_7d");
+  try {
+    const rulePath = path.join(fixture.rootDir, "workflows/automation-rules.yaml");
+    fs.writeFileSync(
+      rulePath,
+      fs.readFileSync(rulePath, "utf8").replace("field: spend", "field: frequency"),
+      "utf8",
+    );
+    let calls = 0;
+    fixture.insightsProvider.fetchInsights = async () => {
+      calls += 1;
+      return { current: calls === 1 ? [{ ...insightRow("campaign_1", 1500), frequency: 2 }] : [], prior: [] };
+    };
+    const github = new FakeGithubAdapter();
+    const summary = await runAutomationRulesOnce(proposalOptions(fixture, github));
+
+    assert.equal(summary.status, "failed");
+    assert.match(summary.errors.join("\n"), /non-additive metric: frequency/);
+    assert.equal(calls, 0);
   } finally {
     fixture.cleanup();
   }
@@ -660,6 +833,22 @@ rules:
   };
 }
 
+function proposalOptions(
+  fixture: ReturnType<typeof makeFixture>,
+  github: FakeGithubAdapter,
+) {
+  return {
+    prisma: fixture.prisma as never,
+    workspaceId: "ws_1",
+    insightsProvider: fixture.insightsProvider as never,
+    mutationExecutor: null,
+    githubAdapter: github as unknown as GithubAdapter,
+    env: { ADDROID_OPS_REPO_LOCAL_DIR: fixture.rootDir },
+    now: NOW,
+    scheduledFor: NOW.toISOString(),
+  };
+}
+
 function insightRow(nodeKey: string, spend: number) {
   return {
     nodeType: "campaign",
@@ -675,17 +864,25 @@ function insightRow(nodeKey: string, spend: number) {
 class FakeGithubAdapter {
   readonly created: CreatePullRequestInput[] = [];
   state: PullRequestSummary["state"] = "open";
+  baseRefOverride: string | null = null;
+  headRefOverride: string | null = null;
+  headShaOverride: string | null = null;
+  contentOverride: string | null = null;
+  changeHeadAfterRead = false;
+  pollCount = 0;
   constructor(private readonly error?: Error) {}
 
   async pollPullRequests() {
+    this.pollCount += 1;
     return {
       notModified: false,
       pullRequests: this.created.map((pr, index) => ({
         number: 42 + index,
         title: pr.title,
         state: this.state,
-        headSha: `abc${index}`,
-        baseRef: pr.baseRef ?? pr.spec.defaultBranch,
+        headSha: this.headShaOverride ?? (index === 0 ? "abc123" : `abc${index}`),
+        headRef: this.headRefOverride ?? pr.branchName,
+        baseRef: this.baseRefOverride ?? pr.baseRef ?? pr.spec.defaultBranch,
         htmlUrl: `https://github.com/${pr.spec.owner}/${pr.spec.name}/pull/${42 + index}`,
         mergedAt: null,
       })),
@@ -703,5 +900,20 @@ class FakeGithubAdapter {
       htmlUrl: "https://github.com/Keninvestment/addroid-ops/pull/42",
       headSha: "abc123",
     };
+  }
+
+  async readPullRequestFile(input: {
+    number: number;
+    path: string;
+    expectedHeadSha: string;
+  }) {
+    const created = this.created[input.number - 42];
+    const file = created?.files.find((candidate) => candidate.path === input.path);
+    if (!file) throw new Error("fixture proposal content unavailable");
+    const content = this.contentOverride ?? `${file.diff.split("\n").slice(1)
+      .map((line) => line.slice(1)).join("\n")}\n`;
+    const headSha = input.expectedHeadSha;
+    if (this.changeHeadAfterRead) this.headShaOverride = `${input.expectedHeadSha}-changed`;
+    return { content, headSha };
   }
 }

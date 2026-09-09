@@ -39,6 +39,8 @@ import {
   type OpsRepoSpec,
   type PullRequestPollResult,
   type PullRequestSummary,
+  type ReadPullRequestFileInput,
+  type ReadPullRequestFileResult,
 } from "./types.js";
 
 /**
@@ -100,6 +102,12 @@ export interface GithubApiClient {
     files: CreatePullRequestFile[];
     commitMessage: string;
   }): Promise<{ number: number; htmlUrl: string; headSha: string }>;
+  readFileAtRef?(input: {
+    owner: string;
+    repo: string;
+    path: string;
+    ref: string;
+  }): Promise<{ content: string }>;
   /**
    * Web UI からのマージで使う。GitHub merge API (PUT
    * /repos/{owner}/{repo}/pulls/{number}/merge) を 1 度だけ呼ぶ。
@@ -249,6 +257,22 @@ export class OctokitGithubAdapter implements GithubAdapter {
       files: input.files,
       commitMessage,
     });
+  }
+
+  async readPullRequestFile(
+    input: ReadPullRequestFileInput,
+  ): Promise<ReadPullRequestFileResult> {
+    const api = await this.getAuthenticatedClient("read pull request file");
+    if (!api.readFileAtRef) {
+      throw new GithubAdapterNotImplementedError("readPullRequestFile");
+    }
+    const file = await api.readFileAtRef({
+      owner: input.spec.owner,
+      repo: input.spec.name,
+      path: input.path,
+      ref: input.expectedHeadSha,
+    });
+    return { content: file.content, headSha: input.expectedHeadSha };
   }
 
   async mergePullRequest(
@@ -569,6 +593,7 @@ class OctokitApiClient implements GithubApiClient {
         title: String(pr["title"] ?? ""),
         state: normalizeState(pr),
         headSha: String((pr["head"] as Record<string, unknown> | undefined)?.["sha"] ?? ""),
+        headRef: String((pr["head"] as Record<string, unknown> | undefined)?.["ref"] ?? ""),
         baseRef: String((pr["base"] as Record<string, unknown> | undefined)?.["ref"] ?? "main"),
         htmlUrl: String(pr["html_url"] ?? ""),
         mergedAt: (pr["merged_at"] as string | null) ?? null,
@@ -604,6 +629,22 @@ class OctokitApiClient implements GithubApiClient {
       }
       throw err;
     }
+  }
+
+  async readFileAtRef(input: {
+    owner: string;
+    repo: string;
+    path: string;
+    ref: string;
+  }): Promise<{ content: string }> {
+    const response = await this.octokit.rest.repos.getContent(input);
+    const data = response.data as Record<string, unknown>;
+    if (data["type"] !== "file" || data["encoding"] !== "base64" || typeof data["content"] !== "string") {
+      throw new Error(`GitHub path is not a base64 file: ${input.path}`);
+    }
+    return {
+      content: Buffer.from(data["content"].replace(/\s/g, ""), "base64").toString("utf8"),
+    };
   }
 
   async createPullRequest(input: {

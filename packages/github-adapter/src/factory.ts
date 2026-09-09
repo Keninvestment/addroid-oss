@@ -152,6 +152,18 @@ class LazyGithubApiClient implements GithubApiClient {
   }): Promise<{ number: number; htmlUrl: string; headSha: string }> {
     return (await this.resolve()).createPullRequest(input);
   }
+  async readFileAtRef(input: {
+    owner: string;
+    repo: string;
+    path: string;
+    ref: string;
+  }): Promise<{ content: string }> {
+    const client = await this.resolve();
+    if (!client.readFileAtRef) {
+      throw new Error("GitHub API client cannot read files at an exact ref");
+    }
+    return client.readFileAtRef(input);
+  }
   async mergePullRequest(input: {
     owner: string;
     repo: string;

@@ -35,6 +35,7 @@ import {
 import { resolveOpsRepoLocalDirForWorkspace } from "./ops-repo-local.js";
 import {
   createAutomationProposal,
+  type AutomationProposalReceipt,
   type AutomationProposalTarget,
 } from "./automation-proposal-executor.js";
 
@@ -692,6 +693,43 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
       });
       const evaluation = evaluateAutomationRule(dsl, subjects);
       actionsPlanned += evaluation.plannedActions.length;
+      if (!input.githubAdapter) {
+        throw new Error("automation proposal GitHub adapter is not configured");
+      }
+      const operation = proposalOperationIdentity(
+        input.rule,
+        account.key,
+        input.scheduledFor,
+      );
+      const maxTargets = input.rule.limits?.maxActionsPerRun ??
+        input.rule.limits?.maxCampaignsPerRun ?? evaluation.plannedActions.length;
+      const reevaluatedTargets = evaluation.plannedActions
+        .slice(0, maxTargets)
+        .map(toAutomationProposalTarget);
+      const recovered = await createAutomationProposal({
+        prisma: input.prisma,
+        githubAdapter: input.githubAdapter,
+        workspaceId: input.workspaceId,
+        runId: run.id,
+        operationKey: operation.key,
+        rule: input.rule,
+        accountKey: account.key,
+        targets: reevaluatedTargets,
+        now: operation.scheduledFor,
+        createIfMissing: false,
+      });
+      if (recovered) {
+        await persistProposalSuccess({
+          ...input,
+          runId: run.id,
+          account,
+          matched: evaluation.matched,
+          selected: reevaluatedTargets,
+          operationKey: operation.key,
+          receipt: recovered,
+        });
+        continue;
+      }
       const cooldownHours = input.rule.safety?.cooldownHours ?? null;
       const eligible: AutomationProposalTarget[] = [];
       for (const action of evaluation.plannedActions) {
@@ -708,17 +746,8 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
           actionsBlocked += 1;
           continue;
         }
-        eligible.push({
-          accountId: action.accountId,
-          level: action.level,
-          targetKey: action.targetKey,
-          hierarchyId: action.hierarchyId,
-          observedMetrics: action.observedMetrics,
-          reasons: action.reasons,
-        });
+        eligible.push(toAutomationProposalTarget(action));
       }
-      const maxTargets = input.rule.limits?.maxActionsPerRun ??
-        input.rule.limits?.maxCampaignsPerRun ?? eligible.length;
       const selected = eligible.slice(0, maxTargets);
       actionsBlocked += Math.max(0, eligible.length - selected.length);
 
@@ -760,14 +789,6 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
         continue;
       }
 
-      if (!input.githubAdapter) {
-        throw new Error("automation proposal GitHub adapter is not configured");
-      }
-      const operation = proposalOperationIdentity(
-        input.rule,
-        account.key,
-        input.scheduledFor,
-      );
       const receipt = await createAutomationProposal({
         prisma: input.prisma,
         githubAdapter: input.githubAdapter,
@@ -779,55 +800,16 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
         targets: selected,
         now: operation.scheduledFor,
       });
-      await input.prisma.automationRun.update({
-        where: { id: run.id },
-        data: {
-          status: "succeeded",
-          finishedAt: input.now,
-          evaluation: {
-            outcome: "proposal_created",
-            ruleId: input.rule.id,
-            actionType: input.rule.action.type,
-            accountKey: account.key,
-            matched: evaluation.matched,
-            selectedTargets: selected.length,
-            proposal: receipt,
-          } as unknown as Prisma.InputJsonValue,
-        },
+      if (!receipt) throw new Error("automation proposal creation returned no receipt");
+      await persistProposalSuccess({
+        ...input,
+        runId: run.id,
+        account,
+        matched: evaluation.matched,
+        selected,
+        operationKey: operation.key,
+        receipt,
       });
-      await input.prisma.auditLog.create({
-        data: {
-          workspaceId: input.workspaceId,
-          actor: "cron:automation_rules",
-          action: "automation.proposal.opened",
-          target: `github_pull_request:${receipt.pullRequestId}`,
-          ref: input.rule.id,
-          metadata: {
-            outcome: "proposal_created",
-            runId: run.id,
-            accountKey: account.key,
-            proposal: receipt,
-          } as unknown as Prisma.InputJsonValue,
-        },
-      }).catch(() => undefined);
-      for (const target of selected) {
-        await input.prisma.auditLog.create({
-          data: {
-            workspaceId: input.workspaceId,
-            actor: "cron:automation_rules",
-            action: "automation.proposal.target",
-            target: proposalTargetAuditKey(target),
-            ref: input.rule.id,
-            metadata: {
-              outcome: "proposal_created",
-              operationKey: operation.key,
-              accountKey: account.key,
-              actionType: input.rule.action.type,
-              prUrl: receipt.prUrl,
-            } as Prisma.InputJsonValue,
-          },
-        }).catch(() => undefined);
-      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "automation proposal failed";
       errors.push(`${input.rule.id}/${account.key}: ${message}`);
@@ -865,6 +847,80 @@ async function runProposalRule(input: RunAutomationRulesOnceOptions & {
   return { rulesEvaluated, actionsPlanned, actionsBlocked, errors };
 }
 
+function toAutomationProposalTarget(action: AutomationPlannedAction): AutomationProposalTarget {
+  return {
+    accountId: action.accountId,
+    level: action.level,
+    targetKey: action.targetKey,
+    hierarchyId: action.hierarchyId,
+    observedMetrics: action.observedMetrics,
+    reasons: action.reasons,
+  };
+}
+
+async function persistProposalSuccess(input: {
+  prisma: PrismaClient;
+  workspaceId: string;
+  rule: AutomationRuleYaml;
+  now: Date;
+  runId: string;
+  account: { key: string };
+  matched: number;
+  selected: AutomationProposalTarget[];
+  operationKey: string;
+  receipt: AutomationProposalReceipt;
+}): Promise<void> {
+  await input.prisma.automationRun.update({
+    where: { id: input.runId },
+    data: {
+      status: "succeeded",
+      finishedAt: input.now,
+      evaluation: {
+        outcome: "proposal_created",
+        ruleId: input.rule.id,
+        actionType: input.rule.action.type,
+        accountKey: input.account.key,
+        matched: input.matched,
+        selectedTargets: input.selected.length,
+        proposal: input.receipt,
+      } as unknown as Prisma.InputJsonValue,
+    },
+  });
+  await input.prisma.auditLog.create({
+    data: {
+      workspaceId: input.workspaceId,
+      actor: "cron:automation_rules",
+      action: "automation.proposal.opened",
+      target: `github_pull_request:${input.receipt.pullRequestId}`,
+      ref: input.rule.id,
+      metadata: {
+        outcome: "proposal_created",
+        runId: input.runId,
+        accountKey: input.account.key,
+        proposal: input.receipt,
+      } as unknown as Prisma.InputJsonValue,
+    },
+  }).catch(() => undefined);
+  for (const target of input.selected) {
+    await input.prisma.auditLog.create({
+      data: {
+        workspaceId: input.workspaceId,
+        actor: "cron:automation_rules",
+        action: "automation.proposal.target",
+        target: proposalTargetAuditKey(target),
+        ref: input.rule.id,
+        metadata: {
+          outcome: "proposal_created",
+          operationKey: input.operationKey,
+          accountKey: input.account.key,
+          actionType: input.rule.action.type,
+          prUrl: input.receipt.prUrl,
+        } as Prisma.InputJsonValue,
+      },
+    }).catch(() => undefined);
+  }
+}
+
 async function loadSubjectsForRule(input: {
   prisma: PrismaClient;
   account: { id: string; key: string; timezoneName: string | null };
@@ -879,9 +935,7 @@ async function loadSubjectsForRule(input: {
   );
   const metricDates = metricDatesForWindow(input.rule, input.now ?? new Date(), timeZone);
   if (metricDates.length > 1) {
-    const nonAdditiveFields = Object.values(input.rule.metrics ?? {})
-      .map((metric) => metric.field)
-      .filter((field) => field === "frequency" || field === "reach");
+    const nonAdditiveFields = referencedNonAdditiveMetrics(input.rule);
     if (nonAdditiveFields.length > 0) {
       throw new Error(
         `multi-day automation window does not support non-additive metric: ${[...new Set(nonAdditiveFields)].join(", ")}`,
@@ -905,6 +959,7 @@ async function loadSubjectsForRule(input: {
   const rows = aggregateInsightsRows(
     fetched.flatMap((insights) => insights.current)
       .filter((row) => row.nodeType === input.rule.scope.level),
+    metricDates.length > 1,
   );
   const hierarchy = await loadHierarchyIndex(input.prisma, input.account.id, rows);
   return rows.map((row) => toSubject(input.account.id, input.account.key, row, hierarchy));
@@ -932,13 +987,47 @@ function metricDatesForWindow(
   );
 }
 
-function aggregateInsightsRows(rows: DailyReportInsightsRow[]): DailyReportInsightsRow[] {
+function referencedNonAdditiveMetrics(rule: AutomationRuleDsl): string[] {
+  const found = new Set<string>();
+  for (const [alias, metric] of Object.entries(rule.metrics ?? {})) {
+    if (alias === "frequency" || alias === "reach") found.add(alias);
+    if (metric.field === "frequency" || metric.field === "reach") found.add(metric.field);
+  }
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== "object") return;
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (key === "metric" && (nested === "frequency" || nested === "reach")) {
+        found.add(nested);
+      }
+      visit(nested);
+    }
+  };
+  visit(rule.when);
+  for (const expression of Object.values(rule.computed ?? {})) {
+    for (const metric of ["frequency", "reach"] as const) {
+      if (new RegExp(`\\b${metric}\\b`).test(expression)) found.add(metric);
+    }
+  }
+  return [...found];
+}
+
+function aggregateInsightsRows(
+  rows: DailyReportInsightsRow[],
+  clearNonAdditive: boolean,
+): DailyReportInsightsRow[] {
   const grouped = new Map<string, DailyReportInsightsRow>();
   for (const row of rows) {
     const key = `${row.nodeType}:${row.nodeKey}`;
     const current = grouped.get(key);
     if (!current) {
-      grouped.set(key, { ...row });
+      grouped.set(key, {
+        ...row,
+        ...(clearNonAdditive ? { frequency: null, reach: null } : {}),
+      });
       continue;
     }
     const totalImpressions = current.impressions + row.impressions;
