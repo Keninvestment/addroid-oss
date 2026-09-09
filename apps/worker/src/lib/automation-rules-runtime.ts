@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@addroid/db";
 import { Prisma } from "@addroid/db";
+import type { GithubAdapter } from "@addroid/github-adapter";
 import cronParser from "cron-parser";
 import type PgBoss from "pg-boss";
 import {
@@ -31,15 +32,21 @@ import {
   readRuleCalibration,
 } from "./automation-baseline-runtime.js";
 import { resolveOpsRepoLocalDirForWorkspace } from "./ops-repo-local.js";
+import {
+  createAutomationProposal,
+  type AutomationProposalTarget,
+} from "./automation-proposal-executor.js";
 
 export interface RunAutomationRulesOnceOptions {
   prisma: PrismaClient;
   workspaceId: string;
   insightsProvider: DailyReportInsightsProvider;
   mutationExecutor: AutomationMutationExecutor | null;
+  githubAdapter?: GithubAdapter | null;
   env?: NodeJS.ProcessEnv;
   fallbackTimeZone?: string | null;
   ruleKey?: string;
+  now?: Date;
 }
 
 export interface ScheduledAutomationRulePayload {
@@ -98,6 +105,20 @@ export async function runAutomationRulesOnce(
     if (opts.ruleKey && rule.id !== opts.ruleKey) continue;
     await upsertRuleRow(opts.prisma, opts.workspaceId, rule);
     if (!rule.enabled) continue;
+    if (isProposalActionType(rule.action.type)) {
+      const proposalSummary = await runProposalRule({
+        ...opts,
+        accounts,
+        rule,
+        githubAdapter: opts.githubAdapter ?? null,
+        now: opts.now ?? new Date(),
+      });
+      rulesEvaluated += proposalSummary.rulesEvaluated;
+      actionsPlanned += proposalSummary.actionsPlanned;
+      actionsBlocked += proposalSummary.actionsBlocked;
+      errors.push(...proposalSummary.errors);
+      continue;
+    }
     const dsl = toExecutableDsl(rule);
     if (!dsl) {
       actionsBlocked += await recordUnsupportedRule(opts.prisma, opts.workspaceId, rule);
@@ -546,6 +567,262 @@ function toExecutableDsl(rule: AutomationRuleYaml): AutomationRuleDsl | null {
   };
 }
 
+function toProposalEvaluationDsl(rule: AutomationRuleYaml): AutomationRuleDsl {
+  return {
+    id: rule.id,
+    ...(rule.schedule ? { schedule: rule.schedule } : {}),
+    scope: {
+      level: rule.scope.level,
+      ...(rule.scope.accounts ? { accounts: rule.scope.accounts } : {}),
+      ...(rule.scope.includePaused !== undefined ? { includePaused: rule.scope.includePaused } : {}),
+    },
+    window: {
+      preset: rule.window.preset ?? "today",
+      ...(rule.window.since ? { since: rule.window.since } : {}),
+      ...(rule.window.until ? { until: rule.window.until } : {}),
+      timezone: rule.window.timezone ?? "account",
+    },
+    metrics: rule.metrics,
+    ...(rule.computed ? { computed: rule.computed } : {}),
+    when: rule.when,
+    // The rule engine needs an action to expose matching subjects. This
+    // placeholder is never passed to the Meta mutation executor.
+    action: { type: "set_status", status: "PAUSED" },
+    safety: { ...rule.safety, mode: "proposal" },
+  };
+}
+
+function isProposalActionType(actionType: string): boolean {
+  return actionType === "proposal_pr" || actionType === "improvement_pr";
+}
+
+async function runProposalRule(input: RunAutomationRulesOnceOptions & {
+  accounts: Array<{
+    id: string;
+    key: string;
+    displayName: string;
+    currency: string | null;
+    timezoneName: string | null;
+  }>;
+  rule: AutomationRuleYaml;
+  githubAdapter: GithubAdapter | null;
+  now: Date;
+}): Promise<{
+  rulesEvaluated: number;
+  actionsPlanned: number;
+  actionsBlocked: number;
+  errors: string[];
+}> {
+  let rulesEvaluated = 0;
+  let actionsPlanned = 0;
+  let actionsBlocked = 0;
+  const errors: string[] = [];
+  const dsl = toProposalEvaluationDsl(input.rule);
+  const ruleId = await automationRuleId(
+    input.prisma,
+    input.workspaceId,
+    input.rule.id,
+  );
+
+  for (const account of input.accounts) {
+    if (dsl.scope.accounts?.length && !dsl.scope.accounts.includes(account.key)) continue;
+    rulesEvaluated += 1;
+    const run = await input.prisma.automationRun.create({
+      data: {
+        workspaceId: input.workspaceId,
+        ruleId,
+        status: "running",
+      },
+      select: { id: true },
+    });
+    const plannedActionIds: string[] = [];
+    try {
+      const subjects = await loadSubjectsForRule({
+        prisma: input.prisma,
+        account,
+        rule: dsl,
+        insightsProvider: input.insightsProvider,
+        fallbackTimeZone: input.fallbackTimeZone,
+      });
+      const evaluation = evaluateAutomationRule(dsl, subjects);
+      actionsPlanned += evaluation.plannedActions.length;
+      const cooldownHours = input.rule.safety?.cooldownHours ?? null;
+      const eligible: AutomationProposalTarget[] = [];
+      for (const action of evaluation.plannedActions) {
+        const cooldownActive = await hasRecentProposalAction({
+          prisma: input.prisma,
+          ruleKey: input.rule.id,
+          accountId: action.accountId,
+          actionType: input.rule.action.type,
+          level: action.level,
+          targetKey: action.targetKey,
+          cooldownHours,
+          now: input.now,
+        });
+        if (cooldownActive) {
+          actionsBlocked += 1;
+          continue;
+        }
+        eligible.push({
+          accountId: action.accountId,
+          level: action.level,
+          targetKey: action.targetKey,
+          hierarchyId: action.hierarchyId,
+          observedMetrics: action.observedMetrics,
+          reasons: action.reasons,
+        });
+      }
+      const maxTargets = input.rule.limits?.maxActionsPerRun ??
+        input.rule.limits?.maxCampaignsPerRun ?? eligible.length;
+      const selected = eligible.slice(0, maxTargets);
+      actionsBlocked += Math.max(0, eligible.length - selected.length);
+
+      if (selected.length === 0) {
+        const reason = evaluation.matched === 0
+          ? "rule conditions matched no targets"
+          : "all matching targets are within cooldown";
+        await input.prisma.automationRun.update({
+          where: { id: run.id },
+          data: {
+            status: "succeeded",
+            finishedAt: input.now,
+            evaluation: {
+              outcome: "no_target",
+              ruleId: input.rule.id,
+              actionType: input.rule.action.type,
+              accountKey: account.key,
+              matched: evaluation.matched,
+              eligibleTargets: 0,
+              reason,
+            } as Prisma.InputJsonValue,
+          },
+        });
+        await input.prisma.auditLog.create({
+          data: {
+            workspaceId: input.workspaceId,
+            actor: "cron:automation_rules",
+            action: "automation.proposal.no_target",
+            target: `automation_run:${run.id}`,
+            ref: input.rule.id,
+            metadata: {
+              outcome: "no_target",
+              accountKey: account.key,
+              matched: evaluation.matched,
+              reason,
+            } as Prisma.InputJsonValue,
+          },
+        }).catch(() => undefined);
+        continue;
+      }
+
+      for (const target of selected) {
+        const row = await input.prisma.automationAction.create({
+          data: {
+            runId: run.id,
+            accountId: target.accountId,
+            hierarchyId: target.hierarchyId,
+            level: target.level,
+            targetKey: target.targetKey,
+            actionType: input.rule.action.type,
+            payload: {
+              proposalOnly: true,
+              observedMetrics: target.observedMetrics,
+              reasons: target.reasons,
+              requestedAction: input.rule.action,
+            } as Prisma.InputJsonValue,
+            status: "planned",
+          },
+          select: { id: true },
+        });
+        plannedActionIds.push(row.id);
+      }
+      if (!input.githubAdapter) {
+        throw new Error("automation proposal GitHub adapter is not configured");
+      }
+      const receipt = await createAutomationProposal({
+        prisma: input.prisma,
+        githubAdapter: input.githubAdapter,
+        workspaceId: input.workspaceId,
+        runId: run.id,
+        rule: input.rule,
+        accountKey: account.key,
+        targets: selected,
+        now: input.now,
+      });
+      await input.prisma.automationRun.update({
+        where: { id: run.id },
+        data: {
+          status: "succeeded",
+          finishedAt: input.now,
+          evaluation: {
+            outcome: "proposal_created",
+            ruleId: input.rule.id,
+            actionType: input.rule.action.type,
+            accountKey: account.key,
+            matched: evaluation.matched,
+            selectedTargets: selected.length,
+            proposal: receipt,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      });
+      await input.prisma.auditLog.create({
+        data: {
+          workspaceId: input.workspaceId,
+          actor: "cron:automation_rules",
+          action: "automation.proposal.opened",
+          target: `github_pull_request:${receipt.pullRequestId}`,
+          ref: input.rule.id,
+          metadata: {
+            outcome: "proposal_created",
+            runId: run.id,
+            accountKey: account.key,
+            proposal: receipt,
+          } as unknown as Prisma.InputJsonValue,
+        },
+      }).catch(() => undefined);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "automation proposal failed";
+      errors.push(`${input.rule.id}/${account.key}: ${message}`);
+      if (plannedActionIds.length > 0) {
+        await input.prisma.automationAction.updateMany({
+          where: { id: { in: plannedActionIds } },
+          data: { status: "failed", executedAt: input.now },
+        }).catch(() => undefined);
+      }
+      await input.prisma.automationRun.update({
+        where: { id: run.id },
+        data: {
+          status: "failed",
+          finishedAt: input.now,
+          errorMessage: message,
+          evaluation: {
+            outcome: "proposal_failed",
+            ruleId: input.rule.id,
+            actionType: input.rule.action.type,
+            accountKey: account.key,
+            reason: message,
+          } as Prisma.InputJsonValue,
+        },
+      }).catch(() => undefined);
+      await input.prisma.auditLog.create({
+        data: {
+          workspaceId: input.workspaceId,
+          actor: "cron:automation_rules",
+          action: "automation.proposal.failed",
+          target: `automation_run:${run.id}`,
+          ref: input.rule.id,
+          metadata: {
+            outcome: "proposal_failed",
+            accountKey: account.key,
+            reason: message,
+          } as Prisma.InputJsonValue,
+        },
+      }).catch(() => undefined);
+    }
+  }
+  return { rulesEvaluated, actionsPlanned, actionsBlocked, errors };
+}
+
 async function loadSubjectsForRule(input: {
   prisma: PrismaClient;
   account: { id: string; key: string; timezoneName: string | null };
@@ -806,6 +1083,33 @@ async function hasRecentAutomationAction(input: {
   return Boolean(row);
 }
 
+async function hasRecentProposalAction(input: {
+  prisma: PrismaClient;
+  ruleKey: string;
+  accountId: string;
+  actionType: string;
+  level: string;
+  targetKey: string;
+  cooldownHours: number | null;
+  now: Date;
+}): Promise<boolean> {
+  if (!input.cooldownHours || input.cooldownHours <= 0) return false;
+  const since = new Date(input.now.getTime() - input.cooldownHours * 3_600_000);
+  const row = await input.prisma.automationAction.findFirst({
+    where: {
+      accountId: input.accountId,
+      actionType: input.actionType,
+      level: input.level,
+      targetKey: input.targetKey,
+      status: "planned",
+      createdAt: { gte: since },
+      run: { rule: { key: input.ruleKey } },
+    },
+    select: { id: true },
+  });
+  return Boolean(row);
+}
+
 function estimateDailyBudgetAffected(action: AutomationPlannedAction): number {
   const current = readNumber(action.payload.currentDailyBudget);
   const proposed = readNumber(action.payload.proposedDailyBudget);
@@ -836,6 +1140,7 @@ async function recordUnsupportedRule(
       status: "skipped",
       finishedAt: new Date(),
       evaluation: {
+        outcome: "unsupported",
         ruleId: rule.id,
         actionType: rule.action.type,
         reason: "action is stored as a pre-approved policy candidate but has no direct executor; use PR/apply path",
@@ -850,6 +1155,20 @@ async function recordUnsupportedRule(
       refId: run.id,
       level: "warn",
       message: `automation rule ${rule.id} skipped: unsupported direct executor for ${rule.action.type}`,
+    },
+  }).catch(() => undefined);
+  await prisma.auditLog.create({
+    data: {
+      workspaceId,
+      actor: "cron:automation_rules",
+      action: "automation.proposal.unsupported",
+      target: `automation_run:${run.id}`,
+      ref: rule.id,
+      metadata: {
+        outcome: "unsupported",
+        actionType: rule.action.type,
+        reason: "unsupported automation action type",
+      } as Prisma.InputJsonValue,
     },
   }).catch(() => undefined);
   return 1;
