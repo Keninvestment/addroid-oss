@@ -10,6 +10,7 @@ import type { UpState } from "../lib/processes.js";
 import { writeUpState } from "../lib/processes.js";
 import { checkWorkerRuntime } from "../lib/checks.js";
 import { runStatus } from "../commands/status.js";
+import { finalizeSeparateWorkerState } from "../commands/up.js";
 import {
   WorkerSupervisor,
   evaluateWorkerHealth,
@@ -335,6 +336,28 @@ describe("worker supervisor", () => {
     }
   });
 
+  it("never resurrects an exhausted current generation from late ready or heartbeat", async () => {
+    const h = harness({ maxRestartAttempts: 1 });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.ready(1);
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      const finalChild = h.children[1]!;
+      finalChild.ready(2);
+      finalChild.exit(1);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      finalChild.ready(2);
+      finalChild.heartbeat(2);
+      const state = h.supervisor.getSnapshot();
+      assert.equal(state.phase, "exhausted");
+      assert.equal(state.workerPid, null);
+      assert.equal(state.restartAttempts, 1);
+    } finally {
+      h.cleanup();
+    }
+  });
+
   it("doctor's pure runtime check reports stale heartbeat as error", async () => {
     const h = harness();
     try {
@@ -435,6 +458,43 @@ describe("worker supervisor", () => {
       assert.equal(h.supervisor.getSnapshot().phase, "stopped");
       assert.equal(h.supervisor.getSnapshot().lastFailure, null);
     } finally {
+      h.cleanup();
+    }
+  });
+
+  it("unkillable shutdown preserves owner state and returns nonzero", async () => {
+    const h = harness();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    try {
+      await h.supervisor.start();
+      const initialPid = h.children[0]!.pid;
+      await writeUpState(
+        {
+          startedAt: new Date().toISOString(),
+          parentPid: process.pid,
+          workerPid: initialPid,
+          webUrl: "http://127.0.0.1:3000",
+          cwd: process.cwd(),
+          mode: "separate-worker",
+        },
+        h.paths
+      );
+      const stopped = await h.supervisor.stop();
+      assert.equal(stopped, false);
+      assert.deepEqual(h.children[0]!.killCalls, ["SIGTERM", "SIGKILL"]);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      assert.equal(h.supervisor.getSnapshot().workerPid, initialPid);
+
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        return true;
+      }) as typeof process.stderr.write;
+      assert.equal(await finalizeSeparateWorkerState(h.paths, stopped, 0), 1);
+      assert.equal(fs.existsSync(h.paths.pidFile), true);
+      assert.match(stderr, /preserving pid\/health state/);
+    } finally {
+      process.stderr.write = originalWrite;
       h.cleanup();
     }
   });

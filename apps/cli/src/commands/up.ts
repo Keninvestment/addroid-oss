@@ -491,8 +491,9 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     shuttingDown = true;
     exitCode = code;
     process.stdout.write(`\n[addroid up] shutting down (${reason})…\n`);
-    await workerSupervisor.stop().catch((err) => {
+    const workerStopped = await workerSupervisor.stop().catch((err) => {
       process.stderr.write(`[addroid up] worker supervisor stop error: ${(err as Error).message}\n`);
+      return false;
     });
     try {
       if (httpServer) await closeServer(httpServer);
@@ -510,8 +511,12 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     } catch {
       /* ignore */
     }
-    await clearUpState(ctx.paths).catch(() => undefined);
-    process.exit(exitCode);
+    const finalExitCode = await finalizeSeparateWorkerState(
+      ctx.paths,
+      workerStopped,
+      exitCode
+    );
+    process.exit(finalExitCode);
   };
 
   process.on("SIGINT", () => {
@@ -615,6 +620,21 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
   return await new Promise<number>(() => {
     /* never resolves; shutdown handler invokes process.exit */
   });
+}
+
+export async function finalizeSeparateWorkerState(
+  paths: AddroidPaths,
+  workerStopped: boolean,
+  requestedExitCode: number
+): Promise<number> {
+  if (!workerStopped) {
+    process.stderr.write(
+      "[addroid up] worker stop could not be confirmed; preserving pid/health state for readback.\n"
+    );
+    return 1;
+  }
+  await clearUpState(paths).catch(() => undefined);
+  return requestedExitCode;
 }
 
 // ---------------------------------------------------------------------

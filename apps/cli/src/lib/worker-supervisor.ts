@@ -271,8 +271,8 @@ export class WorkerSupervisor {
     await this.persistQueue;
   }
 
-  async stop(): Promise<void> {
-    if (this.snapshot.phase === "stopped") return;
+  async stop(): Promise<boolean> {
+    if (this.snapshot.phase === "stopped") return true;
     this.clearTimers();
     this.setSnapshot({ phase: "stopping", nextRestartAt: null });
     const active = this.child ?? this.retiringChild;
@@ -322,7 +322,7 @@ export class WorkerSupervisor {
         });
         this.logger.error("[addroid up] worker did not exit after SIGKILL during shutdown");
         await this.flush();
-        return;
+        return false;
       }
     }
     this.child = null;
@@ -330,6 +330,7 @@ export class WorkerSupervisor {
     this.retireDeadlineMs = null;
     this.setSnapshot({ phase: "stopped", workerPid: null });
     await this.flush();
+    return true;
   }
 
   private spawnGeneration(): void {
@@ -435,8 +436,10 @@ export class WorkerSupervisor {
   private onMessage(generation: number, raw: unknown): void {
     if (!isWorkerProtocolMessage(raw) || raw.generation !== generation) return;
     if (generation !== this.snapshot.generation) return;
+    if (this.failedGeneration === generation) return;
     if (this.snapshot.phase === "stopping" || this.snapshot.phase === "stopped") return;
     if (raw.type === "fatal") {
+      if (this.snapshot.phase !== "starting" && this.snapshot.phase !== "ready") return;
       try {
         this.child?.kill("SIGTERM");
       } catch {
@@ -448,6 +451,7 @@ export class WorkerSupervisor {
     const atMs = this.now();
     const at = new Date(atMs).toISOString();
     if (raw.type === "ready") {
+      if (this.snapshot.phase !== "starting") return;
       this.cancelReadyTimer();
       this.setSnapshot({ phase: "ready", readyAt: at, lastHeartbeatAt: at });
       this.scheduleHeartbeatDeadline(generation);
