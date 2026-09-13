@@ -60,6 +60,13 @@ export interface DailyReportInsightsRow {
   conversions: number;
   /** 平均露出回数。Meta は "frequency" を float で返す。null 可。 */
   frequency?: number | null;
+  reach?: number | null;
+  linkClicks?: number | null;
+  videoThruPlays?: number | null;
+  video3SecViews?: number | null;
+  qualityRanking?: string | null;
+  engagementRateRanking?: string | null;
+  conversionRateRanking?: string | null;
 }
 
 export interface DailyReportInsightsRequest {
