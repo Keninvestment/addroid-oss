@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 
 import { estimateCostUsd } from "./pricing.js";
+import { redactPayloadForError } from "./redact.js";
 import {
   LLMNotImplementedError,
   LLMProviderError,
@@ -176,8 +177,6 @@ export class CodexAppServerLLMProvider implements LLMProvider {
       approvalPolicy: "never",
       sandbox: "read-only",
       ephemeral: true,
-      experimentalRawEvents: false,
-      persistExtendedHistory: false,
     });
     const threadId = thread.thread.id;
     const model = typeof thread.model === "string" && thread.model.trim().length > 0
@@ -192,6 +191,8 @@ export class CodexAppServerLLMProvider implements LLMProvider {
         let content = "";
         let inputTokens = 0;
         let outputTokens = 0;
+        let currentTurnId: string | null = null;
+        let lastErrorMessage: string | null = null;
         let off: (() => void) | null = null;
         const timeout = setTimeout(() => {
           settleError(new LLMProviderError("codex", `timeout waiting for app-server turn after ${Math.round(this.timeoutMs / 1000)}s`));
@@ -215,6 +216,19 @@ export class CodexAppServerLLMProvider implements LLMProvider {
         off = rpc.onNotification((msg) => {
           const params = msg.params ?? {};
           if (params.threadId !== threadId) return;
+          if (msg.method === "error") {
+            if (currentTurnId && params.turnId !== currentTurnId) return;
+            const error = isRecord(params.error) ? params.error : null;
+            const message = sanitizeCodexErrorMessage(error?.message, "codex turn failed");
+            if (params.willRetry === true) {
+              lastErrorMessage = message;
+              return;
+            }
+            if (params.willRetry === false) {
+              settleError(new LLMProviderError("codex", message));
+            }
+            return;
+          }
           if (msg.method === "item/agentMessage/delta") {
             const delta = params.delta;
             if (typeof delta === "string") content += delta;
@@ -236,15 +250,38 @@ export class CodexAppServerLLMProvider implements LLMProvider {
           }
           if (msg.method === "turn/completed") {
             const turn = isRecord(params.turn) ? params.turn : {};
-            const status = typeof turn.status === "string" ? turn.status : "completed";
+            const turnId = typeof turn.id === "string" ? turn.id : null;
+            if (currentTurnId && turnId && turnId !== currentTurnId) return;
+            const status = typeof turn.status === "string" ? turn.status : "unknown";
+            if (status !== "completed") {
+              const turnError = isRecord(turn.error) ? turn.error : null;
+              const detail = typeof turnError?.message === "string"
+                ? turnError.message
+                : lastErrorMessage;
+              const message = detail
+                ? `codex turn ended with status ${status}: ${detail}`
+                : `codex turn ended with status ${status}`;
+              settleError(new LLMProviderError("codex", sanitizeCodexErrorMessage(message)));
+              return;
+            }
+            if (content.length === 0) {
+              settleError(
+                new LLMProviderError("codex", "codex turn completed with empty assistant message")
+              );
+              return;
+            }
             settleSuccess(status);
           }
         });
 
-        rpc.request("turn/start", {
+        rpc.request<CodexTurnStartResult>("turn/start", {
           threadId,
           input,
-        }).catch((err) => settleError(asProviderError(err)));
+        })
+          .then((started) => {
+            currentTurnId = started.turn.id;
+          })
+          .catch((err) => settleError(asProviderError(err)));
       }
     );
 
@@ -407,6 +444,10 @@ interface CodexDeviceLoginStartResult {
 interface CodexThreadStartResult {
   thread: { id: string };
   model?: string;
+}
+
+interface CodexTurnStartResult {
+  turn: { id: string };
 }
 
 function accountToConnection(
@@ -603,6 +644,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function sanitizeCodexErrorMessage(value: unknown, fallback = "codex turn failed"): string {
+  const raw = typeof value === "string" && value.trim().length > 0 ? value : fallback;
+  const sanitized = redactPayloadForError(raw).replace(/\s+/g, " ").trim() || fallback;
+  // LLMProviderError prefixes messages with "[codex] "; keep the full message <= 500 chars.
+  return sanitized.slice(0, 492);
 }
 
 function asProviderError(err: unknown): Error {

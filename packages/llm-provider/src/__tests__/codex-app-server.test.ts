@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 import {
   CodexAppServerLLMProvider,
   LLMNotImplementedError,
+  LLMProviderError,
   LLMProviderUnauthenticatedError,
   type CodexLLMAppServerRpcClient,
   type CodexLLMAppServerRpcNotification,
 } from "../index.js";
 
-function makeRpc(opts: { account?: { email: string; planType?: string } | null } = {}) {
+function makeRpc(opts: {
+  account?: { email: string; planType?: string } | null;
+  turnNotifications?: CodexLLMAppServerRpcNotification[];
+} = {}) {
   const handlers: Array<(msg: CodexLLMAppServerRpcNotification) => void> = [];
   const calls: Array<{ method: string; params: unknown }> = [];
   const rpc: CodexLLMAppServerRpcClient = {
@@ -26,14 +30,19 @@ function makeRpc(opts: { account?: { email: string; planType?: string } | null }
       if (method === "turn/start") {
         queueMicrotask(() => {
           for (const h of handlers) {
-            h({
-              method: "item/agentMessage/delta",
-              params: { threadId: "thread-1", delta: "OK" },
-            });
-            h({
-              method: "turn/completed",
-              params: { threadId: "thread-1", turn: { status: "completed" } },
-            });
+            for (const notification of opts.turnNotifications ?? [
+              {
+                method: "item/agentMessage/delta",
+                params: { threadId: "thread-1", turnId: "turn-1", delta: "OK" },
+              },
+              {
+                method: "turn/completed",
+                params: {
+                  threadId: "thread-1",
+                  turn: { id: "turn-1", status: "completed" },
+                },
+              },
+            ]) h(notification);
           }
         });
         return { turn: { id: "turn-1", status: "inProgress" } } as T;
@@ -84,6 +93,115 @@ test("CodexAppServerLLMProvider.complete runs a turn through app-server", async 
   assert.equal(result.meta.requestId, "thread-1");
   assert.ok(calls.some((c) => c.method === "thread/start"));
   assert.ok(calls.some((c) => c.method === "turn/start"));
+});
+
+test("CodexAppServerLLMProvider.complete rejects a non-retrying error notification", async () => {
+  const secret = "sk-test-codex-secret";
+  const { rpc } = makeRpc({
+    account: { email: "owner@example.test" },
+    turnNotifications: [{
+      method: "error",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        willRetry: false,
+        error: { message: `provider failed with ${secret} ${"x".repeat(600)}` },
+      },
+    }],
+  });
+  const provider = new CodexAppServerLLMProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:1", child: null, rpc }),
+  });
+
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: "user", content: "x" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof LLMProviderError);
+      assert.match(err.message, /provider failed with sk-\[REDACTED\]/);
+      assert.doesNotMatch(err.message, new RegExp(secret));
+      assert.ok(err.message.length <= 500);
+      return true;
+    }
+  );
+});
+
+test("CodexAppServerLLMProvider.complete keeps waiting after a retrying error", async () => {
+  const { rpc } = makeRpc({
+    account: { email: "owner@example.test" },
+    turnNotifications: [
+      {
+        method: "error",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          willRetry: true,
+          error: { message: "temporary failure" },
+        },
+      },
+      {
+        method: "item/agentMessage/delta",
+        params: { threadId: "thread-1", turnId: "turn-1", delta: "RECOVERED" },
+      },
+      {
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+      },
+    ],
+  });
+  const provider = new CodexAppServerLLMProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:1", child: null, rpc }),
+  });
+
+  const result = await provider.complete({ messages: [{ role: "user", content: "x" }] });
+  assert.equal(result.content, "RECOVERED");
+  assert.equal(result.finishReason, "stop");
+});
+
+test("CodexAppServerLLMProvider.complete rejects a failed completed turn with its error", async () => {
+  const { rpc } = makeRpc({
+    account: { email: "owner@example.test" },
+    turnNotifications: [{
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          error: { message: "sandbox initialization failed" },
+        },
+      },
+    }],
+  });
+  const provider = new CodexAppServerLLMProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:1", child: null, rpc }),
+  });
+
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: "user", content: "x" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof LLMProviderError);
+      assert.match(err.message, /status failed: sandbox initialization failed/);
+      return true;
+    }
+  );
+});
+
+test("CodexAppServerLLMProvider.complete rejects a completed turn with empty assistant text", async () => {
+  const { rpc } = makeRpc({
+    account: { email: "owner@example.test" },
+    turnNotifications: [{
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
+    }],
+  });
+  const provider = new CodexAppServerLLMProvider({
+    serverFactory: async () => ({ url: "ws://127.0.0.1:1", child: null, rpc }),
+  });
+
+  await assert.rejects(
+    () => provider.complete({ messages: [{ role: "user", content: "x" }] }),
+    /codex turn completed with empty assistant message/
+  );
 });
 
 test("CodexAppServerLLMProvider.complete forwards local image input to app-server", async () => {
