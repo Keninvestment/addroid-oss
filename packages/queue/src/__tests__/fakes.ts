@@ -224,6 +224,7 @@ export class FakeGithubAdapter implements QueueGithubAdapter {
 
 export class FakeApplyJobStore implements ApplyJobStore {
   contexts = new Map<string, ApplyJobContext>();
+  states = new Map<string, string>();
   /**
    * regression fix: 実行時 revalidation 用スナップショット。
    * setContext された apply_job は既定で「merged + matching accepted approval」と
@@ -258,6 +259,7 @@ export class FakeApplyJobStore implements ApplyJobStore {
 
   setContext(applyJobId: string, ctx: ApplyJobContext) {
     this.contexts.set(applyJobId, ctx);
+    this.states.set(applyJobId, "queued");
   }
 
   /** 明示的に execution mode context を設定する (regression fix)。 */
@@ -316,10 +318,26 @@ export class FakeApplyJobStore implements ApplyJobStore {
       mergedAt: new Date("2026-05-01T00:00:00Z"),
     };
   }
+  async findApplyJobState(applyJobId: string) {
+    return this.states.get(applyJobId) ?? null;
+  }
   async markApplyRunning(input: MarkApplyRunningInput) {
+    if (this.states.get(input.applyJobId) !== "queued") return false;
+    this.states.set(input.applyJobId, "running");
     this.runningCalls.push(input);
+    return true;
+  }
+  async quarantineUncertainApply(input: MarkApplyRunningInput) {
+    if (this.states.get(input.applyJobId) !== "running") return;
+    await this.markApplyFinished({
+      applyJobId: input.applyJobId,
+      state: "failed",
+      errorMessage: "uncertain_previous_attempt: human review required before any further Meta mutation",
+      result: { reason: "uncertain_previous_attempt", needsReview: true },
+    });
   }
   async markApplyFinished(input: MarkApplyFinishedInput) {
+    this.states.set(input.applyJobId, input.state);
     this.finishedCalls.push(input);
   }
   async recordApplyExecutionLog(input: ExecutionLogInput) {

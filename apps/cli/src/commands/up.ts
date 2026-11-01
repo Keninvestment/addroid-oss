@@ -30,11 +30,17 @@ import {
   clearUpState,
   isProcessAlive,
   readUpState,
+  readProcessIdentity,
   writeUpState,
   type UpMode,
   type UpState,
 } from "../lib/processes.js";
-import { WorkerSupervisor, readWorkerHealth } from "../lib/worker-supervisor.js";
+import {
+  WorkerSupervisor,
+  readWorkerHealth,
+  resolveWorkerSupervisorConfig,
+  type WorkerHealthSnapshot,
+} from "../lib/worker-supervisor.js";
 
 interface ParsedArgs {
   mode: UpMode;
@@ -121,39 +127,11 @@ export async function runUp(args: string[]): Promise<number> {
   }
 
   const existing = await readUpState(paths);
-  const existingHealth = existing?.mode === "separate-worker"
-    ? await readWorkerHealth(paths)
-    : null;
-  const effectiveWorkerPid =
-    existingHealth &&
-    existing &&
-    existingHealth.supervisorPid === existing.parentPid &&
-    existingHealth.workerPid
-      ? existingHealth.workerPid
-      : existing?.workerPid;
-  if (
-    existing &&
-    (isProcessAlive(existing.parentPid) ||
-      isProcessAlive(existing.webPid) ||
-      isProcessAlive(effectiveWorkerPid))
-  ) {
+  const existingHealth = await readWorkerHealth(paths);
+  const previousProcesses = findLiveOwnedProcesses(existing, existingHealth);
+  if (previousProcesses.length > 0) {
     process.stderr.write(
-      [
-        "[addroid up] 既に起動済みです。",
-        `  pid file  : ${paths.pidFile}`,
-        `  mode      : ${existing.mode}`,
-        `  parent pid: ${existing.parentPid}${
-          isProcessAlive(existing.parentPid) ? "" : " (not running)"
-        }`,
-        `  web pid   : ${existing.webPid ?? "(in parent)"}${
-          existing.webPid && !isProcessAlive(existing.webPid) ? " (not running)" : ""
-        }`,
-        `  worker pid: ${effectiveWorkerPid ?? "(in parent)"}${
-          effectiveWorkerPid && !isProcessAlive(effectiveWorkerPid) ? " (not running)" : ""
-        }`,
-        "  停止するには別ターミナルで `addroid down` を実行してください。",
-        "",
-      ].join("\n")
+      `[addroid up] 既に起動済み、または停止未確認のプロセスがあります: ${previousProcesses.join(", ")}。addroid down で確認してください。\n`
     );
     return 1;
   }
@@ -392,9 +370,12 @@ async function runShared(ctx: SharedContext): Promise<number> {
   const state: UpState = {
     startedAt: new Date().toISOString(),
     parentPid: process.pid,
+    parentIdentity: readProcessIdentity(process.pid),
     webUrl: `http://${ctx.binding.hostname}:${ctx.binding.port}`,
     cwd: ctx.repoRoot,
     mode: "shared",
+    shutdownTimeoutMs: resolveWorkerSupervisorConfig().shutdownTimeoutMs,
+    workerShutdownTimeoutMs: resolveWorkerSupervisorConfig().shutdownTimeoutMs - 5_000,
     webStatus,
   };
   await writeUpState(state, ctx.paths);
@@ -544,15 +525,19 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
   // 1) worker runtime を直接 spawn し、ready/heartbeat と限定再起動を監督する。
   // npm / tsx watch wrapper は挟まないため、記録される PID が実行主体そのものになる。
   await workerSupervisor.start();
-  const initialWorkerPid = workerSupervisor.getSnapshot().workerPid;
+  const initialSnapshot = workerSupervisor.getSnapshot();
+  const initialWorkerPid = initialSnapshot.workerPid;
   const state: UpState = {
     startedAt: new Date().toISOString(),
     parentPid: process.pid,
+    parentIdentity: initialSnapshot.supervisorIdentity,
     webUrl: `http://${ctx.binding.hostname}:${ctx.binding.port}`,
     cwd: ctx.repoRoot,
     mode: "separate-worker",
     webStatus,
-    ...(initialWorkerPid !== null ? { workerPid: initialWorkerPid } : {}),
+    shutdownTimeoutMs: initialSnapshot.shutdownTimeoutMs,
+    workerShutdownTimeoutMs: initialSnapshot.workerShutdownTimeoutMs,
+    ...(initialWorkerPid !== null ? { workerPid: initialWorkerPid, workerIdentity: initialSnapshot.workerIdentity } : {}),
   };
   // Publish the supervisor owner before potentially slow Next.js preparation so
   // status/down and duplicate-start detection remain available during startup.
@@ -653,7 +638,7 @@ export async function finalizeSeparateWorkerState(
       retainedHealth.workerPid
     ) {
       await writeUpState(
-        { ...retainedState, workerPid: retainedHealth.workerPid },
+        { ...retainedState, workerPid: retainedHealth.workerPid, workerIdentity: retainedHealth.workerIdentity },
         paths
       ).catch(() => undefined);
     }
@@ -703,4 +688,26 @@ async function preflight(paths: AddroidPaths): Promise<PreflightResult> {
       issues.map((m) => `  - ${m}`).join("\n") +
       "\n",
   };
+}
+
+/** Include the health owner even if up.json was lost; never overlap an orphan. */
+export function findLiveOwnedProcesses(
+  state: UpState | null,
+  health: WorkerHealthSnapshot | null,
+  alive: typeof isProcessAlive = isProcessAlive,
+  identity: typeof readProcessIdentity = readProcessIdentity
+): string[] {
+  const candidates = [
+    { label: "parent", pid: state?.parentPid, identity: state?.parentIdentity },
+    { label: "web", pid: state?.webPid, identity: state?.webIdentity },
+    { label: "worker", pid: state?.workerPid, identity: state?.workerIdentity },
+    { label: "supervisor", pid: health?.supervisorPid, identity: health?.supervisorIdentity },
+    { label: "owned worker", pid: health?.workerPid, identity: health?.workerIdentity },
+  ];
+  return candidates.flatMap((candidate) => {
+    if (!candidate.pid || !alive(candidate.pid)) return [];
+    const matches = candidate.identity && identity(candidate.pid) === candidate.identity;
+    // An unverified live PID is not authority to signal, or to discard ownership.
+    return [`${candidate.label} pid: ${candidate.pid}${matches ? "" : " (identity unverifiable)"}`];
+  });
 }

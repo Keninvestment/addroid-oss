@@ -1316,6 +1316,7 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
           executor: applyExecutorSelection.executor,
           lockProvider: adAccountLockProvider,
         });
+        if (summary.replaySkipped) continue;
         log.info(
           `[worker] execute_apply ${applyJobId}: ${summary.state} (succeeded=${summary.succeeded}, failed=${summary.failed}, skipped=${summary.skipped}, paused-rewrites=${summary.pausedRewrites})`
         );

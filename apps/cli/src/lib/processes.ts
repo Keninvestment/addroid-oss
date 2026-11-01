@@ -5,7 +5,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { resolveAddroidPaths, type AddroidPaths } from "@addroid/config";
 
@@ -20,6 +20,11 @@ export type UpMode = "shared" | "separate-worker";
 export interface UpState {
   startedAt: string;
   parentPid: number;
+  parentIdentity?: string | null;
+  webIdentity?: string | null;
+  workerIdentity?: string | null;
+  shutdownTimeoutMs?: number;
+  workerShutdownTimeoutMs?: number;
   webPid?: number;
   workerPid?: number;
   webUrl: string;
@@ -117,5 +122,19 @@ export function terminateProcess(pid: number | undefined | null): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Process start time identifies an incarnation, rather than a reusable PID. */
+export function readProcessIdentity(pid: number): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8", timeout: 1_000, stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, LC_ALL: "C" },
+    }).trim().replace(/\s+/g, " ");
+    return value || null;
+  } catch {
+    return null;
   }
 }

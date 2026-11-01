@@ -4,7 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import type { AddroidPaths } from "@addroid/config";
-import type { UpState } from "./processes.js";
+import { readProcessIdentity, type UpState } from "./processes.js";
 
 export type WorkerSupervisorPhase =
   | "starting"
@@ -26,6 +26,10 @@ export interface WorkerHealthSnapshot {
   version: 1;
   phase: WorkerSupervisorPhase;
   supervisorPid: number;
+  supervisorIdentity?: string | null;
+  workerIdentity?: string | null;
+  shutdownTimeoutMs?: number;
+  workerShutdownTimeoutMs?: number;
   generation: number;
   workerPid: number | null;
   startedAt: string;
@@ -203,6 +207,7 @@ export interface WorkerSupervisorOptions {
   now?: () => number;
   timers?: TimerApi;
   spawnChild?: (generation: number) => ChildProcess;
+  readProcessIdentity?: typeof readProcessIdentity;
   logger?: { info: (message: string) => void; error: (message: string) => void };
 }
 
@@ -245,6 +250,10 @@ export class WorkerSupervisor {
       version: 1,
       phase: "starting",
       supervisorPid: process.pid,
+      supervisorIdentity: (options.readProcessIdentity ?? readProcessIdentity)(process.pid),
+      workerIdentity: null,
+      shutdownTimeoutMs: this.config.shutdownTimeoutMs,
+      workerShutdownTimeoutMs: Math.max(1, this.config.shutdownTimeoutMs - 5_000),
       generation: 0,
       workerPid: null,
       startedAt: now,
@@ -333,7 +342,7 @@ export class WorkerSupervisor {
     this.child = null;
     this.retiringChild = null;
     this.retireDeadlineMs = null;
-    this.setSnapshot({ phase: "stopped", workerPid: null });
+    this.setSnapshot({ phase: "stopped", workerPid: null, workerIdentity: null });
     await this.flush();
     return true;
   }
@@ -385,6 +394,7 @@ export class WorkerSupervisor {
       phase: this.exhaustedRecovery ? "exhausted" : "starting",
       generation,
       workerPid: null,
+      workerIdentity: null,
       lastAttemptAt: at,
       readyAt: null,
       lastHeartbeatAt: null,
@@ -398,7 +408,15 @@ export class WorkerSupervisor {
       return;
     }
     this.child = child;
-    this.setSnapshot({ workerPid: child.pid ?? null });
+    this.setSnapshot({
+      workerPid: child.pid ?? null,
+      workerIdentity: child.pid ? (this.options.readProcessIdentity ?? readProcessIdentity)(child.pid) : null,
+    });
+    child.once("spawn", () => {
+      if (this.snapshot.generation === generation && this.snapshot.workerPid === child.pid) {
+        this.setSnapshot({ workerIdentity: child.pid ? (this.options.readProcessIdentity ?? readProcessIdentity)(child.pid) : null });
+      }
+    });
     child.on("message", (raw: unknown) => this.onMessage(generation, raw));
     child.once("error", (err) => {
       try {
@@ -411,7 +429,7 @@ export class WorkerSupervisor {
     child.once("exit", (code, signal) => {
       // An old exit must never erase the PID of a replacement generation.
       if (this.snapshot.generation === generation && this.snapshot.workerPid === child.pid) {
-        this.setSnapshot({ workerPid: null });
+        this.setSnapshot({ workerPid: null, workerIdentity: null });
       }
       if (this.retiringChild === child) {
         if (this.retireTimer) this.timers.clearTimeout(this.retireTimer);
@@ -554,6 +572,7 @@ export class WorkerSupervisor {
       this.setSnapshot({
         phase: "exhausted",
         workerPid: retiringWorkerPid,
+        workerIdentity: retiringWorkerPid ? this.snapshot.workerIdentity : null,
         restartAttempts: previousAttempts,
         readyAt: null,
         lastHeartbeatAt: null,
@@ -568,6 +587,7 @@ export class WorkerSupervisor {
     this.setSnapshot({
       phase: "backoff",
       workerPid: retiringWorkerPid,
+      workerIdentity: retiringWorkerPid ? this.snapshot.workerIdentity : null,
       restartAttempts: attempts,
       nextRestartAt: new Date(atMs + delayMs).toISOString(),
       lastFailure: failure,

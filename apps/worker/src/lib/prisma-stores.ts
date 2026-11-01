@@ -587,10 +587,31 @@ export function createApplyJobStore(
       };
     },
 
+    async findApplyJobState(applyJobId: string) {
+      const row = await prisma.applyJob.findUnique({
+        where: { id: applyJobId },
+        select: { state: true },
+      });
+      return row?.state ?? null;
+    },
+
     async markApplyRunning(input: MarkApplyRunningInput) {
-      await prisma.applyJob.update({
-        where: { id: input.applyJobId },
+      const claimed = await prisma.applyJob.updateMany({
+        where: { id: input.applyJobId, state: "queued" },
         data: { state: "running", startedAt: new Date() },
+      });
+      return claimed.count === 1;
+    },
+
+    async quarantineUncertainApply(input: MarkApplyRunningInput) {
+      await prisma.applyJob.updateMany({
+        where: { id: input.applyJobId, state: "running" },
+        data: {
+          state: "failed",
+          finishedAt: new Date(),
+          errorMessage: "uncertain_previous_attempt: human review required before any further Meta mutation",
+          result: { reason: "uncertain_previous_attempt", needsReview: true },
+        },
       });
     },
 

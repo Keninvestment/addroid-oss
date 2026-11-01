@@ -11,7 +11,7 @@ import { writeUpState } from "../lib/processes.js";
 import { checkWorkerRuntime } from "../lib/checks.js";
 import { runDown } from "../commands/down.js";
 import { runStatus } from "../commands/status.js";
-import { finalizeSeparateWorkerState } from "../commands/up.js";
+import { finalizeSeparateWorkerState, findLiveOwnedProcesses } from "../commands/up.js";
 import {
   WorkerSupervisor,
   evaluateWorkerHealth,
@@ -112,6 +112,7 @@ function harness(overrides: {
     paths,
     repoRoot: process.cwd(),
     now: () => clock.nowMs,
+    readProcessIdentity: (pid) => `start-${pid}`,
     timers: clock.api,
     config: {
       readyTimeoutMs: 100,
@@ -141,6 +142,105 @@ function harness(overrides: {
 }
 
 describe("worker supervisor", () => {
+  it("persists ownership and deadlines through exhausted recovery startup and stability", async () => {
+    const h = harness({ maxRestartAttempts: 1, shutdownTimeoutMs: 65_000 });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      h.children[1]!.exit(1);
+      h.clock.advance(1_000);
+      const probe = h.children[2]!;
+      await h.supervisor.flush();
+      for (const ready of [false, true]) {
+        if (ready) probe.ready(3);
+        await h.supervisor.flush();
+        const health = (await readWorkerHealth(h.paths))!;
+        assert.equal(health.phase, "exhausted");
+        assert.equal(health.workerPid, probe.pid);
+        assert.equal(health.workerIdentity, `start-${probe.pid}`);
+        assert.equal(health.shutdownTimeoutMs, 65_000);
+        assert.equal(health.workerShutdownTimeoutMs, 60_000);
+        const state: UpState = {
+          parentPid: health.supervisorPid, parentIdentity: health.supervisorIdentity,
+          mode: "separate-worker", startedAt: health.startedAt,
+          cwd: process.cwd(), webUrl: "http://127.0.0.1:1",
+        };
+        const alive = new Set([probe.pid]); // supervisor died during the probe
+        const signals: number[] = [];
+        let cleared = false;
+        assert.match(findLiveOwnedProcesses(state, health, (pid) => alive.has(pid!), (pid) => `start-${pid}`).join(), /owned worker/);
+        assert.match(findLiveOwnedProcesses(null, health, (pid) => alive.has(pid!), (pid) => `start-${pid}`).join(), /owned worker/);
+        await runDown([], {
+          readUpState: async () => ready ? null : state, readWorkerHealth: async () => health,
+          clearUpState: async () => { cleared = true; },
+          readProcessIdentity: (pid) => `start-${pid}`,
+          isProcessAlive: (pid) => alive.has(pid!),
+          terminateProcess: (pid) => { signals.push(pid); alive.delete(pid); return true; },
+          forceKill: () => assert.fail("probe exited on SIGTERM"),
+        });
+        assert.deepEqual(signals, [probe.pid]);
+        assert.equal(cleared, true);
+      }
+    } finally { h.cleanup(); }
+  });
+
+  it("rechecks worker and supervisor incarnation before TERM and KILL and retains uncertain state", async () => {
+    for (const label of ["worker", "supervisor"]) {
+      for (const failure of ["mismatch", "unavailable", "reused-after-term"]) {
+        const state: UpState = {
+          parentPid: 12, parentIdentity: "parent-start", mode: "separate-worker",
+          startedAt: "2026-07-26T00:00:00.000Z", cwd: process.cwd(), webUrl: "http://127.0.0.1:1",
+          shutdownTimeoutMs: 100,
+        };
+        const health = fixtureSnapshot({ supervisorIdentity: "parent-start", workerIdentity: "worker-start", shutdownTimeoutMs: 100 });
+        const pid = label === "worker" ? 13 : 12;
+        const expected = label === "worker" ? "worker-start" : "parent-start";
+        let now = 0;
+        let terminated = false;
+        let cleared = false;
+        const signals: string[] = [];
+        await runDown([], {
+          readUpState: async () => state, readWorkerHealth: async () => health,
+          clearUpState: async () => { cleared = true; },
+          isProcessAlive: (candidate) => candidate === pid,
+          readProcessIdentity: () => failure === "unavailable" ? null
+            : failure === "mismatch" || terminated ? "reused" : expected,
+          terminateProcess: () => { signals.push("SIGTERM"); terminated = true; return true; },
+          forceKill: () => { signals.push("SIGKILL"); },
+          now: () => now, sleep: async (ms) => { now += ms; },
+        });
+        assert.deepEqual(signals, failure === "reused-after-term" ? ["SIGTERM"] : []);
+        assert.equal(cleared, false);
+      }
+    }
+  });
+
+  it("down uses the persisted 60000ms worker drain and supervisor margin instead of its environment", async () => {
+    const state: UpState = {
+      parentPid: 12, parentIdentity: "parent-start", mode: "separate-worker",
+      startedAt: "2026-07-26T00:00:00.000Z", cwd: process.cwd(), webUrl: "http://127.0.0.1:1",
+      shutdownTimeoutMs: 65_000, workerShutdownTimeoutMs: 60_000,
+    };
+    const health = fixtureSnapshot({
+      supervisorIdentity: "parent-start", workerIdentity: "worker-start",
+      shutdownTimeoutMs: 65_000, workerShutdownTimeoutMs: 60_000,
+    });
+    let now = 0;
+    const alive = new Set([12, 13]);
+    const kills: Array<{ pid: number; at: number }> = [];
+    await runDown([], {
+      readUpState: async () => state, readWorkerHealth: async () => health,
+      clearUpState: async () => undefined,
+      isProcessAlive: (pid) => alive.has(pid!),
+      readProcessIdentity: (pid) => pid === 12 ? "parent-start" : "worker-start",
+      terminateProcess: () => true,
+      forceKill: (pid) => { kills.push({ pid, at: now }); alive.delete(pid); },
+      now: () => now, sleep: async (ms) => { now += ms; },
+    });
+    assert.deepEqual(kills, [{ pid: 13, at: 67_000 }, { pid: 12, at: 67_000 }]);
+  });
+
   it("clears the exhausted fatal generation PID atomically and down rejects stale exhausted PIDs", async () => {
     const h = harness({ maxRestartAttempts: 1 });
     const previousHome = process.env.ADDROID_HOME;

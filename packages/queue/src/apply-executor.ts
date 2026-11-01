@@ -328,6 +328,8 @@ export interface RunExecuteApplySummary {
   skipped: number;
   pausedRewrites: number;
   outcomes: ApplyActionOutcome[];
+  /** Acknowledge a duplicate delivery without repeating post-apply work. */
+  replaySkipped?: boolean;
   errorMessage?: string;
   /** 処理を中断した理由 (auth_error / api_error / unknown_error / plan_error / rate_limit_exhausted / unapproved_state / report_only_mode) */
   abortReason?:
@@ -389,9 +391,34 @@ export async function runExecuteApply(
     skipped: extra.skipped ?? 0,
     pausedRewrites: extra.pausedRewrites ?? 0,
     outcomes: extra.outcomes ?? [],
+    ...(extra.replaySkipped !== undefined ? { replaySkipped: extra.replaySkipped } : {}),
     ...(extra.errorMessage !== undefined ? { errorMessage: extra.errorMessage } : {}),
     ...(extra.abortReason !== undefined ? { abortReason: extra.abortReason } : {}),
   });
+
+  // pg-boss may redeliver after a fatal shutdown, even after Meta succeeded.
+  // Only a durable queued row may start; an unknown previous attempt needs review.
+  const previousState = await opts.store.findApplyJobState(opts.applyJobId);
+  const logReplaySkipped = async (state: string | null) => {
+    await opts.store.recordApplyExecutionLog({
+      workspaceId: opts.workspaceId,
+      kind: "apply",
+      refType: "apply_job",
+      refId: opts.applyJobId,
+      level: state === "running" ? "error" : "info",
+      message: `execute_apply replay skipped: ${opts.applyJobId} (${state ?? "missing"})`,
+      payload: { state, ...(state === "running" ? { reason: "uncertain_previous_attempt", needsReview: true } : {}) },
+    });
+  };
+  if (previousState !== null && previousState !== "queued") {
+    if (previousState === "running") {
+      await opts.store.quarantineUncertainApply({ applyJobId: opts.applyJobId });
+    }
+    await logReplaySkipped(previousState);
+    return baseSummary(previousState === "succeeded" || previousState === "simulated" ? previousState : "failed", {
+      ...(previousState === "running" ? { errorMessage: "uncertain_previous_attempt: human review required" } : { replaySkipped: true }),
+    });
+  }
 
   // 1) PR メタ取得
   const contextRaw = await opts.store.findApplyJobContext(opts.applyJobId);
@@ -485,7 +512,11 @@ export async function runExecuteApply(
   };
 
   // 2) running 遷移
-  await opts.store.markApplyRunning({ applyJobId: opts.applyJobId });
+  if (!await opts.store.markApplyRunning({ applyJobId: opts.applyJobId })) {
+    // A competing delivery claimed the same queued row. Do not quarantine its work.
+    await logReplaySkipped(await opts.store.findApplyJobState(opts.applyJobId));
+    return baseSummary("failed", { replaySkipped: true });
+  }
   await opts.store.recordApplyExecutionLog({
     workspaceId: opts.workspaceId,
     kind: "apply",
