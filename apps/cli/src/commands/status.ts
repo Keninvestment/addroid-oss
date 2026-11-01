@@ -9,6 +9,7 @@ import { formatRss, isProcessAlive, readProcessRssKb, readUpState } from "../lib
 import { formatServiceStatus, getAddroidServiceStatus } from "../lib/service.js";
 import { findApplyExecutionLogs, findLatestApplyJob, findLatestErrorLog } from "../lib/apply-db.js";
 import { extractMetaErrorSummary, formatMetaErrorLine } from "../lib/apply-errors.js";
+import { evaluateWorkerHealth, readWorkerHealth } from "../lib/worker-supervisor.js";
 
 interface DoctorRow {
   ranAt: Date;
@@ -16,7 +17,12 @@ interface DoctorRow {
   checks: unknown;
 }
 
-export async function runStatus(args: string[]): Promise<number> {
+interface StatusDependencies {
+  getServiceStatus?: typeof getAddroidServiceStatus;
+  canConnectToWeb?: (url: string) => Promise<boolean>;
+}
+
+export async function runStatus(args: string[], dependencies: StatusDependencies = {}): Promise<number> {
   const language = resolveAddroidLanguage();
   if (args.includes("--help") || args.includes("-h")) {
     if (language === "en") {
@@ -44,6 +50,7 @@ export async function runStatus(args: string[]): Promise<number> {
   }
   const paths = resolveAddroidPaths();
   const lines: string[] = [];
+  let exitCode = 0;
   lines.push("[addroid status]");
   lines.push("");
 
@@ -59,7 +66,7 @@ export async function runStatus(args: string[]): Promise<number> {
   }
   lines.push("");
 
-  const service = await getAddroidServiceStatus().catch((err) => ({
+  const service = await (dependencies.getServiceStatus ?? getAddroidServiceStatus)().catch((err) => ({
     platform: "unsupported" as const,
     installed: false,
     running: false,
@@ -75,7 +82,7 @@ export async function runStatus(args: string[]): Promise<number> {
     const parentAlive = isProcessAlive(state.parentPid);
     const webFailed = state.webStatus === "failed";
     const webReachable = parentAlive && !webFailed
-      ? await canConnectToWeb(state.webUrl)
+      ? await (dependencies.canConnectToWeb ?? canConnectToWeb)(state.webUrl)
       : false;
     const webUnreachable = parentAlive && !webFailed && !webReachable;
     lines.push(`  mode          : ${state.mode}`);
@@ -102,7 +109,17 @@ export async function runStatus(args: string[]): Promise<number> {
           : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web/worker    : ${webLabel}`);
     } else {
-      const workerAlive = isProcessAlive(state.workerPid);
+      const snapshot = await readWorkerHealth(paths);
+      const runtimePid = snapshot?.workerPid ?? null;
+      const workerAlive = isProcessAlive(runtimePid);
+      const health = evaluateWorkerHealth({
+        upState: state,
+        snapshot,
+        nowMs: Date.now(),
+        parentAlive,
+        workerAlive,
+      });
+      if (!health.healthy) exitCode = 1;
       const webLabel = webFailed
         ? `not running (web-failed) ${parentAlive ? "[degraded]" : "[stopped]"}`
         : webUnreachable
@@ -110,12 +127,13 @@ export async function runStatus(args: string[]): Promise<number> {
           : `in parent process ${parentAlive ? "[ ok  ]" : "[stopped]"}`;
       lines.push(`  web           : ${webLabel}`);
       lines.push(
-        `  worker pid    : ${state.workerPid ?? "(none)"} ${
-          state.workerPid ? (workerAlive ? "[ ok  ]" : "[stopped]") : "[absent]"
+        `  worker pid    : ${runtimePid ?? "(none)"} ${
+          runtimePid ? (health.healthy ? "[ ok  ]" : "[error]") : "[absent]"
         }`
       );
-      const workerRss = workerAlive ? formatRss(await readProcessRssKb(state.workerPid)) : null;
+      const workerRss = workerAlive ? formatRss(await readProcessRssKb(runtimePid)) : null;
       if (workerRss) lines.push(`  worker RSS    : ${workerRss}`);
+      lines.push(`  worker health : ${health.healthy ? "[ ok  ]" : "[error]"} ${health.message}`);
     }
   }
   lines.push("");
@@ -131,7 +149,7 @@ export async function runStatus(args: string[]): Promise<number> {
   lines.push(...(await formatLastApplyLines(language)));
   lines.push("");
   process.stdout.write(lines.join("\n"));
-  return 0;
+  return exitCode;
 }
 
 /**

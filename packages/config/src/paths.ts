@@ -16,6 +16,8 @@ export interface AddroidPaths {
   logsDir: string;
   runDir: string;
   pidFile: string;
+  /** Atomic health snapshot for the directly supervised separate worker runtime. */
+  workerHealthFile: string;
   webLogFile: string;
   workerLogFile: string;
   serviceLogFile: string;
@@ -93,6 +95,7 @@ export function resolveAddroidPaths(env: NodeJS.ProcessEnv = process.env): Addro
     logsDir,
     runDir,
     pidFile: path.join(runDir, "up.json"),
+    workerHealthFile: path.join(runDir, "worker-health.json"),
     webLogFile: path.join(logsDir, "web.log"),
     workerLogFile: path.join(logsDir, "worker.log"),
     serviceLogFile: path.join(logsDir, "service.log"),

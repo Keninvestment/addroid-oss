@@ -159,12 +159,8 @@ async function acquirePostgresAdvisoryLock(
       }
     )
     .catch((err) => {
-      // 取得前 (acquireResolve 前) に reject した場合は acquire 側に伝播済み。
-      // 取得後 (release 前) に tx が timeout / 接続断で死んだ場合も、
-      // xact-lock は Postgres 側で自動解放されている。release を呼ばれた
-      // 際の `await txPromise` で再度 throw されるが、provider 側の
-      // `onReleaseError` が吸収する。ここでは unhandledRejection 防止のため
-      // 明示的に catch する (再 throw しない)。
+      // Observe both acquisition and later connection failures immediately.
+      // Do not rethrow from this background promise: release may be much later.
       if (opts.onAcquireError) {
         try {
           opts.onAcquireError(opts.lockKey, err);
@@ -172,9 +168,11 @@ async function acquirePostgresAdvisoryLock(
           /* logger 失敗はこれ以上伝播させない */
         }
       }
-      // release が未呼び出しなら、release 待ちの caller を解放する。
+      // A pool acquisition failure can reject before the transaction callback
+      // starts. Reject acquired as well, and keep this background promise handled
+      // even when a connection dies after acquire returned but before release.
+      acquireReject(err);
       releaseSignal();
-      throw err;
     });
 
   // tx 起動が acquireSignal を resolve するか reject するまで待つ。
@@ -195,14 +193,8 @@ async function acquirePostgresAdvisoryLock(
   return {
     release: async () => {
       releaseSignal();
-      try {
-        await txPromise;
-      } catch {
-        // tx の終端 reject は acquire / release のいずれかで観測済み。
-        // ここで再 throw すると lock の使用者 (apply / activate) に
-        // ロック解放失敗を伝播してしまうため吸収する。`createCrossProcessAd
-        // AccountLockProvider` の `onReleaseError` が呼ばれているはず。
-      }
+      // Failures are already consumed and reported by onAcquireError above.
+      await txPromise;
     },
   };
 }

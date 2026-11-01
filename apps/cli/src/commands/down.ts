@@ -8,6 +8,7 @@ import {
   readUpState,
   terminateProcess,
 } from "../lib/processes.js";
+import { readWorkerHealth } from "../lib/worker-supervisor.js";
 
 const GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const FORCE_STOP_TIMEOUT_MS = 2_000;
@@ -41,8 +42,13 @@ export async function runDown(args: string[]): Promise<number> {
     if (state.webPid && state.webPid !== state.parentPid) {
       targets.push({ label: "web", pid: state.webPid });
     }
-    if (state.workerPid) {
-      targets.push({ label: "worker", pid: state.workerPid });
+    const workerHealth = await readWorkerHealth(paths);
+    const currentWorkerPid =
+      workerHealth?.supervisorPid === state.parentPid
+        ? workerHealth.workerPid ?? undefined
+        : undefined;
+    if (currentWorkerPid) {
+      targets.push({ label: "worker", pid: currentWorkerPid });
     }
   }
   targets.push({ label: "addroid up parent", pid: state.parentPid });

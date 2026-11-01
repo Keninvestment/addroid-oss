@@ -11,12 +11,34 @@
 //   - SIGINT/SIGTERM で graceful shutdown。
 
 import { startWorker } from "./runtime.js";
+import { runWorkerProcess } from "./lifecycle.js";
 
-async function main(): Promise<void> {
-  await startWorker({ installSignalHandlers: true });
+const supervised = process.env.ADDROID_WORKER_SUPERVISED === "1";
+const generation = Number.parseInt(process.env.ADDROID_WORKER_GENERATION ?? "0", 10);
+const heartbeatIntervalMs = Math.max(
+  100,
+  Number.parseInt(process.env.ADDROID_WORKER_HEARTBEAT_INTERVAL_MS ?? "5000", 10) || 5_000
+);
+
+function send(type: "ready" | "heartbeat" | "fatal", message?: string): void {
+  if (!supervised || !process.send || !process.connected) return;
+  try {
+    process.send(
+      { type, generation, ...(message ? { message } : {}) },
+      () => undefined
+    );
+  } catch {
+    // The supervisor may close IPC while graceful shutdown is in progress.
+  }
 }
 
-main().catch((err) => {
-  console.error("[worker] fatal:", err);
-  process.exit(1);
+const lifecycle = runWorkerProcess({
+  startWorker,
+  send,
+  exit: (code) => process.exit(code),
+  logError: (error) => console.error("[worker] fatal or shutdown error:", error),
+  heartbeatIntervalMs,
 });
+process.on("SIGINT", () => void lifecycle.stop(0));
+process.on("SIGTERM", () => void lifecycle.stop(0));
+await lifecycle.started;

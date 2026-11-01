@@ -135,6 +135,8 @@ export interface StartWorkerOptions {
    * 共有モードでは CLI 側がシグナルを管理するので `false`。
    */
   installSignalHandlers?: boolean;
+  /** PgBoss runtime errors are reported here so a supervisor can restart the process. */
+  onFatalError?: (error: Error) => void;
 }
 
 export interface WorkerLogger {
@@ -164,8 +166,48 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     throw new Error("[worker] DATABASE_URL is not set. See .env.example.");
   }
 
+  let partialBoss: PgBoss | undefined;
+  let slackSocketHandle: SlackSocketReceiverHandle | null = null;
+  let fatalError: Error | undefined;
+  let stopPromise: Promise<void> | undefined;
+  const stop = (): Promise<void> => {
+    const actions = [
+      () => slackSocketHandle?.stop(),
+      () => partialBoss?.stop({ graceful: !fatalError, wait: !fatalError }),
+      () => prisma.$disconnect(),
+    ];
+    const run = async (action: () => unknown): Promise<void> => {
+      try { await action(); }
+      catch { log.warn("[worker] resource shutdown failed"); }
+    };
+    // On a normal stop, let active jobs finish before disconnecting Prisma.
+    // A fatal DB failure cannot drain jobs, so close independent resources now.
+    stopPromise ??= fatalError
+      ? Promise.all(actions.map(run)).then(() => undefined)
+      : (async () => { for (const action of actions) await run(action); })();
+    return stopPromise;
+  };
+  const onFatalError = (error: Error): void => {
+    if (fatalError) return;
+    fatalError = error;
+    log.error("[worker] database connection error; restart required");
+    if (opts.onFatalError) opts.onFatalError(error);
+    else {
+      // Shared runtimes must not keep serving a dead queue as healthy. Their
+      // owner can provide onFatalError; legacy standalone callers fail closed.
+      const deadline = setTimeout(() => process.exit(1), 5_000);
+      void stop().finally(() => {
+        clearTimeout(deadline);
+        process.exit(1);
+      });
+    }
+  };
+
+  try {
   log.info("[worker] starting pg-boss…");
-  const boss = await bootPgBoss({ databaseUrl });
+  const boss = await bootPgBoss({ databaseUrl, onError: onFatalError });
+  partialBoss = boss;
+  if (fatalError) throw fatalError;
 
   const paths = await ensureAddroidPaths();
   const config = (await readAddroidConfig().catch(() => null)) ?? defaultAddroidConfig();
@@ -1544,7 +1586,6 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   // GitOps polling / Apply / Cron を通常通り稼働させる (acceptance: "Slack
   // integration is optional", "Slack and Web UI failures do not block core
   // GitOps polling, Apply, or Cron execution")。
-  let slackSocketHandle: SlackSocketReceiverHandle | null = null;
   try {
     slackSocketHandle = await startSlackSocketRuntime({
       prisma,
@@ -1571,34 +1612,10 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
     );
   }
 
+  if (fatalError) throw fatalError;
   log.info(
     `[worker] ready. registered ${CRON_PRESETS.length} cron preset(s), execute_apply receiver, slack_command receiver, slack_agent receiver.`
   );
-
-  let stopping = false;
-  const stop = async (): Promise<void> => {
-    if (stopping) return;
-    stopping = true;
-    if (slackSocketHandle) {
-      try {
-        await slackSocketHandle.stop();
-      } catch (err) {
-        log.warn(
-          `[worker] error during slack socket stop: ${(err as Error).message}`
-        );
-      }
-    }
-    try {
-      await boss.stop({ graceful: true });
-    } catch (err) {
-      log.warn(`[worker] error during pg-boss stop: ${(err as Error).message}`);
-    }
-    try {
-      await prisma.$disconnect();
-    } catch {
-      /* ignore */
-    }
-  };
 
   if (opts.installSignalHandlers) {
     const onSignal = (signal: NodeJS.Signals) => {
@@ -1610,6 +1627,21 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
   }
 
   return { stop };
+  } catch (error) {
+    // Includes Prisma query/initialization rejections. Prisma uses its Rust
+    // engine, not a Node pg pool; its $on("error") is a log subscription, not
+    // an EventEmitter connection-failure channel.
+    const cleanup = stop();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([cleanup, new Promise<void>((resolve) => {
+        timeout = setTimeout(resolve, 5_000);
+      })]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    throw error;
+  }
 }
 
 /**

@@ -196,3 +196,37 @@ test("createPostgresAdAccountLockProvider: acquire 失敗 (advisory lock query �
   assert.equal(acquireErrors.length, 1);
   assert.equal(acquireErrors[0]!.key, "ad_account:ws-1:acct-primary");
 });
+
+test("a Prisma pool acquisition rejection before the callback rejects the lock request", async () => {
+  const prisma = {
+    $transaction: async () => { throw new Error("pool cannot connect"); },
+  } as unknown as PrismaClient;
+  const provider = createPostgresAdAccountLockProvider({ prisma });
+  await assert.rejects(provider.withLock("ad_account:ws:primary", async () => "unexpected"), /pool cannot connect/);
+});
+
+test("a Prisma connection failure after acquisition remains handled until lock release", async () => {
+  let failTransaction!: (error: Error) => void;
+  let finishWork!: () => void;
+  const workDone = new Promise<void>((resolve) => { finishWork = resolve; });
+  const prisma = {
+    $transaction: (callback: (tx: { $queryRaw: () => Promise<unknown[]> }) => Promise<unknown>) =>
+      Promise.race([
+        callback({ $queryRaw: async () => [] }),
+        new Promise((_, reject) => { failTransaction = reject; }),
+      ]),
+  } as unknown as PrismaClient;
+  const errors: unknown[] = [];
+  const provider = createPostgresAdAccountLockProvider({ prisma, onAcquireError: (_key, error) => errors.push(error) });
+  let workStarted!: () => void;
+  const started = new Promise<void>((resolve) => { workStarted = resolve; });
+  const work = provider.withLock("ad_account:ws:primary", async () => { workStarted(); await workDone; });
+  await started;
+  failTransaction(new Error("Connection terminated unexpectedly"));
+  // Yield an event-loop turn: node:test treats any unhandled rejection here as
+  // a test failure, even though release will consume the final result later.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(errors.length, 1);
+  finishWork();
+  await work;
+});

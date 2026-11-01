@@ -16,6 +16,7 @@ import {
   checkPostgresVersion,
   checkPrismaConnect,
   checkSecretsLocal,
+  checkWorkerRuntime,
   summarizeOverall,
   type CheckResult,
 } from "../lib/checks.js";
@@ -30,6 +31,7 @@ export async function runDoctor(_args: string[]): Promise<number> {
   checks.push(checkEncryptionKey());
   checks.push(await checkConfigFile(paths));
   checks.push(await checkSecretsLocal(paths));
+  checks.push(await checkWorkerRuntime(paths));
   checks.push(await checkPrismaConnect());
 
   const overall = summarizeOverall(checks);

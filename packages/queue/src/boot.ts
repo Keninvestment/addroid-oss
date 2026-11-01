@@ -5,6 +5,7 @@
 // 名と cron 式の登録までで責務を切る。
 
 import PgBoss from "pg-boss";
+import { attachQueueErrorHandler } from "./errors.js";
 import {
   AUTOMATION_RULE_JOB_NAME,
   CRON_PRESETS,
@@ -16,6 +17,8 @@ import { SLACK_COMMAND_JOB_NAME } from "./slack-command.js";
 
 export interface BootOptions {
   databaseUrl: string;
+  /** Attached before start: pg pool errors can occur during initialization. */
+  onError?: (error: Error) => void;
 }
 
 export interface QueueManager {
@@ -67,9 +70,16 @@ export async function bootPgBoss(opts: BootOptions): Promise<PgBoss> {
     connectionString: opts.databaseUrl,
     schema: "pgboss",
   });
-  await boss.start();
-  await ensureRuntimeQueues(boss);
-  return boss;
+  attachQueueErrorHandler(boss, opts.onError);
+  try {
+    await boss.start();
+    await ensureRuntimeQueues(boss);
+    return boss;
+  } catch (error) {
+    // stop without waiting for active jobs; a broken DB cannot drain them.
+    void boss.stop({ graceful: false, wait: false }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export interface RegisterPresetsOptions {
