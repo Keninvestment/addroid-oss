@@ -9,7 +9,12 @@ import {
   readProcessIdentity,
   terminateProcess,
 } from "../lib/processes.js";
-import { readWorkerHealth, DEFAULT_WORKER_SUPERVISOR_CONFIG } from "../lib/worker-supervisor.js";
+import {
+  discardObsoleteWorkerOwnership,
+  readWorkerHealth,
+  writeWorkerHealthAtomic,
+  DEFAULT_WORKER_SUPERVISOR_CONFIG,
+} from "../lib/worker-supervisor.js";
 
 const FORCE_STOP_TIMEOUT_MS = 2_000;
 
@@ -22,6 +27,7 @@ interface DownDependencies {
   sleep?: (ms: number) => Promise<void>;
   readUpState?: typeof readUpState;
   readWorkerHealth?: typeof readWorkerHealth;
+  writeWorkerHealth?: typeof writeWorkerHealthAtomic;
   clearUpState?: typeof clearUpState;
 }
 
@@ -47,12 +53,17 @@ export async function runDown(
   }
   const paths = resolveAddroidPaths();
   let state = await (deps.readUpState ?? readUpState)(paths);
-  const orphanHealth = !state ? await (deps.readWorkerHealth ?? readWorkerHealth)(paths) : null;
-  if (!state && orphanHealth?.workerPid) {
+  const recordedHealth = !state || state.mode === "separate-worker"
+    ? await (deps.readWorkerHealth ?? readWorkerHealth)(paths) : null;
+  const health = await discardObsoleteWorkerOwnership(
+    recordedHealth, paths, deps.isProcessAlive, deps.readProcessIdentity ?? readProcessIdentity,
+    deps.writeWorkerHealth ?? writeWorkerHealthAtomic
+  );
+  if (!state && health && (health.supervisorPid || health.workerPid)) {
     state = {
-      parentPid: orphanHealth.supervisorPid, parentIdentity: orphanHealth.supervisorIdentity,
-      startedAt: orphanHealth.startedAt, cwd: "", webUrl: "", mode: "separate-worker",
-      shutdownTimeoutMs: orphanHealth.shutdownTimeoutMs,
+      parentPid: health.supervisorPid, parentIdentity: health.supervisorIdentity,
+      startedAt: health.startedAt, cwd: "", webUrl: "", mode: "separate-worker",
+      shutdownTimeoutMs: health.shutdownTimeoutMs,
     };
   }
   if (!state) {
@@ -62,10 +73,14 @@ export async function runDown(
     return 0;
   }
 
-  const health = state.mode === "separate-worker"
-    ? orphanHealth ?? await (deps.readWorkerHealth ?? readWorkerHealth)(paths) : null;
-  const ownedHealth = health?.supervisorPid === state.parentPid &&
-    health.supervisorIdentity === state.parentIdentity ? health : null;
+  // Pruning an obsolete supervisor must not break its recorded worker link.
+  const owner = recordedHealth?.supervisorPid === state.parentPid &&
+    recordedHealth.supervisorIdentity === state.parentIdentity;
+  // An explicitly cleared owner can also come from a previous up preflight;
+  // the worker's own identity must still be verified before any signal.
+  const clearedOwner = health?.supervisorPid === 0 && health.supervisorIdentity === null;
+  const ownedHealth = owner || clearedOwner || (health?.supervisorPid === state.parentPid &&
+    health.supervisorIdentity === state.parentIdentity) ? health : null;
   const targets: Array<{ label: string; pid: number; identity: string | null | undefined }> = [];
   if (state.webPid && state.webPid !== state.parentPid) {
     targets.push({ label: "web", pid: state.webPid, identity: state.webIdentity });

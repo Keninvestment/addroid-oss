@@ -29,6 +29,7 @@ import { resolveRepoRoot } from "../lib/paths.js";
 import {
   clearUpState,
   isProcessAlive,
+  processOwnership,
   readUpState,
   readProcessIdentity,
   writeUpState,
@@ -37,6 +38,7 @@ import {
 } from "../lib/processes.js";
 import {
   WorkerSupervisor,
+  discardObsoleteWorkerOwnership,
   readWorkerHealth,
   resolveWorkerSupervisorConfig,
   type WorkerHealthSnapshot,
@@ -127,7 +129,7 @@ export async function runUp(args: string[]): Promise<number> {
   }
 
   const existing = await readUpState(paths);
-  const existingHealth = await readWorkerHealth(paths);
+  const existingHealth = await discardObsoleteWorkerOwnership(await readWorkerHealth(paths), paths);
   const previousProcesses = findLiveOwnedProcesses(existing, existingHealth);
   if (previousProcesses.length > 0) {
     process.stderr.write(
@@ -705,9 +707,8 @@ export function findLiveOwnedProcesses(
     { label: "owned worker", pid: health?.workerPid, identity: health?.workerIdentity },
   ];
   return candidates.flatMap((candidate) => {
-    if (!candidate.pid || !alive(candidate.pid)) return [];
-    const matches = candidate.identity && identity(candidate.pid) === candidate.identity;
-    // An unverified live PID is not authority to signal, or to discard ownership.
-    return [`${candidate.label} pid: ${candidate.pid}${matches ? "" : " (identity unverifiable)"}`];
+    const ownership = processOwnership(candidate.pid, candidate.identity, alive, identity);
+    if (ownership === "obsolete") return [];
+    return [`${candidate.label} pid: ${candidate.pid}${ownership === "live" ? "" : " (identity unavailable; unverifiable)"}`];
   });
 }

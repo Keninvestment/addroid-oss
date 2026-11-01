@@ -138,3 +138,16 @@ export function readProcessIdentity(pid: number): string | null {
     return null;
   }
 }
+
+/** Missing identity evidence is distinct from a confirmed obsolete incarnation. */
+export function processOwnership(
+  pid: number | null | undefined,
+  expectedIdentity: string | null | undefined,
+  alive: typeof isProcessAlive = isProcessAlive,
+  identity: typeof readProcessIdentity = readProcessIdentity
+): "live" | "obsolete" | "unavailable" {
+  if (!pid || !alive(pid)) return "obsolete";
+  const actualIdentity = identity(pid);
+  if (!expectedIdentity || !actualIdentity) return "unavailable";
+  return actualIdentity === expectedIdentity ? "live" : "obsolete";
+}

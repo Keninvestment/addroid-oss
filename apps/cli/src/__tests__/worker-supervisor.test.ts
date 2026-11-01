@@ -15,6 +15,8 @@ import { finalizeSeparateWorkerState, findLiveOwnedProcesses } from "../commands
 import {
   WorkerSupervisor,
   evaluateWorkerHealth,
+  discardObsoleteWorkerOwnership,
+  writeWorkerHealthAtomic,
   readWorkerHealth,
   restartBackoffMs,
   resolveWorkerSupervisorConfig,
@@ -142,6 +144,95 @@ function harness(overrides: {
 }
 
 describe("worker supervisor", () => {
+  for (const slot of ["supervisor", "worker"] as const) {
+    for (const outcome of ["same", "reused", "unavailable", "dead", "missing-saved-identity"] as const) {
+      it(`classifies and persists ${slot} ownership: ${outcome}`, async () => {
+        const h = harness();
+        try {
+          const pid = slot === "supervisor" ? 12 : 13;
+          const snapshot = fixtureSnapshot({
+            supervisorPid: slot === "supervisor" ? pid : 0,
+            workerPid: slot === "worker" ? pid : null,
+            [`${slot}Identity`]: outcome === "missing-saved-identity" ? null : "original-start",
+          });
+          await writeWorkerHealthAtomic(snapshot, h.paths);
+          const alive = (candidate: number | null | undefined) => candidate === pid && outcome !== "dead";
+          const identity = () => outcome === "unavailable" ? null : outcome === "reused" ? "unrelated-start" : "original-start";
+          const obsolete = outcome === "reused" || outcome === "dead";
+          const before = findLiveOwnedProcesses(null, snapshot, alive, identity);
+          assert.equal(before.length, obsolete ? 0 : 1);
+          if (outcome === "unavailable" || outcome === "missing-saved-identity") {
+            assert.match(before.join(), /identity unavailable/);
+          }
+          const cleaned = await discardObsoleteWorkerOwnership(snapshot, h.paths, alive, identity);
+          assert.deepEqual(await readWorkerHealth(h.paths), cleaned);
+          assert.equal(cleaned?.[`${slot}Pid`], obsolete ? slot === "supervisor" ? 0 : null : pid);
+          assert.equal(cleaned?.[`${slot}Identity`], obsolete || outcome === "missing-saved-identity" ? null : "original-start");
+          assert.equal(findLiveOwnedProcesses(null, cleaned, alive, identity).length, obsolete ? 0 : 1);
+          assert.equal(fs.readdirSync(h.paths.runDir).some((name) => name.endsWith(".tmp")), false);
+        } finally { h.cleanup(); }
+      });
+    }
+  }
+
+  it("discards a reused supervisor without losing a verified live worker", async () => {
+    const h = harness();
+    try {
+      const snapshot = fixtureSnapshot({ supervisorIdentity: "old-parent", workerIdentity: "worker-start" });
+      const cleaned = await discardObsoleteWorkerOwnership(snapshot, h.paths, () => true,
+        (pid) => pid === 12 ? "unrelated-start" : "worker-start");
+      assert.equal(cleaned?.supervisorPid, 0);
+      assert.equal(cleaned?.workerPid, 13);
+      assert.match(findLiveOwnedProcesses(null, cleaned, () => true, () => "worker-start").join(), /owned worker/);
+      const alive = new Set([12, 13]);
+      const signals: number[] = [];
+      await runDown([], {
+        readUpState: async () => ({
+          parentPid: 12, parentIdentity: "old-parent", mode: "separate-worker",
+          startedAt: snapshot.startedAt, cwd: "", webUrl: "",
+        }),
+        readWorkerHealth: async () => readWorkerHealth(h.paths),
+        writeWorkerHealth: async (health) => writeWorkerHealthAtomic(health, h.paths),
+        isProcessAlive: (pid) => alive.has(pid!),
+        readProcessIdentity: (pid) => pid === 12 ? "unrelated-start" : "worker-start",
+        terminateProcess: (pid) => { signals.push(pid); alive.delete(pid); return true; },
+        forceKill: () => assert.fail("worker exited on TERM"),
+        clearUpState: async () => assert.fail("unrelated parent PID remains alive"),
+      });
+      assert.deepEqual(signals, [13]);
+    } finally { h.cleanup(); }
+  });
+
+  for (const slot of ["supervisor", "worker"] as const) {
+    for (const outcome of ["reused", "dead", "unavailable"] as const) {
+      it(`down cleans obsolete-only orphan ${slot} ownership, retaining unavailable identity: ${outcome}`, async () => {
+        const h = harness();
+        try {
+          const snapshot = fixtureSnapshot({
+            supervisorPid: slot === "supervisor" ? 12 : 0,
+            workerPid: slot === "worker" ? 13 : null,
+            supervisorIdentity: "original-start", workerIdentity: "original-start",
+          });
+          await writeWorkerHealthAtomic(snapshot, h.paths);
+          assert.equal(await runDown([], {
+            readUpState: async () => null,
+            readWorkerHealth: async () => readWorkerHealth(h.paths),
+            writeWorkerHealth: async (health) => writeWorkerHealthAtomic(health, h.paths),
+            isProcessAlive: (pid) => !!pid && outcome !== "dead",
+            readProcessIdentity: () => outcome === "unavailable" ? null : "unrelated-start",
+            terminateProcess: () => assert.fail("must not TERM an obsolete or unverifiable PID"),
+            forceKill: () => assert.fail("must not KILL an obsolete or unverifiable PID"),
+            clearUpState: async () => assert.fail("up.json is absent"),
+          }), 0);
+          const cleaned = (await readWorkerHealth(h.paths))!;
+          assert.equal(cleaned[`${slot}Pid`], outcome === "unavailable" ? snapshot[`${slot}Pid`] : slot === "supervisor" ? 0 : null);
+          if (outcome === "unavailable") assert.deepEqual(cleaned, snapshot);
+          else assert.deepEqual(findLiveOwnedProcesses(null, cleaned, () => true, () => "unrelated-start"), []);
+        } finally { h.cleanup(); }
+      });
+    }
+  }
+
   it("persists ownership and deadlines through exhausted recovery startup and stability", async () => {
     const h = harness({ maxRestartAttempts: 1, shutdownTimeoutMs: 65_000 });
     try {
@@ -173,6 +264,7 @@ describe("worker supervisor", () => {
         assert.match(findLiveOwnedProcesses(null, health, (pid) => alive.has(pid!), (pid) => `start-${pid}`).join(), /owned worker/);
         await runDown([], {
           readUpState: async () => ready ? null : state, readWorkerHealth: async () => health,
+          writeWorkerHealth: async () => undefined,
           clearUpState: async () => { cleared = true; },
           readProcessIdentity: (pid) => `start-${pid}`,
           isProcessAlive: (pid) => alive.has(pid!),
@@ -202,6 +294,7 @@ describe("worker supervisor", () => {
         const signals: string[] = [];
         await runDown([], {
           readUpState: async () => state, readWorkerHealth: async () => health,
+          writeWorkerHealth: async () => undefined,
           clearUpState: async () => { cleared = true; },
           isProcessAlive: (candidate) => candidate === pid,
           readProcessIdentity: () => failure === "unavailable" ? null
@@ -211,7 +304,7 @@ describe("worker supervisor", () => {
           now: () => now, sleep: async (ms) => { now += ms; },
         });
         assert.deepEqual(signals, failure === "reused-after-term" ? ["SIGTERM"] : []);
-        assert.equal(cleared, false);
+        assert.equal(cleared, label === "worker" && failure === "mismatch");
       }
     }
   });
@@ -231,6 +324,7 @@ describe("worker supervisor", () => {
     const kills: Array<{ pid: number; at: number }> = [];
     await runDown([], {
       readUpState: async () => state, readWorkerHealth: async () => health,
+      writeWorkerHealth: async () => undefined,
       clearUpState: async () => undefined,
       isProcessAlive: (pid) => alive.has(pid!),
       readProcessIdentity: (pid) => pid === 12 ? "parent-start" : "worker-start",

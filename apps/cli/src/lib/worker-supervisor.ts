@@ -4,7 +4,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import type { AddroidPaths } from "@addroid/config";
-import { readProcessIdentity, type UpState } from "./processes.js";
+import { isProcessAlive, processOwnership, readProcessIdentity, type UpState } from "./processes.js";
 
 export type WorkerSupervisorPhase =
   | "starting"
@@ -177,6 +177,34 @@ export async function writeWorkerHealthAtomic(
     mode: 0o600,
   });
   await fsp.rename(temporary, paths.workerHealthFile);
+}
+
+/** Clear only proven obsolete owners; retain any live or unverifiable incarnation. */
+export async function discardObsoleteWorkerOwnership(
+  snapshot: WorkerHealthSnapshot | null,
+  paths: AddroidPaths,
+  alive: typeof isProcessAlive = isProcessAlive,
+  identity: typeof readProcessIdentity = readProcessIdentity,
+  write: typeof writeWorkerHealthAtomic = writeWorkerHealthAtomic
+): Promise<WorkerHealthSnapshot | null> {
+  if (!snapshot) return null;
+  const next = { ...snapshot };
+  const discarded: string[] = [];
+  if (snapshot.supervisorPid && processOwnership(snapshot.supervisorPid, snapshot.supervisorIdentity, alive, identity) === "obsolete") {
+    next.supervisorPid = 0;
+    next.supervisorIdentity = null;
+    discarded.push(`supervisor pid: ${snapshot.supervisorPid}`);
+  }
+  if (snapshot.workerPid && processOwnership(snapshot.workerPid, snapshot.workerIdentity, alive, identity) === "obsolete") {
+    next.workerPid = null;
+    next.workerIdentity = null;
+    discarded.push(`worker pid: ${snapshot.workerPid}`);
+  }
+  if (discarded.length > 0) {
+    await write(next, paths);
+    process.stdout.write(`[addroid] obsolete ownership record discarded: ${discarded.join(", ")}\n`);
+  }
+  return next;
 }
 
 export function restartBackoffMs(
