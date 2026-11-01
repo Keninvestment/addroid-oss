@@ -56,7 +56,8 @@ export interface WorkerSupervisorConfig {
 }
 
 export const DEFAULT_WORKER_SUPERVISOR_CONFIG: WorkerSupervisorConfig = {
-  readyTimeoutMs: 15_000,
+  // Must exceed the optional ops-repo sync budget (2 x 60s) plus initialization.
+  readyTimeoutMs: 180_000,
   heartbeatTimeoutMs: 20_000,
   backoffBaseMs: 1_000,
   backoffMaxMs: 30_000,

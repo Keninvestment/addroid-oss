@@ -144,6 +144,10 @@ function harness(overrides: {
 }
 
 describe("worker supervisor", () => {
+  it("allows the optional ops-repo sync budget plus initialization before readiness", () => {
+    assert.ok(resolveWorkerSupervisorConfig({}).readyTimeoutMs > 120_000);
+  });
+
   for (const slot of ["supervisor", "worker"] as const) {
     for (const outcome of ["same", "reused", "unavailable", "dead", "missing-saved-identity"] as const) {
       it(`classifies and persists ${slot} ownership: ${outcome}`, async () => {
