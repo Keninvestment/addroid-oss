@@ -2,6 +2,15 @@
 // signals, and connection loss all follow the same bounded shutdown path.
 export interface WorkerProcessHandle { stop: () => Promise<void> }
 
+// pg-boss allows active jobs 30 seconds to finish. Leave room for the
+// subsequent Prisma/resource cleanup as well before forcing the process out.
+export const DEFAULT_WORKER_SHUTDOWN_TIMEOUT_MS = 35_000;
+
+export function workerShutdownTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number(env.ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS);
+  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_WORKER_SHUTDOWN_TIMEOUT_MS;
+}
+
 export interface WorkerProcessDependencies {
   startWorker: (options: {
     installSignalHandlers: false;
@@ -12,6 +21,7 @@ export interface WorkerProcessDependencies {
   logError?: (error: unknown) => void;
   heartbeatIntervalMs?: number;
   shutdownTimeoutMs?: number;
+  fatalShutdownTimeoutMs?: number;
 }
 
 export function runWorkerProcess(deps: WorkerProcessDependencies): {
@@ -23,24 +33,46 @@ export function runWorkerProcess(deps: WorkerProcessDependencies): {
   let stopping: Promise<void> | undefined;
   let stopped = false;
   let exitCode = 0;
+  let expediteFatalDrain: (() => void) | undefined;
 
   const stop = (code = 0): Promise<void> => {
     // A fatal error received during graceful shutdown must still exit nonzero.
+    const becameFatal = exitCode === 0 && code > 0;
     exitCode = Math.max(exitCode, code);
-    if (stopping) return stopping;
+    if (stopping) {
+      if (becameFatal) expediteFatalDrain?.();
+      return stopping;
+    }
     stopped = true;
     if (heartbeat) clearInterval(heartbeat);
     stopping = (async () => {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const timeouts: ReturnType<typeof setTimeout>[] = [];
       try {
         await Promise.race([
-          Promise.resolve().then(() => handle?.stop()).catch(deps.logError ?? (() => undefined)),
+          Promise.resolve().then(() => handle?.stop()).catch((error) => {
+            exitCode = Math.max(exitCode, 1);
+            deps.logError?.(error);
+          }),
           new Promise<void>((resolve) => {
-            timeout = setTimeout(resolve, deps.shutdownTimeoutMs ?? 5_000);
+            const armDeadline = (deadlineMs: number): void => {
+              timeouts.push(setTimeout(() => {
+                for (const timeout of timeouts) clearTimeout(timeout);
+                exitCode = Math.max(exitCode, 1);
+                deps.logError?.(new Error(`[worker] shutdown drain forced after ${deadlineMs}ms`));
+                resolve();
+              }, deadlineMs));
+            };
+            // Keep the original deadline too: late fatal errors must never
+            // extend an already nearly-finished graceful shutdown budget.
+            expediteFatalDrain = () => armDeadline(deps.fatalShutdownTimeoutMs ?? 5_000);
+            armDeadline(code === 0
+              ? deps.shutdownTimeoutMs ?? workerShutdownTimeoutMs()
+              : deps.fatalShutdownTimeoutMs ?? 5_000);
           }),
         ]);
       } finally {
-        if (timeout) clearTimeout(timeout);
+        for (const timeout of timeouts) clearTimeout(timeout);
+        expediteFatalDrain = undefined;
         deps.exit(exitCode);
       }
     })();

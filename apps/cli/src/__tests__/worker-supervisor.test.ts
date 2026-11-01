@@ -9,6 +9,7 @@ import { resolveAddroidPaths } from "@addroid/config";
 import type { UpState } from "../lib/processes.js";
 import { writeUpState } from "../lib/processes.js";
 import { checkWorkerRuntime } from "../lib/checks.js";
+import { runDown } from "../commands/down.js";
 import { runStatus } from "../commands/status.js";
 import { finalizeSeparateWorkerState } from "../commands/up.js";
 import {
@@ -16,6 +17,7 @@ import {
   evaluateWorkerHealth,
   readWorkerHealth,
   restartBackoffMs,
+  resolveWorkerSupervisorConfig,
   type WorkerHealthSnapshot,
 } from "../lib/worker-supervisor.js";
 
@@ -97,6 +99,7 @@ class FakeChild extends EventEmitter {
 function harness(overrides: {
   maxRestartAttempts?: number;
   stableResetMs?: number;
+  shutdownTimeoutMs?: number;
   spawn?: (generation: number) => FakeChild;
 } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-supervisor-"));
@@ -117,7 +120,8 @@ function harness(overrides: {
       backoffMaxMs: 40,
       maxRestartAttempts: overrides.maxRestartAttempts ?? 4,
       stableResetMs: overrides.stableResetMs ?? 500,
-      shutdownTimeoutMs: 100,
+      exhaustedRetryMs: 1_000,
+      shutdownTimeoutMs: overrides.shutdownTimeoutMs ?? 100,
     },
     spawnChild: (generation) => {
       const child = spawn(generation);
@@ -137,6 +141,140 @@ function harness(overrides: {
 }
 
 describe("worker supervisor", () => {
+  it("clears the exhausted fatal generation PID atomically and down rejects stale exhausted PIDs", async () => {
+    const h = harness({ maxRestartAttempts: 1 });
+    const previousHome = process.env.ADDROID_HOME;
+    try {
+      await h.supervisor.start();
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      const final = h.children[1]!;
+      final.emit("message", { type: "fatal", generation: 2, message: "database unavailable" });
+      assert.equal(h.supervisor.getSnapshot().workerPid, final.pid);
+      final.exit(1);
+      await h.supervisor.flush();
+      const snapshot = (await readWorkerHealth(h.paths))!;
+      assert.equal(snapshot.phase, "exhausted");
+      assert.equal(snapshot.workerPid, null);
+      assert.equal(fs.readdirSync(h.paths.runDir).some((name) => name.endsWith(".tmp")), false);
+      process.env.ADDROID_HOME = h.home;
+      await writeUpState({
+        parentPid: 9998, workerPid: final.pid, mode: "separate-worker",
+        startedAt: snapshot.startedAt, cwd: process.cwd(), webUrl: "http://127.0.0.1:1",
+      }, h.paths);
+      const signals: number[] = [];
+      const run = () => runDown([], {
+        isProcessAlive: (pid) => pid === final.pid,
+        terminateProcess: (pid) => { signals.push(pid); return true; },
+        forceKill: (pid) => { signals.push(pid); },
+      });
+      await run();
+      // Also protect against an older persisted snapshot containing the dead PID.
+      await writeUpState({
+        parentPid: 9998, mode: "separate-worker", startedAt: snapshot.startedAt,
+        cwd: process.cwd(), webUrl: "http://127.0.0.1:1",
+      }, h.paths);
+      fs.writeFileSync(h.paths.workerHealthFile, JSON.stringify({
+        ...snapshot, supervisorPid: 9998, workerPid: final.pid,
+      }));
+      await run();
+      assert.deepEqual(signals, []);
+    } finally {
+      if (previousHome === undefined) delete process.env.ADDROID_HOME;
+      else process.env.ADDROID_HOME = previousHome;
+      h.cleanup();
+    }
+  });
+
+  it("keeps exhausted unhealthy through repeated probes until stable recovery", async () => {
+    const h = harness({ maxRestartAttempts: 1, stableResetMs: 150 });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      h.children[1]!.exit(1);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      h.clock.advance(999);
+      assert.equal(h.children.length, 2);
+      h.clock.advance(1);
+      assert.equal(h.children.length, 3);
+      h.children[2]!.exit(1); // another failed slow probe
+      h.clock.advance(1_000);
+      assert.equal(h.children.length, 4);
+      h.children[3]!.ready(4);
+      const assessment = () => evaluateWorkerHealth({
+        upState: {
+          parentPid: process.pid, mode: "separate-worker", cwd: process.cwd(),
+          startedAt: h.supervisor.getSnapshot().startedAt, webUrl: "http://127.0.0.1:1",
+        },
+        snapshot: h.supervisor.getSnapshot(), nowMs: h.clock.nowMs,
+        parentAlive: true, workerAlive: true,
+      });
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      assert.equal(assessment().healthy, false);
+      h.clock.advance(149);
+      h.children[3]!.heartbeat(4);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      h.clock.advance(1);
+      h.children[3]!.heartbeat(4);
+      assert.equal(h.supervisor.getSnapshot().phase, "ready");
+      assert.equal(h.supervisor.getSnapshot().restartAttempts, 0);
+      assert.equal(assessment().healthy, true);
+      await h.supervisor.flush();
+      assert.equal((await readWorkerHealth(h.paths))?.phase, "ready");
+    } finally { h.cleanup(); }
+  });
+
+  it("continues slow probes without overlapping an unreaped generation", async () => {
+    const h = harness({ maxRestartAttempts: 1 });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      h.children[1]!.emit("message", { type: "fatal", generation: 2 });
+      h.clock.advance(4_000);
+      assert.equal(h.children.length, 2);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      h.children[1]!.exit(1);
+      h.clock.advance(1_000);
+      assert.equal(h.children.length, 3);
+      assert.equal(h.supervisor.getSnapshot().workerPid, h.children[2]!.pid);
+    } finally { h.cleanup(); }
+  });
+
+  it("cancels exhausted recovery probes on shutdown", async () => {
+    const h = harness({ maxRestartAttempts: 1 });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.exit(1);
+      h.clock.advance(10);
+      h.children[1]!.exit(1);
+      assert.equal(h.supervisor.getSnapshot().phase, "exhausted");
+      await h.supervisor.stop();
+      h.clock.advance(10_000);
+      assert.equal(h.children.length, 2);
+      assert.equal(h.supervisor.getSnapshot().phase, "stopped");
+      assert.equal(h.supervisor.getSnapshot().nextRestartAt, null);
+    } finally { h.cleanup(); }
+  });
+
+  it("gives normal worker drain a longer supervisor deadline", async () => {
+    assert.equal(resolveWorkerSupervisorConfig({}).shutdownTimeoutMs, 40_000);
+    assert.equal(resolveWorkerSupervisorConfig({ ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS: "60000" }).shutdownTimeoutMs, 65_000);
+    assert.equal(resolveWorkerSupervisorConfig({}).exhaustedRetryMs, 300_000);
+    assert.equal(resolveWorkerSupervisorConfig({ ADDROID_WORKER_EXHAUSTED_RETRY_MS: "12345" }).exhaustedRetryMs, 12_345);
+    const h = harness({ shutdownTimeoutMs: resolveWorkerSupervisorConfig({}).shutdownTimeoutMs });
+    try {
+      await h.supervisor.start();
+      h.children[0]!.ready(1);
+      const stopping = h.supervisor.stop();
+      h.clock.advance(35_000); // full worker graceful deadline elapsed
+      assert.deepEqual(h.children[0]!.killCalls, ["SIGTERM"]);
+      h.children[0]!.exit(0);
+      assert.equal(await stopping, true);
+    } finally { h.cleanup(); }
+  });
+
   it("restarts a dead runtime after bounded exponential backoff", async () => {
     const h = harness();
     try {
@@ -153,7 +291,8 @@ describe("worker supervisor", () => {
           backoffMaxMs: 40,
           maxRestartAttempts: 4,
           stableResetMs: 500,
-          shutdownTimeoutMs: 100,
+          exhaustedRetryMs: 1_000,
+      shutdownTimeoutMs: 100,
         }),
         10
       );
@@ -257,7 +396,7 @@ describe("worker supervisor", () => {
       assert.equal(state.restartAttempts, 4);
       assert.equal(state.lastFailure?.message, "spawn-5");
       assert.equal(calls, 5);
-      assert.equal(h.clock.pending, 0);
+      assert.equal(h.clock.pending, 1); // slow recovery continues indefinitely
     } finally {
       h.cleanup();
     }

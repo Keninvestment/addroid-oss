@@ -48,6 +48,7 @@ export interface WorkerSupervisorConfig {
   maxRestartAttempts: number;
   stableResetMs: number;
   shutdownTimeoutMs: number;
+  exhaustedRetryMs: number;
 }
 
 export const DEFAULT_WORKER_SUPERVISOR_CONFIG: WorkerSupervisorConfig = {
@@ -57,7 +58,8 @@ export const DEFAULT_WORKER_SUPERVISOR_CONFIG: WorkerSupervisorConfig = {
   backoffMaxMs: 30_000,
   maxRestartAttempts: 5,
   stableResetMs: 60_000,
-  shutdownTimeoutMs: 5_000,
+  shutdownTimeoutMs: 40_000,
+  exhaustedRetryMs: 300_000,
 };
 
 export function resolveWorkerSupervisorConfig(
@@ -66,8 +68,8 @@ export function resolveWorkerSupervisorConfig(
   const positiveInt = (name: string, fallback: number): number => {
     const raw = env[name]?.trim();
     if (!raw) return fallback;
-    const parsed = Number.parseInt(raw, 10);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
   };
   const config: WorkerSupervisorConfig = {
     readyTimeoutMs: positiveInt("ADDROID_WORKER_READY_TIMEOUT_MS", DEFAULT_WORKER_SUPERVISOR_CONFIG.readyTimeoutMs),
@@ -76,7 +78,9 @@ export function resolveWorkerSupervisorConfig(
     backoffMaxMs: positiveInt("ADDROID_WORKER_RESTART_BACKOFF_MAX_MS", DEFAULT_WORKER_SUPERVISOR_CONFIG.backoffMaxMs),
     maxRestartAttempts: positiveInt("ADDROID_WORKER_MAX_RESTART_ATTEMPTS", DEFAULT_WORKER_SUPERVISOR_CONFIG.maxRestartAttempts),
     stableResetMs: positiveInt("ADDROID_WORKER_STABLE_RESET_MS", DEFAULT_WORKER_SUPERVISOR_CONFIG.stableResetMs),
-    shutdownTimeoutMs: positiveInt("ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS", DEFAULT_WORKER_SUPERVISOR_CONFIG.shutdownTimeoutMs),
+    // Give the worker its full graceful drain plus time to report exit.
+    shutdownTimeoutMs: positiveInt("ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS", 35_000) + 5_000,
+    exhaustedRetryMs: positiveInt("ADDROID_WORKER_EXHAUSTED_RETRY_MS", DEFAULT_WORKER_SUPERVISOR_CONFIG.exhaustedRetryMs),
   };
   if (config.backoffMaxMs < config.backoffBaseMs) config.backoffMaxMs = config.backoffBaseMs;
   config.heartbeatTimeoutMs = Math.max(300, config.heartbeatTimeoutMs);
@@ -218,6 +222,7 @@ export class WorkerSupervisor {
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffTimer: ReturnType<typeof setTimeout> | null = null;
   private failedGeneration: number | null = null;
+  private exhaustedRecovery = false;
   private persistQueue: Promise<void> = Promise.resolve();
   private shutdownExit: (() => void) | null = null;
 
@@ -359,7 +364,7 @@ export class WorkerSupervisor {
       }
       this.setSnapshot({
         phase: "exhausted",
-        nextRestartAt: null,
+        nextRestartAt: new Date(this.now() + this.config.exhaustedRetryMs).toISOString(),
         lastFailure: {
           at: new Date(this.now()).toISOString(),
           reason: "exit",
@@ -368,6 +373,8 @@ export class WorkerSupervisor {
           signal: "SIGKILL",
         },
       });
+      this.exhaustedRecovery = true;
+      this.backoffTimer = this.timers.setTimeout(() => this.spawnGeneration(), this.config.exhaustedRetryMs);
       this.logger.error("[addroid up] refusing to overlap worker generations: previous runtime did not exit after SIGKILL");
       return;
     }
@@ -375,7 +382,7 @@ export class WorkerSupervisor {
     const at = new Date(this.now()).toISOString();
     this.failedGeneration = null;
     this.setSnapshot({
-      phase: "starting",
+      phase: this.exhaustedRecovery ? "exhausted" : "starting",
       generation,
       workerPid: null,
       lastAttemptAt: at,
@@ -402,6 +409,10 @@ export class WorkerSupervisor {
       this.failGeneration(generation, "spawn-error", err.message, null, null);
     });
     child.once("exit", (code, signal) => {
+      // An old exit must never erase the PID of a replacement generation.
+      if (this.snapshot.generation === generation && this.snapshot.workerPid === child.pid) {
+        this.setSnapshot({ workerPid: null });
+      }
       if (this.retiringChild === child) {
         if (this.retireTimer) this.timers.clearTimeout(this.retireTimer);
         this.retireTimer = null;
@@ -422,7 +433,8 @@ export class WorkerSupervisor {
       );
     });
     this.readyTimer = this.timers.setTimeout(() => {
-      if (this.snapshot.generation !== generation || this.snapshot.phase !== "starting") return;
+      if (this.snapshot.generation !== generation || this.snapshot.readyAt ||
+          (this.snapshot.phase !== "starting" && this.snapshot.phase !== "exhausted")) return;
       try {
         child.kill("SIGTERM");
       } catch {
@@ -439,7 +451,7 @@ export class WorkerSupervisor {
     if (this.failedGeneration === generation) return;
     if (this.snapshot.phase === "stopping" || this.snapshot.phase === "stopped") return;
     if (raw.type === "fatal") {
-      if (this.snapshot.phase !== "starting" && this.snapshot.phase !== "ready") return;
+      if (!this.child) return;
       try {
         this.child?.kill("SIGTERM");
       } catch {
@@ -451,17 +463,20 @@ export class WorkerSupervisor {
     const atMs = this.now();
     const at = new Date(atMs).toISOString();
     if (raw.type === "ready") {
-      if (this.snapshot.phase !== "starting") return;
+      if (this.snapshot.readyAt || !this.child ||
+          (this.snapshot.phase !== "starting" && this.snapshot.phase !== "exhausted")) return;
       this.cancelReadyTimer();
-      this.setSnapshot({ phase: "ready", readyAt: at, lastHeartbeatAt: at });
+      this.setSnapshot({ phase: this.exhaustedRecovery ? "exhausted" : "ready", readyAt: at, lastHeartbeatAt: at });
       this.scheduleHeartbeatDeadline(generation);
       this.logger.info(`[addroid up] worker generation ${generation} ready`);
       return;
     }
-    if (raw.type === "heartbeat" && this.snapshot.phase === "ready") {
+    if (raw.type === "heartbeat" && this.snapshot.readyAt) {
       const readyAtMs = this.snapshot.readyAt ? Date.parse(this.snapshot.readyAt) : atMs;
       const stable = atMs - readyAtMs >= this.config.stableResetMs;
+      if (stable) this.exhaustedRecovery = false;
       this.setSnapshot({
+        ...(stable ? { phase: "ready" as const } : {}),
         lastHeartbeatAt: at,
         ...(stable && this.snapshot.restartAttempts > 0 ? { restartAttempts: 0 } : {}),
       });
@@ -472,7 +487,8 @@ export class WorkerSupervisor {
   private scheduleHeartbeatDeadline(generation: number): void {
     if (this.heartbeatTimer) this.timers.clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = this.timers.setTimeout(() => {
-      if (this.snapshot.generation !== generation || this.snapshot.phase !== "ready") return;
+      if (this.snapshot.generation !== generation || !this.snapshot.readyAt ||
+          this.failedGeneration === generation) return;
       const active = this.child;
       try {
         active?.kill("SIGTERM");
@@ -533,14 +549,18 @@ export class WorkerSupervisor {
     const at = new Date(atMs).toISOString();
     const failure: WorkerFailure = { at, reason, message, exitCode, signal };
     this.logger.error(`[addroid up] worker generation ${generation} failed: ${message}`);
-    if (previousAttempts >= this.config.maxRestartAttempts) {
+    if (this.exhaustedRecovery || previousAttempts >= this.config.maxRestartAttempts) {
+      this.exhaustedRecovery = true;
       this.setSnapshot({
         phase: "exhausted",
         workerPid: retiringWorkerPid,
         restartAttempts: previousAttempts,
-        nextRestartAt: null,
+        readyAt: null,
+        lastHeartbeatAt: null,
+        nextRestartAt: new Date(atMs + this.config.exhaustedRetryMs).toISOString(),
         lastFailure: failure,
       });
+      this.backoffTimer = this.timers.setTimeout(() => this.spawnGeneration(), this.config.exhaustedRetryMs);
       return;
     }
     const attempts = previousAttempts + 1;
@@ -629,6 +649,7 @@ function spawnWorkerRuntime(
       cwd: repoRoot,
       env: {
         ...process.env,
+        ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS: String(config.shutdownTimeoutMs - 5_000),
         ADDROID_WORKER_SUPERVISED: "1",
         ADDROID_WORKER_GENERATION: String(generation),
         ADDROID_WORKER_HEARTBEAT_INTERVAL_MS: String(heartbeatIntervalMs),

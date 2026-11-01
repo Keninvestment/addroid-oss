@@ -8,12 +8,24 @@ import {
   readUpState,
   terminateProcess,
 } from "../lib/processes.js";
-import { readWorkerHealth } from "../lib/worker-supervisor.js";
+import { readWorkerHealth, resolveWorkerSupervisorConfig } from "../lib/worker-supervisor.js";
 
-const GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const FORCE_STOP_TIMEOUT_MS = 2_000;
 
-export async function runDown(args: string[]): Promise<number> {
+interface DownDependencies {
+  isProcessAlive: typeof isProcessAlive;
+  terminateProcess: (pid: number) => boolean;
+  forceKill: (pid: number) => void;
+}
+
+export async function runDown(
+  args: string[],
+  deps: DownDependencies = {
+    isProcessAlive,
+    terminateProcess,
+    forceKill: (pid) => { process.kill(pid, "SIGKILL"); },
+  }
+): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write(
       [
@@ -44,7 +56,9 @@ export async function runDown(args: string[]): Promise<number> {
     }
     const workerHealth = await readWorkerHealth(paths);
     const currentWorkerPid =
-      workerHealth?.supervisorPid === state.parentPid
+      workerHealth?.supervisorPid === state.parentPid &&
+      workerHealth.generation > 0 &&
+      ["starting", "ready", "stopping"].includes(workerHealth.phase)
         ? workerHealth.workerPid ?? undefined
         : undefined;
     if (currentWorkerPid) {
@@ -59,11 +73,11 @@ export async function runDown(args: string[]): Promise<number> {
     if (!t.pid) continue;
     if (seenPids.has(t.pid)) continue;
     seenPids.add(t.pid);
-    if (!isProcessAlive(t.pid)) {
+    if (!deps.isProcessAlive(t.pid)) {
       process.stdout.write(`[addroid down] ${t.label} (pid ${t.pid}) は既に停止済み。\n`);
       continue;
     }
-    if (terminateProcess(t.pid)) {
+    if (deps.terminateProcess(t.pid)) {
       actedOn += 1;
       process.stdout.write(`[addroid down] ${t.label} (pid ${t.pid}) に SIGTERM を送信。\n`);
     } else {
@@ -74,12 +88,13 @@ export async function runDown(args: string[]): Promise<number> {
   }
 
   if (seenPids.size > 0) {
-    await waitForTargetsToStop(seenPids, GRACEFUL_STOP_TIMEOUT_MS);
-    const stillAlive = [...seenPids].filter((pid) => isProcessAlive(pid));
+    // Allow the supervisor to finish the worker drain before forcing the parent.
+    await waitForTargetsToStop(seenPids, resolveWorkerSupervisorConfig().shutdownTimeoutMs + 2_000, deps.isProcessAlive);
+    const stillAlive = [...seenPids].filter((pid) => deps.isProcessAlive(pid));
     for (const pid of stillAlive) {
       if (pid === process.pid) continue;
       try {
-        process.kill(pid, "SIGKILL");
+        deps.forceKill(pid);
         process.stdout.write(
           `[addroid down] pid ${pid} が終了しないため SIGKILL を送信。\n`
         );
@@ -88,13 +103,13 @@ export async function runDown(args: string[]): Promise<number> {
       }
     }
     if (stillAlive.length > 0) {
-      await waitForTargetsToStop(new Set(stillAlive), FORCE_STOP_TIMEOUT_MS);
+      await waitForTargetsToStop(new Set(stillAlive), FORCE_STOP_TIMEOUT_MS, deps.isProcessAlive);
     }
   }
 
   // 親プロセスが上 (= addroid up) で稼働中なら、shutdown ハンドラが pid file を消すはず。
   // 親もすでに死んでいたケースのために pid file を念のため掃除する。
-  if (![...seenPids].some((pid) => isProcessAlive(pid))) {
+  if (![...seenPids].some((pid) => deps.isProcessAlive(pid))) {
     await clearUpState(paths);
   }
 
@@ -106,11 +121,12 @@ export async function runDown(args: string[]): Promise<number> {
 
 async function waitForTargetsToStop(
   pids: Set<number>,
-  timeoutMs: number
+  timeoutMs: number,
+  alive: typeof isProcessAlive
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (![...pids].some((pid) => isProcessAlive(pid))) return;
+    if (![...pids].some((pid) => alive(pid))) return;
     await delay(100);
   }
 }
