@@ -468,7 +468,12 @@ export interface ApplyJobStore {
   loadApplyApprovalSnapshot(
     applyJobId: string
   ): Promise<ApplyApprovalSnapshot | null>;
-  markApplyRunning(input: MarkApplyRunningInput): Promise<void>;
+  /** Read durable state before considering a delivered execute_apply job. */
+  findApplyJobState(applyJobId: string): Promise<string | null>;
+  /** Atomic queued -> running claim; false means another delivery owns the job. */
+  markApplyRunning(input: MarkApplyRunningInput): Promise<boolean>;
+  /** Conditional running -> failed quarantine; never overwrites a terminal result. */
+  quarantineUncertainApply(input: MarkApplyRunningInput): Promise<void>;
   markApplyFinished(input: MarkApplyFinishedInput): Promise<void>;
   /** apply 全体・個別 apply action・MetaCli 結果を記録する。 */
   recordApplyExecutionLog(input: ExecutionLogInput): Promise<void>;

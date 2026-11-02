@@ -5,7 +5,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { resolveAddroidPaths, type AddroidPaths } from "@addroid/config";
 
@@ -20,6 +20,11 @@ export type UpMode = "shared" | "separate-worker";
 export interface UpState {
   startedAt: string;
   parentPid: number;
+  parentIdentity?: string | null;
+  webIdentity?: string | null;
+  workerIdentity?: string | null;
+  shutdownTimeoutMs?: number;
+  workerShutdownTimeoutMs?: number;
   webPid?: number;
   workerPid?: number;
   webUrl: string;
@@ -53,10 +58,12 @@ export async function writeUpState(
   paths: AddroidPaths = resolveAddroidPaths()
 ): Promise<void> {
   await fs.mkdir(path.dirname(paths.pidFile), { recursive: true });
-  await fs.writeFile(paths.pidFile, JSON.stringify(state, null, 2), {
+  const temporary = `${paths.pidFile}.${process.pid}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(state, null, 2), {
     encoding: "utf8",
     mode: 0o600,
   });
+  await fs.rename(temporary, paths.pidFile);
 }
 
 export async function clearUpState(
@@ -116,4 +123,31 @@ export function terminateProcess(pid: number | undefined | null): boolean {
   } catch {
     return false;
   }
+}
+
+/** Process start time identifies an incarnation, rather than a reusable PID. */
+export function readProcessIdentity(pid: number): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    const value = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8", timeout: 1_000, stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, LC_ALL: "C" },
+    }).trim().replace(/\s+/g, " ");
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Missing identity evidence is distinct from a confirmed obsolete incarnation. */
+export function processOwnership(
+  pid: number | null | undefined,
+  expectedIdentity: string | null | undefined,
+  alive: typeof isProcessAlive = isProcessAlive,
+  identity: typeof readProcessIdentity = readProcessIdentity
+): "live" | "obsolete" | "unavailable" {
+  if (!pid || !alive(pid)) return "obsolete";
+  const actualIdentity = identity(pid);
+  if (!expectedIdentity || !actualIdentity) return "unavailable";
+  return actualIdentity === expectedIdentity ? "live" : "obsolete";
 }

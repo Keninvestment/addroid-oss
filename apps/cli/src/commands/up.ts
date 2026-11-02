@@ -14,7 +14,6 @@
 //   - pid file (~/.addroid/run/up.json) を書き出し、down/status から参照可能にする
 //   - SIGINT/SIGTERM で graceful にツリー shutdown
 
-import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -30,11 +29,20 @@ import { resolveRepoRoot } from "../lib/paths.js";
 import {
   clearUpState,
   isProcessAlive,
+  processOwnership,
   readUpState,
+  readProcessIdentity,
   writeUpState,
   type UpMode,
   type UpState,
 } from "../lib/processes.js";
+import {
+  WorkerSupervisor,
+  discardObsoleteWorkerOwnership,
+  readWorkerHealth,
+  resolveWorkerSupervisorConfig,
+  type WorkerHealthSnapshot,
+} from "../lib/worker-supervisor.js";
 
 interface ParsedArgs {
   mode: UpMode;
@@ -121,24 +129,11 @@ export async function runUp(args: string[]): Promise<number> {
   }
 
   const existing = await readUpState(paths);
-  if (existing && (isProcessAlive(existing.parentPid) || isProcessAlive(existing.webPid) || isProcessAlive(existing.workerPid))) {
+  const existingHealth = await discardObsoleteWorkerOwnership(await readWorkerHealth(paths), paths);
+  const previousProcesses = findLiveOwnedProcesses(existing, existingHealth);
+  if (previousProcesses.length > 0) {
     process.stderr.write(
-      [
-        "[addroid up] 既に起動済みです。",
-        `  pid file  : ${paths.pidFile}`,
-        `  mode      : ${existing.mode}`,
-        `  parent pid: ${existing.parentPid}${
-          isProcessAlive(existing.parentPid) ? "" : " (not running)"
-        }`,
-        `  web pid   : ${existing.webPid ?? "(in parent)"}${
-          existing.webPid && !isProcessAlive(existing.webPid) ? " (not running)" : ""
-        }`,
-        `  worker pid: ${existing.workerPid ?? "(in parent)"}${
-          existing.workerPid && !isProcessAlive(existing.workerPid) ? " (not running)" : ""
-        }`,
-        "  停止するには別ターミナルで `addroid down` を実行してください。",
-        "",
-      ].join("\n")
+      `[addroid up] 既に起動済み、または停止未確認のプロセスがあります: ${previousProcesses.join(", ")}。addroid down で確認してください。\n`
     );
     return 1;
   }
@@ -377,9 +372,12 @@ async function runShared(ctx: SharedContext): Promise<number> {
   const state: UpState = {
     startedAt: new Date().toISOString(),
     parentPid: process.pid,
+    parentIdentity: readProcessIdentity(process.pid),
     webUrl: `http://${ctx.binding.hostname}:${ctx.binding.port}`,
     cwd: ctx.repoRoot,
     mode: "shared",
+    shutdownTimeoutMs: resolveWorkerSupervisorConfig().shutdownTimeoutMs,
+    workerShutdownTimeoutMs: resolveWorkerSupervisorConfig().shutdownTimeoutMs - 5_000,
     webStatus,
   };
   await writeUpState(state, ctx.paths);
@@ -468,12 +466,6 @@ async function withTimeout<T>(
 // ---------------------------------------------------------------------
 // separate-worker mode (将来の scale-out 経路): web in-process + worker child
 // ---------------------------------------------------------------------
-interface SpawnedChild {
-  name: "worker";
-  child: ChildProcess;
-  logStream: fs.WriteStream;
-}
-
 async function runSeparateWorker(ctx: SharedContext): Promise<number> {
   // web は in-process で起動。worker のみ child process。
   const upLog = fs.createWriteStream(ctx.paths.upLogFile, { flags: "a" });
@@ -482,7 +474,10 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
   );
   const restoreTee = teeStdio(upLog);
 
-  const children: SpawnedChild[] = [];
+  const workerSupervisor = new WorkerSupervisor({
+    paths: ctx.paths,
+    repoRoot: ctx.repoRoot,
+  });
   let httpServer: Server | null = null;
   let nextApp: { close?: () => Promise<void> } | null = null;
   let webStatus: "running" | "failed" = "running";
@@ -494,35 +489,10 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     shuttingDown = true;
     exitCode = code;
     process.stdout.write(`\n[addroid up] shutting down (${reason})…\n`);
-    for (const c of children) {
-      if (c.child.exitCode !== null || c.child.signalCode !== null) continue;
-      try {
-        c.child.kill("SIGTERM");
-      } catch {
-        /* ignore */
-      }
-    }
-    await Promise.all(
-      children.map(
-        (c) =>
-          new Promise<void>((resolve) => {
-            if (c.child.exitCode !== null || c.child.signalCode !== null) return resolve();
-            const timer = setTimeout(() => {
-              try {
-                c.child.kill("SIGKILL");
-              } catch {
-                /* ignore */
-              }
-              resolve();
-            }, 5_000);
-            c.child.once("exit", () => {
-              clearTimeout(timer);
-              resolve();
-            });
-          })
-      )
-    );
-    for (const c of children) c.logStream.end();
+    const workerStopped = await workerSupervisor.stop().catch((err) => {
+      process.stderr.write(`[addroid up] worker supervisor stop error: ${(err as Error).message}\n`);
+      return false;
+    });
     try {
       if (httpServer) await closeServer(httpServer);
     } catch (err) {
@@ -539,8 +509,12 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     } catch {
       /* ignore */
     }
-    await clearUpState(ctx.paths).catch(() => undefined);
-    process.exit(exitCode);
+    const finalExitCode = await finalizeSeparateWorkerState(
+      ctx.paths,
+      workerStopped,
+      exitCode
+    );
+    process.exit(finalExitCode);
   };
 
   process.on("SIGINT", () => {
@@ -550,17 +524,26 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     void shutdown("SIGTERM", 0);
   });
 
-  // 1) worker を子プロセスとして spawn
-  const workerChild = spawnWorkerChild(ctx);
-  children.push(workerChild);
-  workerChild.child.on("exit", (code, signal) => {
-    process.stdout.write(
-      `[addroid up] worker exited (code=${code ?? "null"}, signal=${signal ?? "none"}).\n`
-    );
-    if (!shuttingDown) {
-      void shutdown("worker-exited", code ?? 1);
-    }
-  });
+  // 1) worker runtime を直接 spawn し、ready/heartbeat と限定再起動を監督する。
+  // npm / tsx watch wrapper は挟まないため、記録される PID が実行主体そのものになる。
+  await workerSupervisor.start();
+  const initialSnapshot = workerSupervisor.getSnapshot();
+  const initialWorkerPid = initialSnapshot.workerPid;
+  const state: UpState = {
+    startedAt: new Date().toISOString(),
+    parentPid: process.pid,
+    parentIdentity: initialSnapshot.supervisorIdentity,
+    webUrl: `http://${ctx.binding.hostname}:${ctx.binding.port}`,
+    cwd: ctx.repoRoot,
+    mode: "separate-worker",
+    webStatus,
+    shutdownTimeoutMs: initialSnapshot.shutdownTimeoutMs,
+    workerShutdownTimeoutMs: initialSnapshot.workerShutdownTimeoutMs,
+    ...(initialWorkerPid !== null ? { workerPid: initialWorkerPid, workerIdentity: initialSnapshot.workerIdentity } : {}),
+  };
+  // Publish the supervisor owner before potentially slow Next.js preparation so
+  // status/down and duplicate-start detection remain available during startup.
+  await writeUpState(state, ctx.paths);
 
   // 2) Next.js を programmatic に in-process で起動
   try {
@@ -634,59 +617,40 @@ async function runSeparateWorker(ctx: SharedContext): Promise<number> {
     nextApp = null;
   }
 
-  const state: UpState = {
-    startedAt: new Date().toISOString(),
-    parentPid: process.pid,
-    webUrl: `http://${ctx.binding.hostname}:${ctx.binding.port}`,
-    cwd: ctx.repoRoot,
-    mode: "separate-worker",
-    webStatus,
-    ...(workerChild.child.pid !== undefined ? { workerPid: workerChild.child.pid } : {}),
-  };
-  await writeUpState(state, ctx.paths);
+  await writeUpState({ ...state, webStatus }, ctx.paths);
 
   return await new Promise<number>(() => {
     /* never resolves; shutdown handler invokes process.exit */
   });
 }
 
-function spawnWorkerChild(ctx: SharedContext): SpawnedChild {
-  const logStream = fs.createWriteStream(ctx.paths.workerLogFile, { flags: "a" });
-  logStream.write(`\n--- [addroid up] worker started ${new Date().toISOString()} ---\n`);
-  const child = spawn(
-    "npm",
-    ["run", "--silent", "--workspace", "apps/worker", "dev"],
-    {
-      cwd: ctx.repoRoot,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+export async function finalizeSeparateWorkerState(
+  paths: AddroidPaths,
+  workerStopped: boolean,
+  requestedExitCode: number
+): Promise<number> {
+  if (!workerStopped) {
+    const [retainedState, retainedHealth] = await Promise.all([
+      readUpState(paths).catch(() => null),
+      readWorkerHealth(paths),
+    ]);
+    if (
+      retainedState?.mode === "separate-worker" &&
+      retainedHealth?.supervisorPid === retainedState.parentPid &&
+      retainedHealth.workerPid
+    ) {
+      await writeUpState(
+        { ...retainedState, workerPid: retainedHealth.workerPid, workerIdentity: retainedHealth.workerIdentity },
+        paths
+      ).catch(() => undefined);
     }
-  );
-  const tag = "[worker] ";
-  const teeOut = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    logStream.write(text);
-    process.stdout.write(prefixLines(text, tag));
-  };
-  const teeErr = (chunk: Buffer | string) => {
-    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    logStream.write(text);
-    process.stderr.write(prefixLines(text, tag));
-  };
-  child.stdout?.on("data", teeOut);
-  child.stderr?.on("data", teeErr);
-  child.on("error", (err) => {
-    logStream.write(`[spawn error] ${(err as Error).message}\n`);
-    process.stderr.write(`[addroid up] worker spawn error: ${(err as Error).message}\n`);
-  });
-  return { name: "worker", child, logStream };
-}
-
-function prefixLines(text: string, prefix: string): string {
-  if (!text) return "";
-  const trailing = text.endsWith("\n");
-  const lines = text.replace(/\n$/, "").split("\n");
-  return lines.map((l) => prefix + l).join("\n") + (trailing ? "\n" : "");
+    process.stderr.write(
+      "[addroid up] worker stop could not be confirmed; preserving pid/health state for readback.\n"
+    );
+    return 1;
+  }
+  await clearUpState(paths).catch(() => undefined);
+  return requestedExitCode;
 }
 
 // ---------------------------------------------------------------------
@@ -726,4 +690,25 @@ async function preflight(paths: AddroidPaths): Promise<PreflightResult> {
       issues.map((m) => `  - ${m}`).join("\n") +
       "\n",
   };
+}
+
+/** Include the health owner even if up.json was lost; never overlap an orphan. */
+export function findLiveOwnedProcesses(
+  state: UpState | null,
+  health: WorkerHealthSnapshot | null,
+  alive: typeof isProcessAlive = isProcessAlive,
+  identity: typeof readProcessIdentity = readProcessIdentity
+): string[] {
+  const candidates = [
+    { label: "parent", pid: state?.parentPid, identity: state?.parentIdentity },
+    { label: "web", pid: state?.webPid, identity: state?.webIdentity },
+    { label: "worker", pid: state?.workerPid, identity: state?.workerIdentity },
+    { label: "supervisor", pid: health?.supervisorPid, identity: health?.supervisorIdentity },
+    { label: "owned worker", pid: health?.workerPid, identity: health?.workerIdentity },
+  ];
+  return candidates.flatMap((candidate) => {
+    const ownership = processOwnership(candidate.pid, candidate.identity, alive, identity);
+    if (ownership === "obsolete") return [];
+    return [`${candidate.label} pid: ${candidate.pid}${ownership === "live" ? "" : " (identity unavailable; unverifiable)"}`];
+  });
 }

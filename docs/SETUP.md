@@ -144,6 +144,12 @@ export してから起動してください。
 | `ADDROID_WEB_HOSTNAME` | 任意。Web UI バインドアドレス。既定: `127.0.0.1` |
 | `ADDROID_WEB_PORT` | 任意。Web UI ポート。既定: `3000` |
 | `ADDROID_USER_TIMEZONE` | 任意。標準 cron の実行時刻と、Meta ad account の `timezone_name` が無い場合の report 取得日を決める IANA timezone。未設定時は `TZ` / 実行環境 timezone / UTC の順にフォールバック |
+| `ADDROID_WORKER_MAX_RESTART_ATTEMPTS` | 任意。`--separate-worker` の連続失敗上限。既定: `5` |
+| `ADDROID_WORKER_RESTART_BACKOFF_BASE_MS` / `ADDROID_WORKER_RESTART_BACKOFF_MAX_MS` | 任意。worker 再起動の exponential backoff。既定: `1000` / `30000` ms |
+| `ADDROID_WORKER_READY_TIMEOUT_MS` / `ADDROID_WORKER_HEARTBEAT_TIMEOUT_MS` | 任意。worker runtime の ready / heartbeat timeout。既定: `180000` / `20000` ms |
+| `ADDROID_WORKER_EXHAUSTED_RETRY_MS` | 任意。再起動上限後の復旧プローブ間隔。既定: `300000` ms (5分)。復旧して安定稼働するまで `exhausted` を維持 |
+| `ADDROID_WORKER_SHUTDOWN_TIMEOUT_MS` | 任意。通常終了時の graceful drain の期限。既定: `35000` ms (pg-boss の既定30秒の drain + 後処理)。fatal DB error は別の短い5秒期限。期限切れは forced drain を記録し非ゼロ終了。CLI supervisor はこの期限より5秒長く待機 |
+| `ADDROID_WORKER_STABLE_RESET_MS` | 任意。連続失敗回数を 0 に戻すまでの安定稼働時間。既定: `60000` ms |
 
 `ENCRYPTION_KEY` の生成例:
 
@@ -245,6 +251,15 @@ npm run dev:worker   # 別ターミナルで pg-boss worker 単独起動
 
 `--separate-worker` モードで worker のみ別ホストに移すときの分離境界は
 この個別起動経路と同じです。
+同モードでは CLI が worker runtime を直接監督し、`~/.addroid/run/worker-health.json`
+へ generation・ready・heartbeat・再起動試行・最終失敗を atomic に記録します。
+上限到達後は web を残したまま worker を `exhausted` とし、`addroid status` と
+`addroid doctor` は非正常を返します。上限後も `ADDROID_WORKER_EXHAUSTED_RETRY_MS`
+(既定5分) ごとに単一の worker generation で復旧を試します。ready 後も
+`ADDROID_WORKER_STABLE_RESET_MS` の安定稼働を heartbeat で確認するまでは
+`exhausted` を維持し、確認後に `ready` と試行回数0へ戻ります。前世代の終了を
+確認できない場合は新世代を起動しません。通常停止では worker の drain 期限を
+待ち、`addroid down` も supervisor の終了猶予を確保してから強制停止します。
 
 ### 起動後の確認
 

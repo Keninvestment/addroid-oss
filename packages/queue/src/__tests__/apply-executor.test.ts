@@ -2207,3 +2207,58 @@ test("runExecuteApply: missing_external_id fail-closed records failingAction in 
   assert.equal(failedMeta.failingAction!.actionKind, "create_campaign");
   assert.equal(failedMeta.failingAction!.nodeKey, "fall");
 });
+
+for (const state of ["succeeded", "failed", "simulated", "cancelled"]) {
+  test(`runExecuteApply: redelivered ${state} job never replays Meta writes`, async () => {
+    const store = new FakeApplyJobStore();
+    store.setContext(APPLY_JOB_ID, ctx());
+    store.states.set(APPLY_JOB_ID, state);
+    const loader = new FakeAdsLoader(loadResult([
+      { accountKey: "primary", next: brand("active"), previous: null },
+    ]));
+    const executor = new FakeMetaActionExecutor();
+    const summary = await runExecuteApply({ applyJobId: APPLY_JOB_ID, workspaceId: WORKSPACE_ID, store, loader, executor });
+    assert.equal(summary.replaySkipped, true);
+    assert.equal(executor.calls.length, 0);
+    assert.equal(store.runningCalls.length, 0);
+    assert.equal(store.finishedCalls.length, 0, "terminal result must remain intact");
+    assert.equal(store.states.get(APPLY_JOB_ID), state);
+    assert.ok(store.executionLogs.some((log) => log.message.includes("execute_apply replay skipped")));
+  });
+}
+
+test("runExecuteApply: redelivered running job is quarantined for human review without Meta calls", async () => {
+  const store = new FakeApplyJobStore();
+  store.setContext(APPLY_JOB_ID, ctx());
+  store.states.set(APPLY_JOB_ID, "running");
+  const executor = new FakeMetaActionExecutor();
+  const summary = await runExecuteApply({
+    applyJobId: APPLY_JOB_ID, workspaceId: WORKSPACE_ID, store,
+    loader: new FakeAdsLoader(loadResult([])), executor,
+  });
+  assert.equal(executor.calls.length, 0);
+  assert.equal(summary.state, "failed");
+  assert.equal(store.states.get(APPLY_JOB_ID), "failed");
+  assert.equal(summary.replaySkipped, undefined, "quarantine must still surface through the failure path");
+  assert.match(store.finishedCalls[0]!.errorMessage!, /uncertain_previous_attempt/);
+  assert.deepEqual(store.finishedCalls[0]!.result, { reason: "uncertain_previous_attempt", needsReview: true });
+  assert.ok(store.executionLogs.some((log) => log.level === "error" && log.message.includes("execute_apply replay skipped")));
+});
+
+test("runExecuteApply: concurrent queued deliveries atomically allow only one Meta execution", async () => {
+  const store = new FakeApplyJobStore();
+  store.setContext(APPLY_JOB_ID, ctx());
+  const executor = new FakeMetaActionExecutor();
+  const options = {
+    applyJobId: APPLY_JOB_ID, workspaceId: WORKSPACE_ID, store, executor,
+    loader: new FakeAdsLoader(loadResult([
+      { accountKey: "primary", next: brand("active"), previous: null },
+    ])),
+  };
+  const summaries = await Promise.all([runExecuteApply(options), runExecuteApply(options)]);
+  assert.equal(summaries.filter((summary) => summary.replaySkipped).length, 1);
+  assert.equal(executor.calls.length, 1);
+  assert.equal(store.runningCalls.length, 1);
+  assert.equal(store.finishedCalls.length, 1, "losing claim must not quarantine the winning attempt");
+  assert.equal(store.states.get(APPLY_JOB_ID), "succeeded");
+});

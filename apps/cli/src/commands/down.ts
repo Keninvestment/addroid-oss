@@ -6,13 +6,39 @@ import {
   clearUpState,
   isProcessAlive,
   readUpState,
+  readProcessIdentity,
   terminateProcess,
 } from "../lib/processes.js";
+import {
+  discardObsoleteWorkerOwnership,
+  readWorkerHealth,
+  writeWorkerHealthAtomic,
+  DEFAULT_WORKER_SUPERVISOR_CONFIG,
+} from "../lib/worker-supervisor.js";
 
-const GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const FORCE_STOP_TIMEOUT_MS = 2_000;
 
-export async function runDown(args: string[]): Promise<number> {
+interface DownDependencies {
+  isProcessAlive: typeof isProcessAlive;
+  terminateProcess: (pid: number) => boolean;
+  forceKill: (pid: number) => void;
+  readProcessIdentity?: typeof readProcessIdentity;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  readUpState?: typeof readUpState;
+  readWorkerHealth?: typeof readWorkerHealth;
+  writeWorkerHealth?: typeof writeWorkerHealthAtomic;
+  clearUpState?: typeof clearUpState;
+}
+
+export async function runDown(
+  args: string[],
+  deps: DownDependencies = {
+    isProcessAlive,
+    terminateProcess,
+    forceKill: (pid) => { process.kill(pid, "SIGKILL"); },
+  }
+): Promise<number> {
   if (args.includes("--help") || args.includes("-h")) {
     process.stdout.write(
       [
@@ -26,7 +52,20 @@ export async function runDown(args: string[]): Promise<number> {
     return 0;
   }
   const paths = resolveAddroidPaths();
-  const state = await readUpState(paths);
+  let state = await (deps.readUpState ?? readUpState)(paths);
+  const recordedHealth = !state || state.mode === "separate-worker"
+    ? await (deps.readWorkerHealth ?? readWorkerHealth)(paths) : null;
+  const health = await discardObsoleteWorkerOwnership(
+    recordedHealth, paths, deps.isProcessAlive, deps.readProcessIdentity ?? readProcessIdentity,
+    deps.writeWorkerHealth ?? writeWorkerHealthAtomic
+  );
+  if (!state && health && (health.supervisorPid || health.workerPid)) {
+    state = {
+      parentPid: health.supervisorPid, parentIdentity: health.supervisorIdentity,
+      startedAt: health.startedAt, cwd: "", webUrl: "", mode: "separate-worker",
+      shutdownTimeoutMs: health.shutdownTimeoutMs,
+    };
+  }
   if (!state) {
     process.stdout.write(
       `[addroid down] pid file が見つかりません (${paths.pidFile})。起動中のプロセスはありません。\n`
@@ -34,31 +73,56 @@ export async function runDown(args: string[]): Promise<number> {
     return 0;
   }
 
-  // shared モードでは web/worker は parent 内で動くので個別の pid は無い。
-  // separate-worker モードでも web は parent 内、worker のみ child。
-  const targets: Array<{ label: string; pid: number | undefined }> = [];
-  if (state.mode === "separate-worker") {
-    if (state.webPid && state.webPid !== state.parentPid) {
-      targets.push({ label: "web", pid: state.webPid });
-    }
-    if (state.workerPid) {
-      targets.push({ label: "worker", pid: state.workerPid });
-    }
+  // Pruning an obsolete supervisor must not break its recorded worker link.
+  const owner = recordedHealth?.supervisorPid === state.parentPid &&
+    recordedHealth.supervisorIdentity === state.parentIdentity;
+  // An explicitly cleared owner can also come from a previous up preflight;
+  // the worker's own identity must still be verified before any signal.
+  const clearedOwner = health?.supervisorPid === 0 && health.supervisorIdentity === null;
+  const ownedHealth = owner || clearedOwner || (health?.supervisorPid === state.parentPid &&
+    health.supervisorIdentity === state.parentIdentity) ? health : null;
+  const targets: Array<{ label: string; pid: number; identity: string | null | undefined }> = [];
+  if (state.webPid && state.webPid !== state.parentPid) {
+    targets.push({ label: "web", pid: state.webPid, identity: state.webIdentity });
   }
-  targets.push({ label: "addroid up parent", pid: state.parentPid });
+  // Ownership survives exhausted/backoff while a recovery probe or retiring child lives.
+  if (ownedHealth?.workerPid) {
+    targets.push({ label: "worker", pid: ownedHealth.workerPid, identity: ownedHealth.workerIdentity });
+  } else if (health?.workerPid) {
+    // A broken owner link is not authority to signal or discard a live worker.
+    targets.push({ label: "unverified health worker", pid: health.workerPid, identity: null });
+  }
+  if (!ownedHealth && state.workerPid && state.workerPid !== health?.workerPid) {
+    targets.push({ label: "worker", pid: state.workerPid, identity: state.workerIdentity });
+  }
+  targets.push({ label: "addroid up parent", pid: state.parentPid, identity: state.parentIdentity });
+  const identityLookup = deps.readProcessIdentity ?? readProcessIdentity;
+  const verified = (target: typeof targets[number]): boolean => {
+    if (target.identity && identityLookup(target.pid) === target.identity) return true;
+    process.stderr.write(`[addroid down] ${target.label} (pid ${target.pid}) identity mismatch or unverifiable; not signalling.\n`);
+    return false;
+  };
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? delay;
+  const persistedTimeout = ownedHealth?.shutdownTimeoutMs ?? state.shutdownTimeoutMs;
+  const shutdownTimeoutMs = typeof persistedTimeout === "number" && Number.isFinite(persistedTimeout) && persistedTimeout > 0
+    ? persistedTimeout : DEFAULT_WORKER_SUPERVISOR_CONFIG.shutdownTimeoutMs;
 
   let actedOn = 0;
   const seenPids = new Set<number>();
+  const signalledPids = new Set<number>();
   for (const t of targets) {
     if (!t.pid) continue;
     if (seenPids.has(t.pid)) continue;
     seenPids.add(t.pid);
-    if (!isProcessAlive(t.pid)) {
+    if (!deps.isProcessAlive(t.pid)) {
       process.stdout.write(`[addroid down] ${t.label} (pid ${t.pid}) は既に停止済み。\n`);
       continue;
     }
-    if (terminateProcess(t.pid)) {
+    if (!verified(t)) continue;
+    if (deps.terminateProcess(t.pid)) {
       actedOn += 1;
+      signalledPids.add(t.pid);
       process.stdout.write(`[addroid down] ${t.label} (pid ${t.pid}) に SIGTERM を送信。\n`);
     } else {
       process.stderr.write(
@@ -67,13 +131,16 @@ export async function runDown(args: string[]): Promise<number> {
     }
   }
 
-  if (seenPids.size > 0) {
-    await waitForTargetsToStop(seenPids, GRACEFUL_STOP_TIMEOUT_MS);
-    const stillAlive = [...seenPids].filter((pid) => isProcessAlive(pid));
+  if (signalledPids.size > 0) {
+    // Allow the supervisor to finish the worker drain before forcing the parent.
+    await waitForTargetsToStop(signalledPids, shutdownTimeoutMs + 2_000, deps.isProcessAlive, now, sleep);
+    const stillAlive = [...signalledPids].filter((pid) => deps.isProcessAlive(pid));
     for (const pid of stillAlive) {
       if (pid === process.pid) continue;
+      const target = targets.find((t) => t.pid === pid)!;
+      if (!verified(target)) continue;
       try {
-        process.kill(pid, "SIGKILL");
+        deps.forceKill(pid);
         process.stdout.write(
           `[addroid down] pid ${pid} が終了しないため SIGKILL を送信。\n`
         );
@@ -82,14 +149,14 @@ export async function runDown(args: string[]): Promise<number> {
       }
     }
     if (stillAlive.length > 0) {
-      await waitForTargetsToStop(new Set(stillAlive), FORCE_STOP_TIMEOUT_MS);
+      await waitForTargetsToStop(new Set(stillAlive), FORCE_STOP_TIMEOUT_MS, deps.isProcessAlive, now, sleep);
     }
   }
 
   // 親プロセスが上 (= addroid up) で稼働中なら、shutdown ハンドラが pid file を消すはず。
   // 親もすでに死んでいたケースのために pid file を念のため掃除する。
-  if (![...seenPids].some((pid) => isProcessAlive(pid))) {
-    await clearUpState(paths);
+  if (![...seenPids].some((pid) => deps.isProcessAlive(pid))) {
+    await (deps.clearUpState ?? clearUpState)(paths);
   }
 
   process.stdout.write(
@@ -100,11 +167,14 @@ export async function runDown(args: string[]): Promise<number> {
 
 async function waitForTargetsToStop(
   pids: Set<number>,
-  timeoutMs: number
+  timeoutMs: number,
+  alive: typeof isProcessAlive,
+  now: () => number,
+  sleep: (ms: number) => Promise<void>
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (![...pids].some((pid) => isProcessAlive(pid))) return;
-    await delay(100);
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (![...pids].some((pid) => alive(pid))) return;
+    await sleep(100);
   }
 }
